@@ -19,6 +19,7 @@ from server.worktree_tracker import WorktreeTracker, WorktreeMapping
 if TYPE_CHECKING:
     from server.ws_bridge import WsBridge
     from server.session_store import SessionStore
+    from server.webrtc import WebRTCManager
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ def create_routes(
     ws_bridge: WsBridge,
     session_store: SessionStore,
     worktree_tracker: WorktreeTracker,
+    webrtc_manager: WebRTCManager | None = None,
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
 
@@ -189,6 +191,8 @@ def create_routes(
     async def delete_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
         await launcher.kill(sid)
+        if webrtc_manager:
+            await webrtc_manager.close_connection(sid)
         worktree_result = _cleanup_worktree(sid, worktree_tracker, force=True)
         launcher.remove_session(sid)
         await ws_bridge.close_session(sid)
@@ -202,6 +206,8 @@ def create_routes(
         except Exception:
             body = {}
         await launcher.kill(sid)
+        if webrtc_manager:
+            await webrtc_manager.close_connection(sid)
         worktree_result = _cleanup_worktree(sid, worktree_tracker, force=body.get("force"))
         launcher.set_archived(sid, True)
         session_store.set_archived(sid, True)
@@ -490,6 +496,33 @@ def create_routes(
     async def usage_limits(request: web.Request) -> web.Response:
         limits = await get_usage_limits()
         return web.json_response(limits)
+
+    # ── WebRTC ────────────────────────────────────────────────────────────
+
+    @routes.post("/api/webrtc/offer")
+    async def webrtc_offer(request: web.Request) -> web.Response:
+        if webrtc_manager is None:
+            return web.json_response({"error": "WebRTC not available"}, status=501)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        session_id = body.get("sessionId")
+        sdp = body.get("sdp")
+        sdp_type = body.get("type", "offer")
+
+        if not session_id or not sdp:
+            return web.json_response(
+                {"error": "sessionId and sdp required"}, status=400
+            )
+
+        try:
+            answer = await webrtc_manager.handle_offer(session_id, sdp, sdp_type)
+            return web.json_response(answer)
+        except Exception as e:
+            logger.error("[webrtc] Failed to handle offer: %s", e)
+            return web.json_response({"error": str(e)}, status=500)
 
     return routes
 

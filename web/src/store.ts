@@ -52,6 +52,11 @@ interface AppState {
   editorUrl: Map<string, string>;
   editorLoading: Map<string, boolean>;
 
+  // WebRTC audio state per session
+  audioEnabled: Map<string, boolean>;
+  isRecording: Map<string, boolean>;
+  webrtcStatus: Map<string, string | null>;
+
   // Actions
   setDarkMode: (v: boolean) => void;
   toggleDarkMode: () => void;
@@ -106,6 +111,11 @@ interface AppState {
   setEditorOpenFile: (sessionId: string, filePath: string | null) => void;
   setEditorUrl: (sessionId: string, url: string) => void;
   setEditorLoading: (sessionId: string, loading: boolean) => void;
+
+  // WebRTC audio actions
+  setAudioEnabled: (sessionId: string, enabled: boolean) => void;
+  setIsRecording: (sessionId: string, recording: boolean) => void;
+  setWebRTCStatus: (sessionId: string, status: string | null) => void;
 
   reset: () => void;
 }
@@ -164,6 +174,9 @@ export const useStore = create<AppState>((set) => ({
   editorOpenFile: new Map(),
   editorUrl: new Map(),
   editorLoading: new Map(),
+  audioEnabled: new Map(),
+  isRecording: new Map(),
+  webrtcStatus: new Map(),
 
   setDarkMode: (v) => {
     localStorage.setItem("cc-dark-mode", String(v));
@@ -254,6 +267,12 @@ export const useStore = create<AppState>((set) => ({
       editorUrl.delete(sessionId);
       const editorLoading = new Map(s.editorLoading);
       editorLoading.delete(sessionId);
+      const audioEnabled = new Map(s.audioEnabled);
+      audioEnabled.delete(sessionId);
+      const isRecording = new Map(s.isRecording);
+      isRecording.delete(sessionId);
+      const webrtcStatus = new Map(s.webrtcStatus);
+      webrtcStatus.delete(sessionId);
       localStorage.setItem("cc-session-names", JSON.stringify(Array.from(sessionNames.entries())));
       if (s.currentSessionId === sessionId) {
         localStorage.removeItem("cc-current-session");
@@ -276,6 +295,9 @@ export const useStore = create<AppState>((set) => ({
         editorOpenFile,
         editorUrl,
         editorLoading,
+        audioEnabled,
+        isRecording,
+        webrtcStatus,
         sdkSessions: s.sdkSessions.filter((sdk) => sdk.sessionId !== sessionId),
         currentSessionId: s.currentSessionId === sessionId ? null : s.currentSessionId,
       };
@@ -479,6 +501,31 @@ export const useStore = create<AppState>((set) => ({
       return { editorLoading };
     }),
 
+  setAudioEnabled: (sessionId, enabled) =>
+    set((s) => {
+      const audioEnabled = new Map(s.audioEnabled);
+      audioEnabled.set(sessionId, enabled);
+      return { audioEnabled };
+    }),
+
+  setIsRecording: (sessionId, recording) =>
+    set((s) => {
+      const isRecording = new Map(s.isRecording);
+      isRecording.set(sessionId, recording);
+      return { isRecording };
+    }),
+
+  setWebRTCStatus: (sessionId, status) =>
+    set((s) => {
+      const webrtcStatus = new Map(s.webrtcStatus);
+      if (status === null) {
+        webrtcStatus.delete(sessionId);
+      } else {
+        webrtcStatus.set(sessionId, status);
+      }
+      return { webrtcStatus };
+    }),
+
   reset: () =>
     set({
       sessions: new Map(),
@@ -501,5 +548,8 @@ export const useStore = create<AppState>((set) => ({
       editorOpenFile: new Map(),
       editorUrl: new Map(),
       editorLoading: new Map(),
+      audioEnabled: new Map(),
+      isRecording: new Map(),
+      webrtcStatus: new Map(),
     }),
 }));

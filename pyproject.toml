@@ -2,9 +2,11 @@
 name = "vibr8"
 version = "0.1.0"
 description = "Web UI for launching and interacting with Claude Code agents"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "aiohttp>=3.9",
+    "aiortc>=1.9",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]

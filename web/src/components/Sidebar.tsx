@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
 import { connectSession, disconnectSession } from "../ws.js";
+import { stopWebRTC } from "../webrtc.js";
 import { EnvManager } from "./EnvManager.js";
 
 export function Sidebar() {
@@ -110,6 +111,7 @@ export function Sidebar() {
   const handleDeleteSession = useCallback(async (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
     try {
+      stopWebRTC(sessionId);
       disconnectSession(sessionId);
       await api.deleteSession(sessionId);
     } catch {
@@ -133,6 +135,7 @@ export function Sidebar() {
 
   const doArchive = useCallback(async (sessionId: string, force?: boolean) => {
     try {
+      stopWebRTC(sessionId);
       disconnectSession(sessionId);
       await api.archiveSession(sessionId, force ? { force: true } : undefined);
     } catch {

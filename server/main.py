@@ -20,11 +20,27 @@ from server.ws_bridge import WsBridge
 from server.auto_namer import generate_session_title, AutoNamerOptions
 from server import session_names
 from server.routes import create_routes
+from server.webrtc import WebRTCManager
+
+class _AioIceFilter(logging.Filter):
+    """Suppress noisy aioice STUN retry errors on closed transports."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "Transaction.__retry" in msg or ("sendto" in msg and "aioice" in msg):
+            return False
+        if record.exc_info and record.exc_info[1]:
+            exc_str = str(record.exc_info[1])
+            if "sendto" in exc_str or "call_exception_handler" in exc_str:
+                return False
+        return True
+
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+logging.getLogger("asyncio").addFilter(_AioIceFilter())
 logger = logging.getLogger(__name__)
 
 # Enable experimental agent teams (matches TS version)
@@ -97,6 +113,7 @@ def create_app() -> web.Application:
     ws_bridge = WsBridge()
     launcher = CliLauncher(PORT)
     worktree_tracker = WorktreeTracker()
+    webrtc_manager = WebRTCManager()
 
     # Wire up stores
     ws_bridge.set_store(session_store)
@@ -179,7 +196,7 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/browser/{session_id}", handle_browser_ws)
 
     # REST API
-    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker)
+    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager)
     app.router.add_routes(api_routes)
 
     # Production static file serving
@@ -199,10 +216,26 @@ def create_app() -> web.Application:
     app["launcher"] = launcher
     app["session_store"] = session_store
     app["worktree_tracker"] = worktree_tracker
+    app["webrtc_manager"] = webrtc_manager
 
     # ── Startup / Shutdown hooks ──────────────────────────────────────────
 
     async def on_startup(app: web.Application) -> None:
+        # Suppress noisy aioice STUN retry errors on closed transports.
+        loop = asyncio.get_event_loop()
+
+        def _ice_exception_handler(
+            loop: asyncio.AbstractEventLoop, context: dict
+        ) -> None:
+            exc = context.get("exception")
+            if exc and isinstance(exc, AttributeError):
+                s = str(exc)
+                if "sendto" in s or "call_exception_handler" in s:
+                    return
+            loop.default_exception_handler(context)
+
+        loop.set_exception_handler(_ice_exception_handler)
+
         # Reconnection watchdog: give restored CLI processes time to reconnect
         starting = launcher.get_starting_sessions()
         if starting:
@@ -226,6 +259,11 @@ def create_app() -> web.Application:
             asyncio.ensure_future(_watchdog())
 
     app.on_startup.append(on_startup)
+
+    async def on_shutdown(app: web.Application) -> None:
+        await webrtc_manager.close_all()
+
+    app.on_shutdown.append(on_shutdown)
 
     return app
 

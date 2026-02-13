@@ -266,4 +266,12 @@ export const api = {
 
   // Usage limits
   getUsageLimits: () => get<UsageLimits>("/usage-limits"),
+
+  // WebRTC signaling
+  webrtcOffer: (sessionId: string, offer: { sdp: string; type: string }) =>
+    post<{ sdp: string; type: string }>("/webrtc/offer", {
+      sessionId,
+      sdp: offer.sdp,
+      type: offer.type,
+    }),
 };

@@ -1,7 +1,10 @@
+import { useState } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
+import { startWebRTC, stopWebRTC } from "../webrtc.js";
 
 export function TopBar() {
+  const [audioError, setAudioError] = useState<string | null>(null);
   const currentSessionId = useStore((s) => s.currentSessionId);
   const cliConnected = useStore((s) => s.cliConnected);
   const sessionStatus = useStore((s) => s.sessionStatus);
@@ -11,12 +14,35 @@ export function TopBar() {
   const setTaskPanelOpen = useStore((s) => s.setTaskPanelOpen);
   const activeTab = useStore((s) => s.activeTab);
   const setActiveTab = useStore((s) => s.setActiveTab);
+  const audioEnabled = useStore((s) => s.audioEnabled);
+  const isRecording = useStore((s) => s.isRecording);
+  const webrtcStatus = useStore((s) => s.webrtcStatus);
 
   const isConnected = currentSessionId ? (cliConnected.get(currentSessionId) ?? false) : false;
   const status = currentSessionId ? (sessionStatus.get(currentSessionId) ?? null) : null;
+  const isAudioEnabled = currentSessionId ? (audioEnabled.get(currentSessionId) ?? false) : false;
+  const isRecordingNow = currentSessionId ? (isRecording.get(currentSessionId) ?? false) : false;
+  const rtcStatus = currentSessionId ? (webrtcStatus.get(currentSessionId) ?? null) : null;
+
+  async function handleAudioToggle() {
+    if (!currentSessionId) return;
+    setAudioError(null);
+    if (isAudioEnabled) {
+      stopWebRTC(currentSessionId);
+    } else {
+      try {
+        await startWebRTC(currentSessionId);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[webrtc] Failed to start:", msg);
+        setAudioError(msg);
+        setTimeout(() => setAudioError(null), 5000);
+      }
+    }
+  }
 
   return (
-    <header className="shrink-0 flex items-center justify-between px-2 sm:px-4 py-2 sm:py-2.5 bg-cc-card border-b border-cc-border">
+    <header className="relative shrink-0 flex items-center justify-between px-2 sm:px-4 py-2 sm:py-2.5 bg-cc-card border-b border-cc-border">
       <div className="flex items-center gap-3">
         {/* Sidebar toggle */}
         <button
@@ -88,6 +114,43 @@ export function TopBar() {
             </button>
           </div>
 
+          {/* Audio toggle */}
+          <button
+            onClick={handleAudioToggle}
+            disabled={!isConnected}
+            className={`flex items-center justify-center w-7 h-7 rounded-lg transition-colors ${
+              !isConnected
+                ? "text-cc-muted opacity-30 cursor-not-allowed"
+                : isAudioEnabled
+                ? isRecordingNow
+                  ? "text-cc-error bg-cc-error/10 animate-pulse"
+                  : "text-cc-success bg-cc-success/10 hover:bg-cc-success/20 cursor-pointer"
+                : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+            }`}
+            title={
+              !isConnected
+                ? "Connect to enable audio"
+                : isAudioEnabled
+                ? `Audio on${rtcStatus ? ` (${rtcStatus})` : ""} — click to disable`
+                : "Enable audio"
+            }
+          >
+            <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+              {isAudioEnabled ? (
+                <>
+                  <path d="M7 4a3 3 0 016 0v4a3 3 0 01-6 0V4z" />
+                  <path d="M5.5 9.643a.75.75 0 00-1.5 0V10c0 3.06 2.29 5.585 5.25 5.954V17.5h-1.5a.75.75 0 000 1.5h4.5a.75.75 0 000-1.5h-1.5v-1.546A6.001 6.001 0 0016 10v-.357a.75.75 0 00-1.5 0V10a4.5 4.5 0 01-9 0v-.357z" />
+                </>
+              ) : (
+                <>
+                  <path d="M7 4a3 3 0 016 0v4a3 3 0 01-6 0V4z" opacity="0.5" />
+                  <path d="M5.5 9.643a.75.75 0 00-1.5 0V10c0 3.06 2.29 5.585 5.25 5.954V17.5h-1.5a.75.75 0 000 1.5h4.5a.75.75 0 000-1.5h-1.5v-1.546A6.001 6.001 0 0016 10v-.357a.75.75 0 00-1.5 0V10a4.5 4.5 0 01-9 0v-.357z" opacity="0.5" />
+                  <path d="M3.707 2.293a1 1 0 00-1.414 1.414l14 14a1 1 0 001.414-1.414l-14-14z" />
+                </>
+              )}
+            </svg>
+          </button>
+
           <button
             onClick={() => setTaskPanelOpen(!taskPanelOpen)}
             className={`flex items-center justify-center w-7 h-7 rounded-lg transition-colors cursor-pointer ${
@@ -102,6 +165,11 @@ export function TopBar() {
             </svg>
           </button>
         </div>
+      )}
+      {audioError && (
+        <span className="absolute right-4 top-full mt-1 text-[11px] text-cc-error bg-cc-card border border-cc-error/30 rounded-md px-2 py-1 shadow-lg z-50 max-w-xs truncate">
+          {audioError}
+        </span>
       )}
     </header>
   );

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useStore } from "../store.js";
 import { sendToSession } from "../ws.js";
 import { api } from "../api.js";
+import { setMicEnabled } from "../webrtc.js";
 
 let idCounter = 0;
 
@@ -44,6 +45,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const isConnected = cliConnected.get(sessionId) ?? false;
   const currentMode = sessionData?.permissionMode || "acceptEdits";
   const isPlan = currentMode === "plan";
+  const isAudioEnabled = useStore((s) => s.audioEnabled.get(sessionId) ?? false);
+  const isRecordingAudio = useStore((s) => s.isRecording.get(sessionId) ?? false);
 
   // Build command list from session data
   const allCommands = useMemo<CommandItem[]>(() => {
@@ -423,6 +426,23 @@ export function Composer({ sessionId }: { sessionId: string }) {
                   <path d="M2 11l3-3 2 2 3-4 4 5" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
+
+              {isAudioEnabled && (
+                <button
+                  onClick={() => setMicEnabled(sessionId, !isRecordingAudio)}
+                  className={`flex items-center justify-center w-8 h-8 rounded-full transition-colors cursor-pointer ${
+                    isRecordingAudio
+                      ? "bg-cc-error text-white animate-pulse"
+                      : "bg-cc-hover text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
+                  }`}
+                  title={isRecordingAudio ? "Stop recording" : "Push to talk"}
+                >
+                  <svg viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                    <path d="M7 4a3 3 0 016 0v4a3 3 0 01-6 0V4z" />
+                    <path d="M5.5 9.643a.75.75 0 00-1.5 0V10c0 3.06 2.29 5.585 5.25 5.954V17.5h-1.5a.75.75 0 000 1.5h4.5a.75.75 0 000-1.5h-1.5v-1.546A6.001 6.001 0 0016 10v-.357a.75.75 0 00-1.5 0V10a4.5 4.5 0 01-9 0v-.357z" />
+                  </svg>
+                </button>
+              )}
 
               {isRunning ? (
                 <button
