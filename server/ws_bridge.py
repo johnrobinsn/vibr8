@@ -1,0 +1,728 @@
+"""Core WebSocket message router — bridges CLI ↔ browser connections."""
+
+from __future__ import annotations
+
+import json
+import logging
+import subprocess
+import uuid
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable, Awaitable
+
+import aiohttp
+from aiohttp import web
+
+if TYPE_CHECKING:
+    from server.session_store import SessionStore, PersistedSession
+    from server.codex_adapter import CodexAdapter
+
+logger = logging.getLogger(__name__)
+
+# ── Session state ────────────────────────────────────────────────────────────
+
+BackendType = str  # "claude" | "codex"
+
+
+def _make_default_state(session_id: str, backend_type: str = "claude") -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "backend_type": backend_type,
+        "model": "",
+        "cwd": "",
+        "tools": [],
+        "permissionMode": "default",
+        "claude_code_version": "",
+        "mcp_servers": [],
+        "agents": [],
+        "slash_commands": [],
+        "skills": [],
+        "total_cost_usd": 0,
+        "num_turns": 0,
+        "context_used_percent": 0,
+        "is_compacting": False,
+        "git_branch": "",
+        "is_worktree": False,
+        "repo_root": "",
+        "git_ahead": 0,
+        "git_behind": 0,
+        "total_lines_added": 0,
+        "total_lines_removed": 0,
+    }
+
+
+@dataclass
+class Session:
+    id: str
+    backend_type: str = "claude"
+    cli_socket: web.WebSocketResponse | None = None
+    codex_adapter: Any = None  # CodexAdapter
+    browser_sockets: set[web.WebSocketResponse] = field(default_factory=set)
+    state: dict[str, Any] = field(default_factory=dict)
+    pending_permissions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    message_history: list[dict[str, Any]] = field(default_factory=list)
+    pending_messages: list[str] = field(default_factory=list)
+
+
+# ── Bridge ───────────────────────────────────────────────────────────────────
+
+class WsBridge:
+    def __init__(self) -> None:
+        self._sessions: dict[str, Session] = {}
+        self._store: SessionStore | None = None
+        self._on_cli_session_id: Callable[[str, str], None] | None = None
+        self._on_cli_relaunch_needed: Callable[[str], None] | None = None
+        self._on_first_turn_completed: Callable[[str, str], None] | None = None
+        self._auto_naming_attempted: set[str] = set()
+
+    # ── Callback registration ────────────────────────────────────────────
+
+    def on_cli_session_id_received(self, cb: Callable[[str, str], None]) -> None:
+        self._on_cli_session_id = cb
+
+    def on_cli_relaunch_needed_callback(self, cb: Callable[[str], None]) -> None:
+        self._on_cli_relaunch_needed = cb
+
+    def on_first_turn_completed_callback(self, cb: Callable[[str, str], None]) -> None:
+        self._on_first_turn_completed = cb
+
+    # ── Store ────────────────────────────────────────────────────────────
+
+    def set_store(self, store: SessionStore) -> None:
+        self._store = store
+
+    def restore_from_disk(self) -> int:
+        if not self._store:
+            return 0
+        persisted = self._store.load_all()
+        count = 0
+        for p in persisted:
+            sid = p.id
+            if sid in self._sessions:
+                continue
+            state = p.state if p.state else _make_default_state(sid)
+            session = Session(
+                id=sid,
+                backend_type=state.get("backend_type", "claude"),
+                state=state,
+                pending_permissions=dict(p.pendingPermissions) if p.pendingPermissions else {},
+                message_history=list(p.messageHistory) if p.messageHistory else [],
+                pending_messages=list(p.pendingMessages) if p.pendingMessages else [],
+            )
+            session.state["backend_type"] = session.backend_type
+            self._sessions[sid] = session
+            if session.state.get("num_turns", 0) > 0:
+                self._auto_naming_attempted.add(sid)
+            count += 1
+        if count > 0:
+            logger.info(f"[ws-bridge] Restored {count} session(s) from disk")
+        return count
+
+    def _persist_session(self, session: Session) -> None:
+        if not self._store:
+            return
+        from server.session_store import PersistedSession
+        self._store.save(PersistedSession(
+            id=session.id,
+            state=session.state,
+            messageHistory=session.message_history,
+            pendingMessages=session.pending_messages,
+            pendingPermissions=list(session.pending_permissions.items()),
+        ))
+
+    # ── Session management ───────────────────────────────────────────────
+
+    def get_or_create_session(self, session_id: str, backend_type: str = "claude") -> Session:
+        session = self._sessions.get(session_id)
+        if not session:
+            session = Session(
+                id=session_id,
+                backend_type=backend_type,
+                state=_make_default_state(session_id, backend_type),
+            )
+            self._sessions[session_id] = session
+        session.backend_type = backend_type
+        session.state["backend_type"] = backend_type
+        return session
+
+    def get_session(self, session_id: str) -> Session | None:
+        return self._sessions.get(session_id)
+
+    def get_all_sessions(self) -> list[dict[str, Any]]:
+        return [s.state for s in self._sessions.values()]
+
+    def is_cli_connected(self, session_id: str) -> bool:
+        session = self._sessions.get(session_id)
+        if not session:
+            return False
+        if session.backend_type == "codex":
+            return session.codex_adapter is not None and session.codex_adapter.is_connected()
+        return session.cli_socket is not None
+
+    def remove_session(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+        self._auto_naming_attempted.discard(session_id)
+        if self._store:
+            self._store.remove(session_id)
+
+    async def close_session(self, session_id: str) -> None:
+        session = self._sessions.get(session_id)
+        if not session:
+            return
+        if session.cli_socket:
+            await session.cli_socket.close()
+            session.cli_socket = None
+        if session.codex_adapter:
+            await session.codex_adapter.disconnect()
+            session.codex_adapter = None
+        for ws in list(session.browser_sockets):
+            await ws.close()
+        session.browser_sockets.clear()
+        self._sessions.pop(session_id, None)
+        self._auto_naming_attempted.discard(session_id)
+        if self._store:
+            self._store.remove(session_id)
+
+    # ── Codex adapter attachment ─────────────────────────────────────────
+
+    def attach_codex_adapter(self, session_id: str, adapter: Any) -> None:
+        session = self.get_or_create_session(session_id, "codex")
+        session.backend_type = "codex"
+        session.state["backend_type"] = "codex"
+        session.codex_adapter = adapter
+
+        async def on_browser_msg(msg: dict[str, Any]) -> None:
+            if msg.get("type") == "session_init":
+                session.state = {**session.state, **msg.get("session", {}), "backend_type": "codex"}
+                self._persist_session(session)
+            elif msg.get("type") == "session_update":
+                session.state = {**session.state, **msg.get("session", {}), "backend_type": "codex"}
+                self._persist_session(session)
+            elif msg.get("type") == "status_change":
+                session.state["is_compacting"] = msg.get("status") == "compacting"
+                self._persist_session(session)
+
+            if msg.get("type") in ("assistant", "result"):
+                session.message_history.append(msg)
+                self._persist_session(session)
+
+            if msg.get("type") == "permission_request":
+                req = msg.get("request", {})
+                session.pending_permissions[req.get("request_id", "")] = req
+                self._persist_session(session)
+
+            await self._broadcast_to_browsers(session, msg)
+
+            # Auto-naming
+            if (
+                msg.get("type") == "result"
+                and not msg.get("data", {}).get("is_error")
+                and self._on_first_turn_completed
+                and session.id not in self._auto_naming_attempted
+            ):
+                self._auto_naming_attempted.add(session.id)
+                first = next((m for m in session.message_history if m.get("type") == "user_message"), None)
+                if first:
+                    self._on_first_turn_completed(session.id, first.get("content", ""))
+
+        adapter.on_browser_message(on_browser_msg)
+
+        def on_meta(meta: dict[str, Any]) -> None:
+            if meta.get("cliSessionId") and self._on_cli_session_id:
+                self._on_cli_session_id(session.id, meta["cliSessionId"])
+            if meta.get("model"):
+                session.state["model"] = meta["model"]
+            if meta.get("cwd"):
+                session.state["cwd"] = meta["cwd"]
+            session.state["backend_type"] = "codex"
+            self._persist_session(session)
+
+        adapter.on_session_meta(on_meta)
+
+        async def on_disconnect() -> None:
+            for req_id in list(session.pending_permissions):
+                await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
+            session.pending_permissions.clear()
+            session.codex_adapter = None
+            self._persist_session(session)
+            logger.info(f"[ws-bridge] Codex adapter disconnected for session {session_id}")
+            await self._broadcast_to_browsers(session, {"type": "cli_disconnected"})
+
+        adapter.on_disconnect(on_disconnect)
+
+        # Flush queued messages
+        if session.pending_messages:
+            logger.info(f"[ws-bridge] Flushing {len(session.pending_messages)} queued message(s) to Codex adapter for session {session_id}")
+            queued = session.pending_messages[:]
+            session.pending_messages.clear()
+            for raw in queued:
+                try:
+                    msg = json.loads(raw)
+                    adapter.send_browser_message(msg)
+                except Exception:
+                    logger.warning(f"[ws-bridge] Failed to parse queued message for Codex")
+
+        # Notify browsers
+        import asyncio
+        asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
+        logger.info(f"[ws-bridge] Codex adapter attached for session {session_id}")
+
+    # ── CLI WebSocket handlers ───────────────────────────────────────────
+
+    def handle_cli_open(self, ws: web.WebSocketResponse, session_id: str) -> None:
+        session = self.get_or_create_session(session_id)
+        session.cli_socket = ws
+        logger.info(f"[ws-bridge] CLI connected for session {session_id}")
+        import asyncio
+        asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
+
+        # Flush queued messages
+        if session.pending_messages:
+            logger.info(f"[ws-bridge] Flushing {len(session.pending_messages)} queued message(s) for session {session_id}")
+            for ndjson in session.pending_messages:
+                self._send_to_cli(session, ndjson)
+            session.pending_messages.clear()
+
+    async def handle_cli_message(self, ws: web.WebSocketResponse, raw: str) -> None:
+        session_id = None
+        for sid, s in self._sessions.items():
+            if s.cli_socket is ws:
+                session_id = sid
+                break
+        if not session_id:
+            return
+        session = self._sessions.get(session_id)
+        if not session:
+            return
+
+        # NDJSON: split on newlines, parse each line
+        for line in raw.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning(f"[ws-bridge] Failed to parse CLI message: {line[:200]}")
+                continue
+            await self._route_cli_message(session, msg)
+
+    async def handle_cli_close(self, ws: web.WebSocketResponse) -> None:
+        session_id = None
+        for sid, s in self._sessions.items():
+            if s.cli_socket is ws:
+                session_id = sid
+                break
+        if not session_id:
+            return
+        session = self._sessions.get(session_id)
+        if not session:
+            return
+
+        session.cli_socket = None
+        logger.info(f"[ws-bridge] CLI disconnected for session {session_id}")
+        await self._broadcast_to_browsers(session, {"type": "cli_disconnected"})
+
+        for req_id in list(session.pending_permissions):
+            await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
+        session.pending_permissions.clear()
+
+    # ── Browser WebSocket handlers ───────────────────────────────────────
+
+    async def handle_browser_open(self, ws: web.WebSocketResponse, session_id: str) -> None:
+        session = self.get_or_create_session(session_id)
+        session.browser_sockets.add(ws)
+        logger.info(f"[ws-bridge] Browser connected for session {session_id} ({len(session.browser_sockets)} browsers)")
+
+        # Send current session state
+        await self._send_to_browser(ws, {"type": "session_init", "session": session.state})
+
+        # Replay message history
+        if session.message_history:
+            await self._send_to_browser(ws, {"type": "message_history", "messages": session.message_history})
+
+        # Send pending permissions
+        for perm in session.pending_permissions.values():
+            await self._send_to_browser(ws, {"type": "permission_request", "request": perm})
+
+        # Check backend connectivity
+        backend_connected = (
+            (session.codex_adapter and session.codex_adapter.is_connected())
+            if session.backend_type == "codex"
+            else session.cli_socket is not None
+        )
+        if not backend_connected:
+            await self._send_to_browser(ws, {"type": "cli_disconnected"})
+            if self._on_cli_relaunch_needed:
+                logger.info(f"[ws-bridge] Browser connected but backend is dead for session {session_id}, requesting relaunch")
+                self._on_cli_relaunch_needed(session_id)
+
+    async def handle_browser_message(self, ws: web.WebSocketResponse, raw: str) -> None:
+        session_id = None
+        for sid, s in self._sessions.items():
+            if ws in s.browser_sockets:
+                session_id = sid
+                break
+        if not session_id:
+            return
+        session = self._sessions.get(session_id)
+        if not session:
+            return
+
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning(f"[ws-bridge] Failed to parse browser message: {raw[:200]}")
+            return
+
+        await self._route_browser_message(session, msg)
+
+    async def handle_browser_close(self, ws: web.WebSocketResponse) -> None:
+        for sid, s in self._sessions.items():
+            if ws in s.browser_sockets:
+                s.browser_sockets.discard(ws)
+                logger.info(f"[ws-bridge] Browser disconnected for session {sid} ({len(s.browser_sockets)} browsers)")
+                break
+
+    # ── CLI message routing ──────────────────────────────────────────────
+
+    async def _route_cli_message(self, session: Session, msg: dict[str, Any]) -> None:
+        msg_type = msg.get("type")
+        if msg_type == "system":
+            await self._handle_system_message(session, msg)
+        elif msg_type == "assistant":
+            await self._handle_assistant_message(session, msg)
+        elif msg_type == "result":
+            await self._handle_result_message(session, msg)
+        elif msg_type == "stream_event":
+            await self._handle_stream_event(session, msg)
+        elif msg_type == "control_request":
+            await self._handle_control_request(session, msg)
+        elif msg_type == "tool_progress":
+            await self._handle_tool_progress(session, msg)
+        elif msg_type == "tool_use_summary":
+            await self._handle_tool_use_summary(session, msg)
+        elif msg_type == "auth_status":
+            await self._handle_auth_status(session, msg)
+        elif msg_type == "keep_alive":
+            pass  # silently consume
+
+    async def _handle_system_message(self, session: Session, msg: dict[str, Any]) -> None:
+        subtype = msg.get("subtype")
+        if subtype == "init":
+            if msg.get("session_id") and self._on_cli_session_id:
+                self._on_cli_session_id(session.id, msg["session_id"])
+
+            session.state["model"] = msg.get("model", "")
+            session.state["cwd"] = msg.get("cwd", "")
+            session.state["tools"] = msg.get("tools", [])
+            session.state["permissionMode"] = msg.get("permissionMode", "default")
+            session.state["claude_code_version"] = msg.get("claude_code_version", "")
+            session.state["mcp_servers"] = msg.get("mcp_servers", [])
+            session.state["agents"] = msg.get("agents", [])
+            session.state["slash_commands"] = msg.get("slash_commands", [])
+            session.state["skills"] = msg.get("skills", [])
+
+            # Resolve git info
+            cwd = session.state.get("cwd")
+            if cwd:
+                try:
+                    session.state["git_branch"] = subprocess.run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=cwd, capture_output=True, text=True, timeout=3,
+                    ).stdout.strip()
+
+                    try:
+                        git_dir = subprocess.run(
+                            ["git", "rev-parse", "--git-dir"],
+                            cwd=cwd, capture_output=True, text=True, timeout=3,
+                        ).stdout.strip()
+                        session.state["is_worktree"] = "/worktrees/" in git_dir
+                    except Exception:
+                        pass
+
+                    try:
+                        session.state["repo_root"] = subprocess.run(
+                            ["git", "rev-parse", "--show-toplevel"],
+                            cwd=cwd, capture_output=True, text=True, timeout=3,
+                        ).stdout.strip()
+                    except Exception:
+                        pass
+
+                    try:
+                        counts = subprocess.run(
+                            ["git", "rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+                            cwd=cwd, capture_output=True, text=True, timeout=3,
+                        ).stdout.strip()
+                        parts = counts.split()
+                        if len(parts) == 2:
+                            session.state["git_behind"] = int(parts[0])
+                            session.state["git_ahead"] = int(parts[1])
+                    except Exception:
+                        session.state["git_ahead"] = 0
+                        session.state["git_behind"] = 0
+                except Exception:
+                    pass
+
+            await self._broadcast_to_browsers(session, {"type": "session_init", "session": session.state})
+            self._persist_session(session)
+
+        elif subtype == "status":
+            session.state["is_compacting"] = msg.get("status") == "compacting"
+            if msg.get("permissionMode"):
+                session.state["permissionMode"] = msg["permissionMode"]
+            await self._broadcast_to_browsers(session, {
+                "type": "status_change",
+                "status": msg.get("status"),
+            })
+
+    async def _handle_assistant_message(self, session: Session, msg: dict[str, Any]) -> None:
+        browser_msg: dict[str, Any] = {
+            "type": "assistant",
+            "message": msg.get("message"),
+            "parent_tool_use_id": msg.get("parent_tool_use_id"),
+        }
+        session.message_history.append(browser_msg)
+        await self._broadcast_to_browsers(session, browser_msg)
+        self._persist_session(session)
+
+    async def _handle_result_message(self, session: Session, msg: dict[str, Any]) -> None:
+        session.state["total_cost_usd"] = msg.get("total_cost_usd", 0)
+        session.state["num_turns"] = msg.get("num_turns", 0)
+
+        if isinstance(msg.get("total_lines_added"), (int, float)):
+            session.state["total_lines_added"] = msg["total_lines_added"]
+        if isinstance(msg.get("total_lines_removed"), (int, float)):
+            session.state["total_lines_removed"] = msg["total_lines_removed"]
+
+        model_usage = msg.get("modelUsage")
+        if model_usage:
+            for usage in model_usage.values():
+                ctx_window = usage.get("contextWindow", 0)
+                if ctx_window > 0:
+                    pct = round((usage.get("inputTokens", 0) + usage.get("outputTokens", 0)) / ctx_window * 100)
+                    session.state["context_used_percent"] = max(0, min(pct, 100))
+
+        browser_msg: dict[str, Any] = {"type": "result", "data": msg}
+        session.message_history.append(browser_msg)
+        await self._broadcast_to_browsers(session, browser_msg)
+        self._persist_session(session)
+
+        # Auto-naming
+        if (
+            not msg.get("is_error")
+            and self._on_first_turn_completed
+            and session.id not in self._auto_naming_attempted
+        ):
+            self._auto_naming_attempted.add(session.id)
+            first = next((m for m in session.message_history if m.get("type") == "user_message"), None)
+            if first:
+                self._on_first_turn_completed(session.id, first.get("content", ""))
+
+    async def _handle_stream_event(self, session: Session, msg: dict[str, Any]) -> None:
+        await self._broadcast_to_browsers(session, {
+            "type": "stream_event",
+            "event": msg.get("event"),
+            "parent_tool_use_id": msg.get("parent_tool_use_id"),
+        })
+
+    async def _handle_control_request(self, session: Session, msg: dict[str, Any]) -> None:
+        request = msg.get("request", {})
+        if request.get("subtype") == "can_use_tool":
+            import time
+            perm: dict[str, Any] = {
+                "request_id": msg.get("request_id", ""),
+                "tool_name": request.get("tool_name", ""),
+                "input": request.get("input", {}),
+                "permission_suggestions": request.get("permission_suggestions"),
+                "description": request.get("description"),
+                "tool_use_id": request.get("tool_use_id", ""),
+                "agent_id": request.get("agent_id"),
+                "timestamp": int(time.time() * 1000),
+            }
+            session.pending_permissions[msg.get("request_id", "")] = perm
+            await self._broadcast_to_browsers(session, {"type": "permission_request", "request": perm})
+            self._persist_session(session)
+
+    async def _handle_tool_progress(self, session: Session, msg: dict[str, Any]) -> None:
+        await self._broadcast_to_browsers(session, {
+            "type": "tool_progress",
+            "tool_use_id": msg.get("tool_use_id"),
+            "tool_name": msg.get("tool_name"),
+            "elapsed_time_seconds": msg.get("elapsed_time_seconds"),
+        })
+
+    async def _handle_tool_use_summary(self, session: Session, msg: dict[str, Any]) -> None:
+        await self._broadcast_to_browsers(session, {
+            "type": "tool_use_summary",
+            "summary": msg.get("summary"),
+            "tool_use_ids": msg.get("preceding_tool_use_ids"),
+        })
+
+    async def _handle_auth_status(self, session: Session, msg: dict[str, Any]) -> None:
+        await self._broadcast_to_browsers(session, {
+            "type": "auth_status",
+            "isAuthenticating": msg.get("isAuthenticating"),
+            "output": msg.get("output"),
+            "error": msg.get("error"),
+        })
+
+    # ── Browser message routing ──────────────────────────────────────────
+
+    async def _route_browser_message(self, session: Session, msg: dict[str, Any]) -> None:
+        # For Codex sessions, delegate to the adapter
+        if session.backend_type == "codex":
+            if msg.get("type") == "user_message":
+                import time
+                session.message_history.append({
+                    "type": "user_message",
+                    "content": msg.get("content", ""),
+                    "timestamp": int(time.time() * 1000),
+                })
+                self._persist_session(session)
+            if msg.get("type") == "permission_response":
+                session.pending_permissions.pop(msg.get("request_id", ""), None)
+                self._persist_session(session)
+
+            if session.codex_adapter:
+                session.codex_adapter.send_browser_message(msg)
+            else:
+                logger.info(f"[ws-bridge] Codex adapter not yet attached for session {session.id}, queuing {msg.get('type')}")
+                session.pending_messages.append(json.dumps(msg))
+            return
+
+        # Claude Code path
+        msg_type = msg.get("type")
+        if msg_type == "user_message":
+            await self._handle_user_message(session, msg)
+        elif msg_type == "permission_response":
+            await self._handle_permission_response(session, msg)
+        elif msg_type == "interrupt":
+            self._handle_interrupt(session)
+        elif msg_type == "set_model":
+            self._handle_set_model(session, msg.get("model", ""))
+        elif msg_type == "set_permission_mode":
+            self._handle_set_permission_mode(session, msg.get("mode", ""))
+
+    async def _handle_user_message(self, session: Session, msg: dict[str, Any]) -> None:
+        import time
+        session.message_history.append({
+            "type": "user_message",
+            "content": msg.get("content", ""),
+            "timestamp": int(time.time() * 1000),
+        })
+
+        images = msg.get("images")
+        if images:
+            blocks: list[Any] = []
+            for img in images:
+                blocks.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": img["media_type"], "data": img["data"]},
+                })
+            blocks.append({"type": "text", "text": msg.get("content", "")})
+            content: Any = blocks
+        else:
+            content = msg.get("content", "")
+
+        ndjson = json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": content},
+            "parent_tool_use_id": None,
+            "session_id": msg.get("session_id") or session.state.get("session_id", ""),
+        })
+        self._send_to_cli(session, ndjson)
+        self._persist_session(session)
+
+    async def _handle_permission_response(self, session: Session, msg: dict[str, Any]) -> None:
+        request_id = msg.get("request_id", "")
+        pending = session.pending_permissions.pop(request_id, None)
+
+        if msg.get("behavior") == "allow":
+            response: dict[str, Any] = {
+                "behavior": "allow",
+                "updatedInput": msg.get("updated_input") or (pending.get("input", {}) if pending else {}),
+            }
+            updated_perms = msg.get("updated_permissions")
+            if updated_perms:
+                response["updatedPermissions"] = updated_perms
+            ndjson = json.dumps({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": response,
+                },
+            })
+        else:
+            ndjson = json.dumps({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {
+                        "behavior": "deny",
+                        "message": msg.get("message", "Denied by user"),
+                    },
+                },
+            })
+        self._send_to_cli(session, ndjson)
+
+    def _handle_interrupt(self, session: Session) -> None:
+        ndjson = json.dumps({
+            "type": "control_request",
+            "request_id": str(uuid.uuid4()),
+            "request": {"subtype": "interrupt"},
+        })
+        self._send_to_cli(session, ndjson)
+
+    def _handle_set_model(self, session: Session, model: str) -> None:
+        ndjson = json.dumps({
+            "type": "control_request",
+            "request_id": str(uuid.uuid4()),
+            "request": {"subtype": "set_model", "model": model},
+        })
+        self._send_to_cli(session, ndjson)
+
+    def _handle_set_permission_mode(self, session: Session, mode: str) -> None:
+        ndjson = json.dumps({
+            "type": "control_request",
+            "request_id": str(uuid.uuid4()),
+            "request": {"subtype": "set_permission_mode", "mode": mode},
+        })
+        self._send_to_cli(session, ndjson)
+
+    # ── Transport helpers ────────────────────────────────────────────────
+
+    def _send_to_cli(self, session: Session, ndjson: str) -> None:
+        if not session.cli_socket:
+            logger.info(f"[ws-bridge] CLI not yet connected for session {session.id}, queuing message")
+            session.pending_messages.append(ndjson)
+            return
+        import asyncio
+        asyncio.ensure_future(session.cli_socket.send_str(ndjson + "\n"))
+
+    async def broadcast_name_update(self, session_id: str, name: str) -> None:
+        session = self._sessions.get(session_id)
+        if not session:
+            return
+        await self._broadcast_to_browsers(session, {"type": "session_name_update", "name": name})
+
+    async def _broadcast_to_browsers(self, session: Session, msg: dict[str, Any]) -> None:
+        if not session.browser_sockets and msg.get("type") in ("assistant", "stream_event", "result"):
+            stored = msg.get("type") in ("assistant", "result")
+            logger.info(f"[ws-bridge] Broadcasting {msg.get('type')} to 0 browsers for session {session.id} (stored in history: {stored})")
+        data = json.dumps(msg)
+        dead: list[web.WebSocketResponse] = []
+        for ws in session.browser_sockets:
+            try:
+                await ws.send_str(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            session.browser_sockets.discard(ws)
+
+    async def _send_to_browser(self, ws: web.WebSocketResponse, msg: dict[str, Any]) -> None:
+        try:
+            await ws.send_str(json.dumps(msg))
+        except Exception:
+            pass
