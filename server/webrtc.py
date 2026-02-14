@@ -1,13 +1,13 @@
 """WebRTC module — manages per-session RTCPeerConnection instances using aiortc.
 
 Provides audio streaming capabilities for vibr8 sessions, including
-a test tone generator and incoming audio stats logging.
+STT (speech-to-text) for incoming audio and a queued audio track for
+outgoing TTS audio.
 """
 
 from __future__ import annotations
 
 import asyncio
-import fractions
 import logging
 import time
 from typing import Dict
@@ -15,6 +15,9 @@ from typing import Dict
 import numpy as np
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from av import AudioFrame
+
+from server.audio_track import QueuedAudioTrack
+from server.stt import AsyncSTT
 
 logger = logging.getLogger(__name__)
 
@@ -64,73 +67,56 @@ class AudioStatsLogger:
             self._last_log_time = now
 
 
-class TestToneTrack(MediaStreamTrack):
-    """Generates a 440 Hz sine wave as an audio MediaStreamTrack.
-
-    Output format: 48 kHz, mono, 20 ms frames (960 samples), signed 16-bit.
-    """
-
-    kind = "audio"
-
-    def __init__(self, session_id: str) -> None:
-        super().__init__()
-        self._session_id = session_id
-        self._sample_rate = 48000
-        self._samples_per_frame = 960  # 20 ms at 48 kHz
-        self._frequency = 440.0
-        self._phase = 0.0
-        self._pts = 0
-        self._stats = AudioStatsLogger(session_id, "outgoing")
-
-    async def recv(self) -> AudioFrame:
-        """Return the next 20 ms audio frame containing a 440 Hz tone."""
-        # Generate sine wave samples.
-        t = (
-            np.arange(self._samples_per_frame) / self._sample_rate
-            + self._phase / (2.0 * np.pi * self._frequency)
-        )
-        samples = (np.sin(2.0 * np.pi * self._frequency * t) * 32767 * 0.5).astype(
-            np.int16
-        )
-        self._phase = (
-            2.0
-            * np.pi
-            * self._frequency
-            * (self._samples_per_frame / self._sample_rate)
-            + self._phase
-        ) % (2.0 * np.pi)
-
-        # Build the AudioFrame.  Shape must be (1, samples) for mono s16.
-        frame = AudioFrame.from_ndarray(
-            samples.reshape(1, -1), format="s16", layout="mono"
-        )
-        frame.pts = self._pts
-        frame.sample_rate = self._sample_rate
-        frame.time_base = fractions.Fraction(1, self._sample_rate)
-        self._pts += self._samples_per_frame
-
-        self._stats.log_frame(frame)
-
-        # Pace output to real-time.
-        await asyncio.sleep(0.02)
-        return frame
-
-
 class WebRTCManager:
-    """Manages per-session RTCPeerConnection instances."""
+    """Manages per-session RTCPeerConnection instances with STT and TTS audio."""
 
     def __init__(self) -> None:
         self._connections: Dict[str, RTCPeerConnection] = {}
         self._stats: Dict[str, AudioStatsLogger] = {}
+        self._outgoing_tracks: Dict[str, QueuedAudioTrack] = {}
+        self._stt_instances: Dict[str, AsyncSTT] = {}
+        self._stt_muted: set[str] = set()
+        self._ws_bridge = None
+
+    def set_ws_bridge(self, bridge) -> None:
+        """Set a reference to WsBridge for submitting STT transcripts."""
+        self._ws_bridge = bridge
+
+    def get_outgoing_track(self, session_id: str) -> QueuedAudioTrack | None:
+        """Return the outgoing audio track for *session_id*, or None."""
+        return self._outgoing_tracks.get(session_id)
+
+    def barge_in(self, session_id: str) -> None:
+        """Handle barge-in: clear queued TTS audio and cancel the TTS stream."""
+        track = self._outgoing_tracks.get(session_id)
+        if track:
+            track.clear_audio()
+            track.set_thinking(False)
+        if self._ws_bridge:
+            self._ws_bridge.cancel_tts(session_id)
+        logger.info("[webrtc] barge-in for session %s: audio cleared", session_id)
+
+    def set_thinking(self, session_id: str, thinking: bool) -> None:
+        """Enable or disable the thinking-tone for *session_id*."""
+        track = self._outgoing_tracks.get(session_id)
+        if track:
+            track.set_thinking(thinking)
+
+    def mute_stt(self, session_id: str) -> None:
+        """Suppress STT processing (prevents echo from triggering barge-in)."""
+        self._stt_muted.add(session_id)
+
+    def unmute_stt(self, session_id: str) -> None:
+        """Re-enable STT processing."""
+        self._stt_muted.discard(session_id)
 
     async def handle_offer(
         self, session_id: str, sdp: str, sdp_type: str
     ) -> dict[str, str]:
         """Process an SDP offer and return an SDP answer.
 
-        If a connection already exists for *session_id* it is closed first.
-        A :class:`TestToneTrack` is added as the outgoing audio track so the
-        remote peer receives a 440 Hz test tone.
+        Creates a :class:`QueuedAudioTrack` for outgoing TTS audio and
+        an :class:`AsyncSTT` instance for incoming speech recognition.
         """
         # Tear down any pre-existing connection for this session.
         if session_id in self._connections:
@@ -139,6 +125,12 @@ class WebRTCManager:
         # No STUN/TURN servers — local network only, avoids aioice retry errors.
         pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         self._connections[session_id] = pc
+
+        # Create STT instance for this session.
+        # aiortc typically delivers stereo (2-channel) audio even if source is mono.
+        stt = AsyncSTT(sample_rate=48000, num_channels=2)
+        stt.add_listener(self._make_stt_listener(session_id))
+        self._stt_instances[session_id] = stt
 
         @pc.on("connectionstatechange")
         async def _on_connection_state_change() -> None:
@@ -160,9 +152,10 @@ class WebRTCManager:
                 self._stats[session_id] = stats
                 asyncio.ensure_future(self._consume_audio(session_id, track, stats))
 
-        # Add outgoing test tone.
-        tone = TestToneTrack(session_id)
-        pc.addTrack(tone)
+        # Add outgoing audio track (receives TTS Opus frames via queue).
+        outgoing = QueuedAudioTrack(session_id)
+        pc.addTrack(outgoing)
+        self._outgoing_tracks[session_id] = outgoing
 
         # SDP exchange.
         offer = RTCSessionDescription(sdp=sdp, type=sdp_type)
@@ -176,18 +169,64 @@ class WebRTCManager:
             "type": pc.localDescription.type,
         }
 
+    def _make_stt_listener(self, session_id: str):
+        """Create an STT event listener that submits transcripts to the agent."""
+
+        async def _on_stt_event(stt, event_type: str, data) -> None:
+            if event_type == "final_transcript":
+                transcript = data["transcript"].strip()
+                logger.info("[stt] session %s transcript: %s", session_id, transcript)
+                if transcript and self._ws_bridge:
+                    await self._ws_bridge.submit_user_message(session_id, transcript)
+            elif event_type == "voice_was_detected":
+                logger.info("[stt] session %s: voice detected — barge-in", session_id)
+                self.barge_in(session_id)
+            elif event_type == "voice_not_detected":
+                logger.debug("[stt] session %s: voice ended", session_id)
+
+        return _on_stt_event
+
     async def _consume_audio(
         self,
         session_id: str,
         track: MediaStreamTrack,
         stats: AudioStatsLogger,
     ) -> None:
-        """Read frames from *track* until it ends, logging stats along the way."""
+        """Read frames from *track*, log stats, and feed to STT."""
+        stt = self._stt_instances.get(session_id)
+        audio_buffer: list[np.ndarray] = []
+
         try:
             while True:
                 frame = await track.recv()
                 stats.log_frame(frame)
+
+                if stt and session_id not in self._stt_muted:
+                    pcm = frame.to_ndarray()  # shape (channels, 960) s16
+                    audio_buffer.append(pcm)
+                    if len(audio_buffer) >= 8:  # ~160ms batch
+                        batch = np.concatenate(audio_buffer, axis=1)
+                        # Log first batch to confirm STT is receiving audio.
+                        if not hasattr(self, '_stt_logged'):
+                            self._stt_logged = set()
+                        if session_id not in self._stt_logged:
+                            self._stt_logged.add(session_id)
+                            rms = float(np.sqrt(np.mean(batch.astype(np.float64)**2)))
+                            logger.info(
+                                "[webrtc] First STT batch for session %s: shape=%s, rms=%.1f",
+                                session_id, batch.shape, rms,
+                            )
+                        stt.process_buffer(batch)
+                        audio_buffer = []
         except Exception:
+            # Flush any remaining audio to STT on track end.
+            if audio_buffer and stt:
+                try:
+                    batch = np.concatenate(audio_buffer, axis=1)
+                    stt.process_buffer(batch)
+                    stt.flush()
+                except Exception:
+                    pass
             logger.info(
                 "[webrtc] incoming audio track ended for session %s", session_id
             )
@@ -196,6 +235,14 @@ class WebRTCManager:
         """Close and remove the peer connection for *session_id*."""
         pc = self._connections.pop(session_id, None)
         self._stats.pop(session_id, None)
+        self._outgoing_tracks.pop(session_id, None)
+
+        # Clean up STT.
+        stt = self._stt_instances.pop(session_id, None)
+        if stt:
+            stt.flush()
+            stt.stop()
+
         if pc is not None:
             await pc.close()
             logger.info("[webrtc] closed connection for session %s", session_id)

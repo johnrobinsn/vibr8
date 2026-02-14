@@ -15,6 +15,7 @@ from aiohttp import web
 if TYPE_CHECKING:
     from server.session_store import SessionStore, PersistedSession
     from server.codex_adapter import CodexAdapter
+    from server.webrtc import WebRTCManager
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +70,59 @@ class WsBridge:
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
         self._store: SessionStore | None = None
+        self._webrtc_manager: WebRTCManager | None = None
+        self._active_tts: dict[str, Any] = {}  # session_id → TTS_OpenAI instance
+        self._thinking_timers: dict[str, asyncio.TimerHandle] = {}
         self._on_cli_session_id: Callable[[str, str], None] | None = None
         self._on_cli_relaunch_needed: Callable[[str], None] | None = None
         self._on_first_turn_completed: Callable[[str, str], None] | None = None
         self._auto_naming_attempted: set[str] = set()
+
+    # ── WebRTC manager ─────────────────────────────────────────────────
+
+    def set_webrtc_manager(self, manager: WebRTCManager) -> None:
+        self._webrtc_manager = manager
+
+    def cancel_tts(self, session_id: str) -> None:
+        """Cancel any in-progress TTS for *session_id* (called on barge-in)."""
+        tts = self._active_tts.pop(session_id, None)
+        if tts:
+            tts.cancel()
+            logger.info("[ws-bridge] TTS cancelled for session %s (barge-in)", session_id)
+
+    def _start_thinking_delayed(self, session_id: str, delay: float = 1.5) -> None:
+        """Schedule the thinking tone after *delay* seconds.
+
+        Cancelled automatically if a response arrives before the timer fires.
+        """
+        self._cancel_thinking_timer(session_id)
+        loop = asyncio.get_event_loop()
+        handle = loop.call_later(delay, self._activate_thinking, session_id)
+        self._thinking_timers[session_id] = handle
+
+    def _start_thinking_now(self, session_id: str) -> None:
+        """Start the thinking tone immediately (e.g. tool use started)."""
+        self._cancel_thinking_timer(session_id)
+        self._activate_thinking(session_id)
+
+    def _activate_thinking(self, session_id: str) -> None:
+        """Actually turn on the thinking tone and mute STT."""
+        self._thinking_timers.pop(session_id, None)
+        if self._webrtc_manager:
+            self._webrtc_manager.mute_stt(session_id)
+            self._webrtc_manager.set_thinking(session_id, True)
+
+    def _stop_thinking(self, session_id: str) -> None:
+        """Stop the thinking tone, cancel any pending timer, and unmute STT."""
+        self._cancel_thinking_timer(session_id)
+        if self._webrtc_manager:
+            self._webrtc_manager.set_thinking(session_id, False)
+            self._webrtc_manager.unmute_stt(session_id)
+
+    def _cancel_thinking_timer(self, session_id: str) -> None:
+        handle = self._thinking_timers.pop(session_id, None)
+        if handle:
+            handle.cancel()
 
     # ── Callback registration ────────────────────────────────────────────
 
@@ -476,16 +526,101 @@ class WsBridge:
             })
 
     async def _handle_assistant_message(self, session: Session, msg: dict[str, Any]) -> None:
+        text = msg.get("message")
+
+        # TTS: speak assistant response if audio is active for this session.
+        if text and self._webrtc_manager:
+            track = self._webrtc_manager.get_outgoing_track(session.id)
+            text_preview = repr(text)[:200] if not isinstance(text, str) else f"{len(text)} chars"
+            logger.info(
+                "[ws-bridge] TTS check: session=%s, text_type=%s, preview=%s, track=%s",
+                session.id, type(text).__name__, text_preview, track is not None,
+            )
+            if track:
+                import asyncio
+                asyncio.ensure_future(self._speak_text(session.id, text, track))
+
         browser_msg: dict[str, Any] = {
             "type": "assistant",
-            "message": msg.get("message"),
+            "message": text,
             "parent_tool_use_id": msg.get("parent_tool_use_id"),
         }
         session.message_history.append(browser_msg)
         await self._broadcast_to_browsers(session, browser_msg)
         self._persist_session(session)
 
+    async def _speak_text(self, session_id: str, text, track) -> None:
+        """Synthesize *text* via OpenAI TTS and push Opus frames to *track*."""
+        try:
+            # message can be a string, a list of content blocks, or a dict with content
+            if isinstance(text, dict):
+                # e.g. {"role": "assistant", "content": "..."} or {"content": [...]}
+                content = text.get("content", "")
+                if isinstance(content, list):
+                    text = " ".join(
+                        block.get("text", "") for block in content
+                        if isinstance(block, dict) and block.get("type") == "text"
+                    )
+                elif isinstance(content, str):
+                    text = content
+                else:
+                    text = ""
+            elif isinstance(text, list):
+                text = " ".join(
+                    block.get("text", "") for block in text
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+            if not isinstance(text, str) or not text.strip():
+                logger.info("[ws-bridge] TTS skipped: empty or non-string text for session %s (type=%s)", session_id, type(text).__name__)
+                return
+
+            # Strip markdown formatting for cleaner TTS output.
+            import re
+            text = re.sub(r'\*{1,3}', '', text)           # bold/italic: ** * ***
+            text = re.sub(r'#{1,6}\s*', '', text)         # headings: ##
+            text = re.sub(r'`{1,3}[^`]*`{1,3}', '', text) # inline/block code
+            text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)  # links: [text](url) → text
+            text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)  # list markers
+            text = text.strip()
+            if not text:
+                logger.info("[ws-bridge] TTS skipped: empty after markdown strip for session %s", session_id)
+                return
+
+            frame_count = 0
+            def on_frame(frame):
+                nonlocal frame_count
+                frame_count += 1
+                track.push_opus_frame(frame)
+
+            # Stop thinking tone — TTS is taking over.
+            # Keep STT muted during TTS to prevent echo-triggered barge-in.
+            self._cancel_thinking_timer(session_id)
+            if self._webrtc_manager:
+                self._webrtc_manager.set_thinking(session_id, False)
+                self._webrtc_manager.mute_stt(session_id)
+            logger.info("[ws-bridge] TTS starting for session %s: %d chars", session_id, len(text))
+            from server.tts import TTS_OpenAI
+            tts = TTS_OpenAI(opus_frame_handler=on_frame)
+            # Cancel any prior TTS still running for this session.
+            prev = self._active_tts.pop(session_id, None)
+            if prev:
+                prev.cancel()
+            self._active_tts[session_id] = tts
+            try:
+                await tts.say(text)
+            finally:
+                if self._active_tts.get(session_id) is tts:
+                    self._active_tts.pop(session_id, None)
+            logger.info("[ws-bridge] TTS done for session %s: %d opus frames pushed", session_id, frame_count)
+        except Exception:
+            logger.exception("[ws-bridge] TTS failed for session %s", session_id)
+        finally:
+            self._stop_thinking(session_id)
+
     async def _handle_result_message(self, session: Session, msg: dict[str, Any]) -> None:
+        # Turn finished — stop thinking tone and re-enable STT.
+        self._stop_thinking(session.id)
+
         session.state["total_cost_usd"] = msg.get("total_cost_usd", 0)
         session.state["num_turns"] = msg.get("num_turns", 0)
 
@@ -519,6 +654,8 @@ class WsBridge:
                 self._on_first_turn_completed(session.id, first.get("content", ""))
 
     async def _handle_stream_event(self, session: Session, msg: dict[str, Any]) -> None:
+        # Agent is streaming a response — stop thinking tone.
+        self._stop_thinking(session.id)
         await self._broadcast_to_browsers(session, {
             "type": "stream_event",
             "event": msg.get("event"),
@@ -526,6 +663,8 @@ class WsBridge:
         })
 
     async def _handle_control_request(self, session: Session, msg: dict[str, Any]) -> None:
+        # Tool permission request — agent is working, play thinking tone.
+        self._start_thinking_now(session.id)
         request = msg.get("request", {})
         if request.get("subtype") == "can_use_tool":
             import time
@@ -544,6 +683,8 @@ class WsBridge:
             self._persist_session(session)
 
     async def _handle_tool_progress(self, session: Session, msg: dict[str, Any]) -> None:
+        # Agent is executing a tool — play thinking tone.
+        self._start_thinking_now(session.id)
         await self._broadcast_to_browsers(session, {
             "type": "tool_progress",
             "tool_use_id": msg.get("tool_use_id"),
@@ -690,6 +831,26 @@ class WsBridge:
             "request": {"subtype": "set_permission_mode", "mode": mode},
         })
         self._send_to_cli(session, ndjson)
+
+    # ── Public API for submitting messages programmatically ────────────
+
+    async def submit_user_message(self, session_id: str, text: str) -> None:
+        """Submit a user message to the CLI (e.g. from STT transcript)."""
+        session = self._sessions.get(session_id)
+        if not session:
+            logger.warning("[ws-bridge] Cannot submit message: no session %s", session_id)
+            return
+        msg = {"type": "user_message", "content": text}
+        await self._handle_user_message(session, msg)
+        # Schedule thinking tone after a delay — gives the agent time to
+        # start streaming a response before we play the tone.
+        self._start_thinking_delayed(session_id)
+        # Also broadcast to browsers so the transcript appears in chat.
+        await self._broadcast_to_browsers(session, {
+            "type": "user_message",
+            "content": text,
+            "source": "voice",
+        })
 
     # ── Transport helpers ────────────────────────────────────────────────
 

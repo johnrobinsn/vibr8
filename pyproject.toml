@@ -7,6 +7,13 @@ dependencies = [
     "aiohttp>=3.9",
     "aiortc>=1.9",
     "numpy>=1.24",
+    "torch>=2.0",
+    "torchaudio>=2.0",
+    "transformers>=4.30",
+    "scipy>=1.10",
+    "onnxruntime>=1.15",
+    "python-dotenv>=1.0",
+    "huggingface-hub>=0.20",
 ]
 
 [project.optional-dependencies]

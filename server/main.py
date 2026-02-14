@@ -22,6 +22,9 @@ from server import session_names
 from server.routes import create_routes
 from server.webrtc import WebRTCManager
 
+from dotenv import load_dotenv
+load_dotenv()
+
 class _AioIceFilter(logging.Filter):
     """Suppress noisy aioice STUN retry errors on closed transports."""
 
@@ -39,6 +42,10 @@ class _AioIceFilter(logging.Filter):
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("/mntc/code/vibr8/server.log", mode="w"),
+    ],
 )
 logging.getLogger("asyncio").addFilter(_AioIceFilter())
 logger = logging.getLogger(__name__)
@@ -115,8 +122,10 @@ def create_app() -> web.Application:
     worktree_tracker = WorktreeTracker()
     webrtc_manager = WebRTCManager()
 
-    # Wire up stores
+    # Wire up stores and managers
     ws_bridge.set_store(session_store)
+    ws_bridge.set_webrtc_manager(webrtc_manager)
+    webrtc_manager.set_ws_bridge(ws_bridge)
     launcher.set_store(session_store)
 
     # Restore persisted state
@@ -221,6 +230,19 @@ def create_app() -> web.Application:
     # ── Startup / Shutdown hooks ──────────────────────────────────────────
 
     async def on_startup(app: web.Application) -> None:
+        # Preload STT models (Whisper, VAD, EOU) in a background thread
+        # so we don't block the event loop during download/loading.
+        async def _preload_stt() -> None:
+            try:
+                from server.stt import AsyncSTT
+                logger.info("[server] Preloading STT models (background thread)...")
+                await asyncio.to_thread(AsyncSTT.preload_shared_resources)
+                logger.info("[server] STT models ready")
+            except Exception:
+                logger.exception("[server] Failed to preload STT models")
+
+        asyncio.ensure_future(_preload_stt())
+
         # Suppress noisy aioice STUN retry errors on closed transports.
         loop = asyncio.get_event_loop()
 
@@ -277,7 +299,7 @@ def main() -> None:
     logger.info(f"  Browser WebSocket: ws://localhost:{PORT}/ws/browser/:sessionId")
     if os.environ.get("NODE_ENV") != "production":
         logger.info("Dev mode: frontend at http://localhost:5174")
-    web.run_app(app, host="0.0.0.0", port=PORT, print=None)
+    web.run_app(app, host="0.0.0.0", port=PORT, print=None, shutdown_timeout=2.0)
 
 
 if __name__ == "__main__":
