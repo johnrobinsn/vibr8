@@ -122,6 +122,16 @@ def create_app() -> web.Application:
     worktree_tracker = WorktreeTracker()
     webrtc_manager = WebRTCManager()
 
+    # Track background tasks so we can cancel them on shutdown.
+    background_tasks: set[asyncio.Task] = set()
+
+    def spawn(coro) -> asyncio.Task:
+        """Create a tracked background task that auto-removes on completion."""
+        task = asyncio.ensure_future(coro)
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+        return task
+
     # Wire up stores and managers
     ws_bridge.set_store(session_store)
     ws_bridge.set_webrtc_manager(webrtc_manager)
@@ -169,7 +179,7 @@ def create_app() -> web.Application:
                     await asyncio.sleep(5)
                     relaunching.discard(session_id)
 
-            asyncio.ensure_future(_do_relaunch())
+            spawn(_do_relaunch())
 
     ws_bridge.on_cli_relaunch_needed_callback(on_cli_relaunch_needed)
 
@@ -194,7 +204,7 @@ def create_app() -> web.Application:
                 session_names.set_name(session_id, title)
                 await ws_bridge.broadcast_name_update(session_id, title)
 
-        asyncio.ensure_future(_do_auto_name())
+        spawn(_do_auto_name())
 
     ws_bridge.on_first_turn_completed_callback(on_first_turn_completed)
 
@@ -241,7 +251,7 @@ def create_app() -> web.Application:
             except Exception:
                 logger.exception("[server] Failed to preload STT models")
 
-        asyncio.ensure_future(_preload_stt())
+        spawn(_preload_stt())
 
         # Suppress noisy aioice STUN retry errors on closed transports.
         loop = asyncio.get_event_loop()
@@ -278,12 +288,23 @@ def create_app() -> web.Application:
                     )
                     await launcher.relaunch(info.sessionId)
 
-            asyncio.ensure_future(_watchdog())
+            spawn(_watchdog())
 
     app.on_startup.append(on_startup)
 
     async def on_shutdown(app: web.Application) -> None:
+        logger.info("[server] Shutting down...")
+
+        # Cancel all tracked background tasks first.
+        for task in list(background_tasks):
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+
         await webrtc_manager.close_all()
+        await ws_bridge.close_all()
+        await launcher.kill_all()
+        logger.info("[server] Shutdown complete")
 
     app.on_shutdown.append(on_shutdown)
 

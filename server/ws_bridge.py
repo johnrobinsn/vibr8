@@ -852,6 +852,27 @@ class WsBridge:
             "source": "voice",
         })
 
+    # ── Shutdown ──────────────────────────────────────────────────────────
+
+    async def close_all(self) -> None:
+        """Close all WebSocket connections and cancel background timers."""
+        # Cancel thinking timers.
+        for handle in self._thinking_timers.values():
+            handle.cancel()
+        self._thinking_timers.clear()
+
+        # Cancel active TTS.
+        for tts in self._active_tts.values():
+            tts.cancel()
+        self._active_tts.clear()
+
+        # Close all WebSocket connections.
+        for session in self._sessions.values():
+            for ws in list(session.browser_sockets):
+                await ws.close()
+            if session.cli_socket:
+                await session.cli_socket.close()
+
     # ── Transport helpers ────────────────────────────────────────────────
 
     def _send_to_cli(self, session: Session, ndjson: str) -> None:
