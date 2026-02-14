@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
 import { startWebRTC, stopWebRTC } from "../webrtc.js";
+import { cancelReconnect, manualReconnect } from "../ws.js";
+
 
 export function TopBar() {
   const [audioError, setAudioError] = useState<string | null>(null);
@@ -14,11 +16,18 @@ export function TopBar() {
   const setTaskPanelOpen = useStore((s) => s.setTaskPanelOpen);
   const activeTab = useStore((s) => s.activeTab);
   const setActiveTab = useStore((s) => s.setActiveTab);
+  const connectionStatus = useStore((s) => s.connectionStatus);
+  const reconnecting = useStore((s) => s.reconnecting);
+  const reconnectGaveUp = useStore((s) => s.reconnectGaveUp);
   const audioEnabled = useStore((s) => s.audioEnabled);
   const isRecording = useStore((s) => s.isRecording);
   const webrtcStatus = useStore((s) => s.webrtcStatus);
 
   const isConnected = currentSessionId ? (cliConnected.get(currentSessionId) ?? false) : false;
+  const connStatus = currentSessionId ? (connectionStatus.get(currentSessionId) ?? "disconnected") : "disconnected";
+  const isCliDisconnected = connStatus === "connected" && !isConnected;
+  const isReconnecting = currentSessionId ? (reconnecting.get(currentSessionId) ?? false) : false;
+  const hasGaveUp = currentSessionId ? (reconnectGaveUp.get(currentSessionId) ?? false) : false;
   const status = currentSessionId ? (sessionStatus.get(currentSessionId) ?? null) : null;
   const isAudioEnabled = currentSessionId ? (audioEnabled.get(currentSessionId) ?? false) : false;
   const isRecordingNow = currentSessionId ? (isRecording.get(currentSessionId) ?? false) : false;
@@ -57,20 +66,40 @@ export function TopBar() {
         {/* Connection status */}
         {currentSessionId && (
           <div className="flex items-center gap-1.5">
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                isConnected ? "bg-cc-success" : "bg-cc-muted opacity-40"
-              }`}
-            />
             {isConnected ? (
-              <span className="text-[11px] text-cc-muted hidden sm:inline">Connected</span>
+              <>
+                <span className="w-1.5 h-1.5 rounded-full bg-cc-success" />
+                <span className="text-[11px] text-cc-muted hidden sm:inline">Connected</span>
+              </>
+            ) : isCliDisconnected ? (
+              <>
+                <span className="w-1.5 h-1.5 rounded-full bg-cc-warning animate-pulse" />
+                <span className="text-[11px] text-cc-warning font-medium hidden sm:inline">Waiting for CLI…</span>
+              </>
+            ) : isReconnecting ? (
+              <>
+                <span className="w-1.5 h-1.5 rounded-full bg-cc-warning animate-pulse" />
+                <span className="text-[11px] text-cc-warning font-medium hidden sm:inline">Reconnecting…</span>
+                <button
+                  onClick={() => cancelReconnect(currentSessionId)}
+                  className="w-4 h-4 flex items-center justify-center rounded text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+                  title="Cancel reconnection"
+                >
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="w-2.5 h-2.5">
+                    <path d="M4 4l8 8M12 4l-8 8" />
+                  </svg>
+                </button>
+              </>
             ) : (
-              <button
-                onClick={() => currentSessionId && api.relaunchSession(currentSessionId).catch(console.error)}
-                className="text-[11px] text-cc-warning hover:text-cc-warning/80 font-medium cursor-pointer hidden sm:inline"
-              >
-                Reconnect
-              </button>
+              <>
+                <span className="w-1.5 h-1.5 rounded-full bg-cc-muted opacity-40" />
+                <button
+                  onClick={() => manualReconnect(currentSessionId)}
+                  className="text-[11px] text-cc-warning hover:text-cc-warning/80 font-medium cursor-pointer hidden sm:inline"
+                >
+                  Reconnect
+                </button>
+              </>
             )}
           </div>
         )}

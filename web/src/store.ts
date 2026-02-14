@@ -52,6 +52,10 @@ interface AppState {
   editorUrl: Map<string, string>;
   editorLoading: Map<string, boolean>;
 
+  // Reconnect state per session
+  reconnecting: Map<string, boolean>;
+  reconnectGaveUp: Map<string, boolean>;
+
   // WebRTC audio state per session
   audioEnabled: Map<string, boolean>;
   isRecording: Map<string, boolean>;
@@ -105,6 +109,8 @@ interface AppState {
   setConnectionStatus: (sessionId: string, status: "connecting" | "connected" | "disconnected") => void;
   setCliConnected: (sessionId: string, connected: boolean) => void;
   setSessionStatus: (sessionId: string, status: "idle" | "running" | "compacting" | null) => void;
+  setReconnecting: (sessionId: string, value: boolean) => void;
+  setReconnectGaveUp: (sessionId: string, value: boolean) => void;
 
   // Editor actions
   setActiveTab: (tab: "chat" | "editor") => void;
@@ -167,13 +173,15 @@ export const useStore = create<AppState>((set) => ({
   recentlyRenamed: new Set(),
   darkMode: getInitialDarkMode(),
   notificationSound: getInitialNotificationSound(),
-  sidebarOpen: typeof window !== "undefined" ? window.innerWidth >= 768 : true,
+  sidebarOpen: typeof window !== "undefined" ? localStorage.getItem("cc-sidebar-open") !== "false" : true,
   taskPanelOpen: typeof window !== "undefined" ? window.innerWidth >= 1024 : false,
   homeResetKey: 0,
   activeTab: "chat",
   editorOpenFile: new Map(),
   editorUrl: new Map(),
   editorLoading: new Map(),
+  reconnecting: new Map(),
+  reconnectGaveUp: new Map(),
   audioEnabled: new Map(),
   isRecording: new Map(),
   webrtcStatus: new Map(),
@@ -198,7 +206,10 @@ export const useStore = create<AppState>((set) => ({
       localStorage.setItem("cc-notification-sound", String(next));
       return { notificationSound: next };
     }),
-  setSidebarOpen: (v) => set({ sidebarOpen: v }),
+  setSidebarOpen: (v) => {
+    localStorage.setItem("cc-sidebar-open", String(v));
+    set({ sidebarOpen: v });
+  },
   setTaskPanelOpen: (open) => set({ taskPanelOpen: open }),
   newSession: () => {
     localStorage.removeItem("cc-current-session");
@@ -472,6 +483,20 @@ export const useStore = create<AppState>((set) => ({
       const sessionStatus = new Map(s.sessionStatus);
       sessionStatus.set(sessionId, status);
       return { sessionStatus };
+    }),
+
+  setReconnecting: (sessionId, value) =>
+    set((s) => {
+      const reconnecting = new Map(s.reconnecting);
+      reconnecting.set(sessionId, value);
+      return { reconnecting };
+    }),
+
+  setReconnectGaveUp: (sessionId, value) =>
+    set((s) => {
+      const reconnectGaveUp = new Map(s.reconnectGaveUp);
+      reconnectGaveUp.set(sessionId, value);
+      return { reconnectGaveUp };
     }),
 
   setActiveTab: (tab) => set({ activeTab: tab }),

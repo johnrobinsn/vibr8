@@ -5,6 +5,9 @@ import { playNotificationSound } from "./utils/notification-sound.js";
 
 const sockets = new Map<string, WebSocket>();
 const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const reconnectStartTimes = new Map<string, number>();
+const RECONNECT_TIMEOUT_MS = 60_000;
+const RECONNECT_INTERVAL_MS = 2_000;
 const taskCounters = new Map<string, number>();
 /** Track processed tool_use IDs to prevent duplicate task creation */
 const processedToolUseIds = new Map<string, Set<string>>();
@@ -391,20 +394,20 @@ export function connectSession(sessionId: string) {
   sockets.set(sessionId, ws);
 
   ws.onopen = () => {
-    useStore.getState().setConnectionStatus(sessionId, "connected");
-    // Clear any reconnect timer
-    const timer = reconnectTimers.get(sessionId);
-    if (timer) {
-      clearTimeout(timer);
-      reconnectTimers.delete(sessionId);
-    }
+    const s = useStore.getState();
+    s.setConnectionStatus(sessionId, "connected");
+    // Clear reconnect state on successful connection.
+    clearReconnectState(sessionId);
   };
 
   ws.onmessage = (event) => handleMessage(sessionId, event);
 
   ws.onclose = () => {
     sockets.delete(sessionId);
-    useStore.getState().setConnectionStatus(sessionId, "disconnected");
+    const s = useStore.getState();
+    s.setConnectionStatus(sessionId, "disconnected");
+    s.setCliConnected(sessionId, false);
+    s.setSessionStatus(sessionId, null);
     scheduleReconnect(sessionId);
   };
 
@@ -413,25 +416,61 @@ export function connectSession(sessionId: string) {
   };
 }
 
-function scheduleReconnect(sessionId: string) {
-  if (reconnectTimers.has(sessionId)) return;
-  // Only reconnect if the session is still the current one
-  const timer = setTimeout(() => {
-    reconnectTimers.delete(sessionId);
-    const store = useStore.getState();
-    if (store.currentSessionId === sessionId || store.sessions.has(sessionId)) {
-      connectSession(sessionId);
-    }
-  }, 2000);
-  reconnectTimers.set(sessionId, timer);
-}
-
-export function disconnectSession(sessionId: string) {
+function clearReconnectState(sessionId: string) {
   const timer = reconnectTimers.get(sessionId);
   if (timer) {
     clearTimeout(timer);
     reconnectTimers.delete(sessionId);
   }
+  reconnectStartTimes.delete(sessionId);
+  const s = useStore.getState();
+  s.setReconnecting(sessionId, false);
+  s.setReconnectGaveUp(sessionId, false);
+}
+
+function scheduleReconnect(sessionId: string) {
+  if (reconnectTimers.has(sessionId)) return;
+
+  // Record when reconnection attempts started.
+  if (!reconnectStartTimes.has(sessionId)) {
+    reconnectStartTimes.set(sessionId, Date.now());
+    useStore.getState().setReconnecting(sessionId, true);
+  }
+
+  const timer = setTimeout(() => {
+    reconnectTimers.delete(sessionId);
+    const store = useStore.getState();
+
+    // Check if we've exceeded the timeout.
+    const startTime = reconnectStartTimes.get(sessionId) ?? Date.now();
+    if (Date.now() - startTime >= RECONNECT_TIMEOUT_MS) {
+      reconnectStartTimes.delete(sessionId);
+      store.setReconnecting(sessionId, false);
+      store.setReconnectGaveUp(sessionId, true);
+      return;
+    }
+
+    if (store.currentSessionId === sessionId || store.sessions.has(sessionId)) {
+      connectSession(sessionId);
+    }
+  }, RECONNECT_INTERVAL_MS);
+  reconnectTimers.set(sessionId, timer);
+}
+
+export function cancelReconnect(sessionId: string) {
+  clearReconnectState(sessionId);
+  useStore.getState().setReconnectGaveUp(sessionId, true);
+}
+
+export function manualReconnect(sessionId: string) {
+  clearReconnectState(sessionId);
+  reconnectStartTimes.set(sessionId, Date.now());
+  useStore.getState().setReconnecting(sessionId, true);
+  connectSession(sessionId);
+}
+
+export function disconnectSession(sessionId: string) {
+  clearReconnectState(sessionId);
   const ws = sockets.get(sessionId);
   if (ws) {
     ws.close();

@@ -427,9 +427,16 @@ export function Playground() {
         {/* ─── Status Indicators ──────────────────────────────── */}
         <Section title="Status Indicators" description="Connection and session status banners">
           <div className="space-y-3 max-w-3xl">
-            <Card label="Disconnected warning">
-              <div className="px-4 py-2 bg-cc-warning/10 border border-cc-warning/20 rounded-lg text-center">
-                <span className="text-xs text-cc-warning font-medium">Reconnecting to session...</span>
+            <Card label="Reconnecting">
+              <div className="flex items-center gap-1.5 px-3 py-2 bg-cc-card border border-cc-border rounded-lg">
+                <span className="w-2 h-2 rounded-full bg-cc-warning animate-pulse" />
+                <span className="text-xs text-cc-warning font-medium">Reconnecting…</span>
+              </div>
+            </Card>
+            <Card label="Waiting for CLI">
+              <div className="flex items-center gap-1.5 px-3 py-2 bg-cc-card border border-cc-border rounded-lg">
+                <span className="w-2 h-2 rounded-full bg-cc-warning animate-pulse" />
+                <span className="text-xs text-cc-warning font-medium">Waiting for CLI…</span>
               </div>
             </Card>
             <Card label="Connected">

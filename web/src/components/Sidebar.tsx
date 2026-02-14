@@ -296,7 +296,7 @@ export function Sidebar() {
             )}
           </div>
           {dirName && (
-            <p className="text-[11px] text-cc-muted truncate mt-0.5 ml-4">
+            <p className="text-[11px] text-cc-muted truncate mt-0.5 ml-4" title={s.cwd}>
               {dirName}
             </p>
           )}
@@ -382,8 +382,8 @@ export function Sidebar() {
       {/* Header */}
       <div className="p-4 pb-3">
         <div className="flex items-center gap-2 mb-4">
-          <img src={logoSrc} alt="" className="h-[1.1em] w-auto" />
-          <span className="text-sm font-semibold text-cc-fg tracking-tight">vibr8</span>
+          <img src={logoSrc} alt="" className="h-[2.2em] w-auto" />
+          <span className="text-2xl font-semibold text-cc-fg tracking-tight">vibr8</span>
         </div>
 
         <button
