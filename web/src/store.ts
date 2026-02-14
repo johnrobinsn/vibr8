@@ -174,7 +174,7 @@ export const useStore = create<AppState>((set) => ({
   darkMode: getInitialDarkMode(),
   notificationSound: getInitialNotificationSound(),
   sidebarOpen: typeof window !== "undefined" ? localStorage.getItem("cc-sidebar-open") !== "false" : true,
-  taskPanelOpen: typeof window !== "undefined" ? window.innerWidth >= 1024 : false,
+  taskPanelOpen: typeof window !== "undefined" ? localStorage.getItem("cc-task-panel-open") !== "false" && window.innerWidth >= 1024 : false,
   homeResetKey: 0,
   activeTab: "chat",
   editorOpenFile: new Map(),
@@ -210,7 +210,10 @@ export const useStore = create<AppState>((set) => ({
     localStorage.setItem("cc-sidebar-open", String(v));
     set({ sidebarOpen: v });
   },
-  setTaskPanelOpen: (open) => set({ taskPanelOpen: open }),
+  setTaskPanelOpen: (open) => {
+    localStorage.setItem("cc-task-panel-open", String(open));
+    set({ taskPanelOpen: open });
+  },
   newSession: () => {
     localStorage.removeItem("cc-current-session");
     set((s) => ({ currentSessionId: null, homeResetKey: s.homeResetKey + 1 }));
