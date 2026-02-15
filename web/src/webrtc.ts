@@ -14,11 +14,6 @@ export async function startWebRTC(sessionId: string): Promise<void> {
 
   const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-  // Start with mic muted
-  for (const track of localStream.getAudioTracks()) {
-    track.enabled = false;
-  }
-
   // No STUN/TURN — local network only
   const pc = new RTCPeerConnection({ iceServers: [] });
 
@@ -69,19 +64,27 @@ export async function startWebRTC(sessionId: string): Promise<void> {
   // Store the session
   rtcSessions.set(sessionId, { pc, localStream, remoteAudio });
 
-  // Update store to reflect audio is enabled
-  useStore.getState().setAudioEnabled(sessionId, true);
+  // Update store: audio in+out, mic hot, guard mode default
+  const store = useStore.getState();
+  store.setAudioMode(sessionId, "in_out");
+  store.setIsRecording(sessionId, true);
+  store.setGuardEnabled(sessionId, true);
+  api.setGuard(sessionId, true).catch(() => {});
 }
 
-export function setMicEnabled(sessionId: string, enabled: boolean): void {
-  const session = rtcSessions.get(sessionId);
-  if (!session) return;
+export function toggleGuard(sessionId: string): void {
+  const current = useStore.getState().guardEnabled.get(sessionId) ?? true;
+  api.setGuard(sessionId, !current).catch(() => {});
+}
 
-  for (const track of session.localStream.getAudioTracks()) {
-    track.enabled = enabled;
-  }
+export function setAudioInOnly(sessionId: string): void {
+  api.setTtsMuted(sessionId, true).catch(() => {});
+  useStore.getState().setAudioMode(sessionId, "in_only");
+}
 
-  useStore.getState().setIsRecording(sessionId, enabled);
+export function setAudioInOut(sessionId: string): void {
+  api.setTtsMuted(sessionId, false).catch(() => {});
+  useStore.getState().setAudioMode(sessionId, "in_out");
 }
 
 export function stopWebRTC(sessionId: string): void {
@@ -103,7 +106,7 @@ export function stopWebRTC(sessionId: string): void {
 
   // Update store
   const store = useStore.getState();
-  store.setAudioEnabled(sessionId, false);
+  store.setAudioMode(sessionId, "off");
   store.setIsRecording(sessionId, false);
   store.setWebRTCStatus(sessionId, null);
 }

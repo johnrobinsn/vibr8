@@ -197,6 +197,30 @@ class WsBridge:
     def get_session(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
 
+    async def broadcast_guard_state(self, session_id: str, enabled: bool) -> None:
+        """Broadcast guard mode state change to browser clients."""
+        session = self._sessions.get(session_id)
+        if session:
+            await self._broadcast_to_browsers(
+                session, {"type": "guard_state", "enabled": enabled}
+            )
+
+    async def broadcast_audio_off(self, session_id: str) -> None:
+        """Tell browser to disconnect WebRTC audio."""
+        session = self._sessions.get(session_id)
+        if session:
+            await self._broadcast_to_browsers(
+                session, {"type": "audio_off"}
+            )
+
+    async def broadcast_tts_muted(self, session_id: str, muted: bool) -> None:
+        """Broadcast TTS mute state change to browser clients."""
+        session = self._sessions.get(session_id)
+        if session:
+            await self._broadcast_to_browsers(
+                session, {"type": "tts_muted", "muted": muted}
+            )
+
     def get_all_sessions(self) -> list[dict[str, Any]]:
         return [s.state for s in self._sessions.values()]
 
@@ -528,15 +552,16 @@ class WsBridge:
     async def _handle_assistant_message(self, session: Session, msg: dict[str, Any]) -> None:
         text = msg.get("message")
 
-        # TTS: speak assistant response if audio is active for this session.
+        # TTS: speak assistant response if audio is active and TTS not muted.
         if text and self._webrtc_manager:
             track = self._webrtc_manager.get_outgoing_track(session.id)
+            tts_muted = self._webrtc_manager.is_tts_muted(session.id)
             text_preview = repr(text)[:200] if not isinstance(text, str) else f"{len(text)} chars"
             logger.info(
-                "[ws-bridge] TTS check: session=%s, text_type=%s, preview=%s, track=%s",
-                session.id, type(text).__name__, text_preview, track is not None,
+                "[ws-bridge] TTS check: session=%s, text_type=%s, preview=%s, track=%s, tts_muted=%s",
+                session.id, type(text).__name__, text_preview, track is not None, tts_muted,
             )
-            if track:
+            if track and not tts_muted:
                 import asyncio
                 asyncio.ensure_future(self._speak_text(session.id, text, track))
 

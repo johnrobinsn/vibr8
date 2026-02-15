@@ -3,8 +3,8 @@
 # Run both Python backend and Vite frontend
 dev:
 	@trap 'kill 0' EXIT; \
-	cd /mntc/code/vibr8 && uv run python -m server.main & \
-	cd /mntc/code/vibr8/web && bun run dev & \
+	uv run python -m server.main & \
+	cd web && bun run dev & \
 	wait
 
 # Run just the Python backend

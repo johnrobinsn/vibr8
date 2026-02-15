@@ -267,6 +267,20 @@ export const api = {
   // Usage limits
   getUsageLimits: () => get<UsageLimits>("/usage-limits"),
 
+  // Guard mode
+  setGuard: (sessionId: string, enabled: boolean) =>
+    post<{ ok: boolean; enabled: boolean }>(
+      `/sessions/${encodeURIComponent(sessionId)}/guard`,
+      { enabled },
+    ),
+
+  // TTS mute (audio in-only mode)
+  setTtsMuted: (sessionId: string, muted: boolean) =>
+    post<{ ok: boolean; muted: boolean }>(
+      `/sessions/${encodeURIComponent(sessionId)}/tts-mute`,
+      { muted },
+    ),
+
   // WebRTC signaling
   webrtcOffer: (sessionId: string, offer: { sdp: string; type: string }) =>
     post<{ sdp: string; type: string }>("/webrtc/offer", {

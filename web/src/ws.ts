@@ -1,4 +1,5 @@
 import { useStore } from "./store.js";
+import { stopWebRTC } from "./webrtc.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem } from "./types.js";
 import { generateUniqueSessionName } from "./utils/names.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
@@ -305,6 +306,24 @@ function handleMessage(sessionId: string, event: MessageEvent) {
         content: data.message,
         timestamp: Date.now(),
       });
+      break;
+    }
+
+    case "guard_state": {
+      store.setGuardEnabled(sessionId, data.enabled);
+      break;
+    }
+
+    case "audio_off": {
+      stopWebRTC(sessionId);
+      break;
+    }
+
+    case "tts_muted": {
+      const currentMode = store.audioMode.get(sessionId);
+      if (currentMode && currentMode !== "off") {
+        store.setAudioMode(sessionId, data.muted ? "in_only" : "in_out");
+      }
       break;
     }
 

@@ -499,6 +499,40 @@ def create_routes(
 
     # ── WebRTC ────────────────────────────────────────────────────────────
 
+    @routes.get("/api/sessions/{id}/guard")
+    async def get_guard(request: web.Request) -> web.Response:
+        if webrtc_manager is None:
+            return web.json_response({"error": "WebRTC not available"}, status=501)
+        sid = request.match_info["id"]
+        enabled = webrtc_manager.is_guard_enabled(sid)
+        return web.json_response({"enabled": enabled})
+
+    @routes.post("/api/sessions/{id}/guard")
+    async def set_guard(request: web.Request) -> web.Response:
+        if webrtc_manager is None:
+            return web.json_response({"error": "WebRTC not available"}, status=501)
+        sid = request.match_info["id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        enabled = bool(body.get("enabled", False))
+        webrtc_manager.set_guard_enabled(sid, enabled)
+        return web.json_response({"ok": True, "enabled": enabled})
+
+    @routes.post("/api/sessions/{id}/tts-mute")
+    async def set_tts_muted(request: web.Request) -> web.Response:
+        if webrtc_manager is None:
+            return web.json_response({"error": "WebRTC not available"}, status=501)
+        sid = request.match_info["id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        muted = bool(body.get("muted", False))
+        webrtc_manager.set_tts_muted(sid, muted)
+        return web.json_response({"ok": True, "muted": muted})
+
     @routes.post("/api/webrtc/offer")
     async def webrtc_offer(request: web.Request) -> web.Response:
         if webrtc_manager is None:

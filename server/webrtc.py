@@ -76,6 +76,8 @@ class WebRTCManager:
         self._outgoing_tracks: Dict[str, QueuedAudioTrack] = {}
         self._stt_instances: Dict[str, AsyncSTT] = {}
         self._stt_muted: set[str] = set()
+        self._guard_enabled: Dict[str, bool] = {}
+        self._tts_muted: Dict[str, bool] = {}
         self._ws_bridge = None
 
     def set_ws_bridge(self, bridge) -> None:
@@ -109,6 +111,33 @@ class WebRTCManager:
     def unmute_stt(self, session_id: str) -> None:
         """Re-enable STT processing."""
         self._stt_muted.discard(session_id)
+
+    def is_guard_enabled(self, session_id: str) -> bool:
+        """Return whether guard mode is active for *session_id*."""
+        return self._guard_enabled.get(session_id, True)
+
+    def set_guard_enabled(self, session_id: str, enabled: bool) -> None:
+        """Enable or disable guard mode for *session_id*."""
+        self._guard_enabled[session_id] = enabled
+        logger.info("[guard] session %s: guard mode %s", session_id, "ON" if enabled else "OFF")
+        # Broadcast to browser so UI stays in sync
+        if self._ws_bridge:
+            asyncio.ensure_future(
+                self._ws_bridge.broadcast_guard_state(session_id, enabled)
+            )
+
+    def is_tts_muted(self, session_id: str) -> bool:
+        """Return whether TTS is muted for *session_id*."""
+        return self._tts_muted.get(session_id, False)
+
+    def set_tts_muted(self, session_id: str, muted: bool) -> None:
+        """Mute or unmute TTS for *session_id*."""
+        self._tts_muted[session_id] = muted
+        logger.info("[webrtc] session %s: TTS %s", session_id, "muted" if muted else "unmuted")
+        if self._ws_bridge:
+            asyncio.ensure_future(
+                self._ws_bridge.broadcast_tts_muted(session_id, muted)
+            )
 
     async def handle_offer(
         self, session_id: str, sdp: str, sdp_type: str
@@ -169,6 +198,18 @@ class WebRTCManager:
             "type": pc.localDescription.type,
         }
 
+    @staticmethod
+    def _find_guard_word(text_lower: str) -> tuple[int, int] | None:
+        """Find the first occurrence of a guard word in lowered text.
+
+        Returns (start_index, end_index) or None.
+        """
+        for word in ("vibr8", "vibrate"):
+            idx = text_lower.find(word)
+            if idx != -1:
+                return (idx, idx + len(word))
+        return None
+
     def _make_stt_listener(self, session_id: str):
         """Create an STT event listener that submits transcripts to the agent."""
 
@@ -176,8 +217,51 @@ class WebRTCManager:
             if event_type == "final_transcript":
                 transcript = data["transcript"].strip()
                 logger.info("[stt] session %s transcript: %s", session_id, transcript)
-                if transcript and self._ws_bridge:
-                    await self._ws_bridge.submit_user_message(session_id, transcript)
+                if not transcript or not self._ws_bridge:
+                    return
+
+                transcript_lower = transcript.lower()
+
+                # Check for "vibr8/vibrate <command>" regardless of guard state
+                match = self._find_guard_word(transcript_lower)
+                if match:
+                    after_word = transcript_lower[match[1]:].strip()
+                    if after_word.startswith("off"):
+                        # Disconnect audio entirely
+                        if self._ws_bridge:
+                            asyncio.ensure_future(
+                                self._ws_bridge.broadcast_audio_off(session_id)
+                            )
+                        return
+                    if after_word.startswith("guard"):
+                        self.set_guard_enabled(session_id, True)
+                        asyncio.ensure_future(self._speak_short(session_id, "Guard on"))
+                        return
+                    if after_word.startswith("listen"):
+                        self.set_guard_enabled(session_id, False)
+                        asyncio.ensure_future(self._speak_short(session_id, "Listening"))
+                        return
+                    if after_word.startswith("quiet"):
+                        self.set_tts_muted(session_id, True)
+                        asyncio.ensure_future(self._speak_short(session_id, "Quiet mode"))
+                        return
+                    if after_word.startswith("speak"):
+                        self.set_tts_muted(session_id, False)
+                        asyncio.ensure_future(self._speak_short(session_id, "Speaking"))
+                        return
+
+                # If guard is enabled, require guard word
+                if self.is_guard_enabled(session_id):
+                    if not match:
+                        logger.info("[guard] session %s: no guard word, discarding", session_id)
+                        return
+                    # Strip guard word + everything before it
+                    after = transcript[match[1]:].strip()
+                    if not after:
+                        return  # guard word alone, nothing to submit
+                    transcript = after
+
+                await self._ws_bridge.submit_user_message(session_id, transcript)
             elif event_type == "voice_was_detected":
                 logger.info("[stt] session %s: voice detected — barge-in", session_id)
                 self.barge_in(session_id)
@@ -185,6 +269,21 @@ class WebRTCManager:
                 logger.debug("[stt] session %s: voice ended", session_id)
 
         return _on_stt_event
+
+    async def _speak_short(self, session_id: str, phrase: str) -> None:
+        """Speak a short acknowledgment phrase via TTS (e.g. 'Guard on')."""
+        track = self.get_outgoing_track(session_id)
+        if not track:
+            return
+        try:
+            self.mute_stt(session_id)
+            from server.tts import TTS_OpenAI
+            tts = TTS_OpenAI(opus_frame_handler=track.push_opus_frame)
+            await tts.say(phrase)
+        except Exception:
+            logger.exception("[guard] TTS failed for session %s phrase=%r", session_id, phrase)
+        finally:
+            self.unmute_stt(session_id)
 
     async def _consume_audio(
         self,
@@ -236,6 +335,8 @@ class WebRTCManager:
         pc = self._connections.pop(session_id, None)
         self._stats.pop(session_id, None)
         self._outgoing_tracks.pop(session_id, None)
+        self._guard_enabled.pop(session_id, None)
+        self._tts_muted.pop(session_id, None)
 
         # Clean up STT.
         stt = self._stt_instances.pop(session_id, None)
