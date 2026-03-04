@@ -21,6 +21,9 @@ from server.auto_namer import generate_session_title, AutoNamerOptions
 from server import session_names
 from server.routes import create_routes
 from server.webrtc import WebRTCManager
+from server.terminal import TerminalManager
+import json as _json
+from server.auth import AuthManager, auth_middleware
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -110,17 +113,83 @@ async def handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
+    """Handle WebSocket connections for terminal (PTY) sessions."""
+    import json as _json
+
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    session_id = request.match_info["session_id"]
+
+    terminal_mgr: TerminalManager = request.app["terminal_manager"]
+    term = terminal_mgr.get(session_id)
+    if not term:
+        await ws.close(code=4004, message=b"Terminal session not found")
+        return ws
+
+    # PTY output → browser
+    async def on_pty_data(data: bytes) -> None:
+        if not ws.closed:
+            await ws.send_bytes(data)
+
+    async def on_pty_exit(code: int) -> None:
+        if not ws.closed:
+            await ws.send_str(_json.dumps({"type": "exit", "code": code}))
+
+    term._on_data = on_pty_data
+    term._on_exit = on_pty_exit
+    term.start_reading(asyncio.get_event_loop())
+
+    logger.info("[terminal] Browser connected to terminal session %s", session_id)
+
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.BINARY:
+                # User input → PTY
+                term.write(msg.data)
+            elif msg.type == aiohttp.WSMsgType.TEXT:
+                # Control message (resize, etc.)
+                ctrl = _json.loads(msg.data)
+                if ctrl.get("type") == "resize":
+                    term.resize(ctrl["cols"], ctrl["rows"])
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                break
+    finally:
+        # Don't close the terminal on WS disconnect (allows reconnection)
+        term._on_data = None
+        term._on_exit = None
+        term.stop_reading()
+        logger.info("[terminal] Browser disconnected from terminal session %s", session_id)
+
+    return ws
+
+
 # ── Application factory ──────────────────────────────────────────────────────
 
 
 def create_app() -> web.Application:
-    app = web.Application()
+    auth_manager = AuthManager()
+    middlewares = [auth_middleware] if auth_manager.enabled else []
+    app = web.Application(middlewares=middlewares)
 
     session_store = SessionStore()
     ws_bridge = WsBridge()
     launcher = CliLauncher(PORT)
     worktree_tracker = WorktreeTracker()
-    webrtc_manager = WebRTCManager()
+    # Load ICE server config for WebRTC (STUN/TURN)
+    ice_servers: list[dict] = []
+    ice_env = os.environ.get("VIBR8_ICE_SERVERS")
+    if ice_env:
+        ice_servers = _json.loads(ice_env)
+    else:
+        ice_config = Path.home() / ".companion" / "ice-servers.json"
+        if ice_config.exists():
+            ice_servers = _json.loads(ice_config.read_text())
+    if ice_servers:
+        logger.info("[server] Loaded %d ICE server(s)", len(ice_servers))
+
+    webrtc_manager = WebRTCManager(ice_servers=ice_servers)
+    terminal_manager = TerminalManager()
 
     # Track background tasks so we can cancel them on shutdown.
     background_tasks: set[asyncio.Task] = set()
@@ -213,9 +282,10 @@ def create_app() -> web.Application:
     # WebSocket endpoints
     app.router.add_get("/ws/cli/{session_id}", handle_cli_ws)
     app.router.add_get("/ws/browser/{session_id}", handle_browser_ws)
+    app.router.add_get("/ws/terminal/{session_id}", handle_terminal_ws)
 
     # REST API
-    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager)
+    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager)
     app.router.add_routes(api_routes)
 
     # Production static file serving
@@ -236,6 +306,8 @@ def create_app() -> web.Application:
     app["session_store"] = session_store
     app["worktree_tracker"] = worktree_tracker
     app["webrtc_manager"] = webrtc_manager
+    app["terminal_manager"] = terminal_manager
+    app["auth_manager"] = auth_manager
 
     # ── Startup / Shutdown hooks ──────────────────────────────────────────
 
@@ -301,6 +373,7 @@ def create_app() -> web.Application:
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
 
+        await terminal_manager.close_all()
         await webrtc_manager.close_all()
         await ws_bridge.close_all()
         await launcher.kill_all()

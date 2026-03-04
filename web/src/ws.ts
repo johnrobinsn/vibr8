@@ -450,6 +450,10 @@ function clearReconnectState(sessionId: string) {
 function scheduleReconnect(sessionId: string) {
   if (reconnectTimers.has(sessionId)) return;
 
+  // Terminal sessions don't use WsBridge — skip reconnect
+  const sdk = useStore.getState().sdkSessions.find((x) => x.sessionId === sessionId);
+  if (sdk?.backendType === "terminal") return;
+
   // Record when reconnection attempts started.
   if (!reconnectStartTimes.has(sessionId)) {
     reconnectStartTimes.set(sessionId, Date.now());

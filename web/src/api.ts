@@ -2,12 +2,20 @@ import type { SdkSessionInfo } from "./types.js";
 
 const BASE = "/api";
 
+function checkAuth(res: Response): void {
+  if (res.status === 401) {
+    window.location.reload();
+    throw new Error("Session expired");
+  }
+}
+
 async function post<T = unknown>(path: string, body?: object): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
+  checkAuth(res);
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || res.statusText);
@@ -17,6 +25,7 @@ async function post<T = unknown>(path: string, body?: object): Promise<T> {
 
 async function get<T = unknown>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`);
+  checkAuth(res);
   if (!res.ok) throw new Error(res.statusText);
   return res.json();
 }
@@ -71,7 +80,7 @@ export interface CreateSessionOpts {
   branch?: string;
   createBranch?: boolean;
   useWorktree?: boolean;
-  backend?: "claude" | "codex";
+  backend?: "claude" | "codex" | "terminal";
 }
 
 export interface BackendInfo {
@@ -282,6 +291,9 @@ export const api = {
     ),
 
   // WebRTC signaling
+  getIceServers: () =>
+    get<{ iceServers: RTCIceServer[] }>("/webrtc/ice-servers"),
+
   webrtcOffer: (sessionId: string, offer: { sdp: string; type: string }) =>
     post<{ sdp: string; type: string }>("/webrtc/offer", {
       sessionId,

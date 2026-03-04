@@ -26,6 +26,13 @@ export default defineConfig({
       "/ws": {
         target: "ws://localhost:3456",
         ws: true,
+        configure: (proxy) => {
+          // Suppress TLS socket errors when backend closes WS connections
+          proxy.on("error", () => {});
+          proxy.on("proxyReqWs", (_proxyReq, _req, socket) => {
+            socket.on("error", () => {});
+          });
+        },
       },
     },
   },

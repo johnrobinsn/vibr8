@@ -20,7 +20,11 @@ export function TopBar() {
   const reconnectGaveUp = useStore((s) => s.reconnectGaveUp);
   const audioMode = useStore((s) => s.audioMode);
   const webrtcStatus = useStore((s) => s.webrtcStatus);
+  const sdkSessions = useStore((s) => s.sdkSessions);
 
+  const isTerminalSession = currentSessionId
+    ? sdkSessions.find((x) => x.sessionId === currentSessionId)?.backendType === "terminal"
+    : false;
   const isConnected = currentSessionId ? (cliConnected.get(currentSessionId) ?? false) : false;
   const connStatus = currentSessionId ? (connectionStatus.get(currentSessionId) ?? "disconnected") : "disconnected";
   const isCliDisconnected = connStatus === "connected" && !isConnected;
@@ -62,8 +66,8 @@ export function TopBar() {
           </svg>
         </button>
 
-        {/* Connection status */}
-        {currentSessionId && (
+        {/* Connection status (not shown for terminal sessions) */}
+        {currentSessionId && !isTerminalSession && (
           <div className="flex items-center gap-1.5">
             {isConnected ? (
               <>
@@ -104,8 +108,8 @@ export function TopBar() {
         )}
       </div>
 
-      {/* Right side */}
-      {currentSessionId && (
+      {/* Right side (not shown for terminal sessions) */}
+      {currentSessionId && !isTerminalSession && (
         <div className="flex items-center gap-1.5 sm:gap-3 text-[12px] text-cc-muted">
           {status === "compacting" && (
             <span className="text-cc-warning font-medium animate-pulse">Compacting...</span>

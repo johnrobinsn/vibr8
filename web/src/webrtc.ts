@@ -14,8 +14,16 @@ export async function startWebRTC(sessionId: string): Promise<void> {
 
   const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-  // No STUN/TURN — local network only
-  const pc = new RTCPeerConnection({ iceServers: [] });
+  // Fetch ICE servers from backend (STUN/TURN config)
+  let iceServers: RTCIceServer[] = [];
+  try {
+    const config = await api.getIceServers();
+    iceServers = config.iceServers;
+  } catch {
+    // Fall back to empty (local network only)
+  }
+
+  const pc = new RTCPeerConnection({ iceServers });
 
   // Add local audio track to the peer connection
   const audioTrack = localStream.getAudioTracks()[0];

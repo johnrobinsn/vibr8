@@ -235,8 +235,10 @@ export function HomePage() {
   }
 
   async function handleSend() {
+    const isTerminal = backend === "terminal";
     const msg = text.trim();
-    if (!msg || sending) return;
+    if (!isTerminal && (!msg || sending)) return;
+    if (isTerminal && sending) return;
 
     setSending(true);
     setError("");
@@ -250,16 +252,28 @@ export function HomePage() {
       // Create session (with optional worktree)
       const branchName = worktreeBranch.trim() || undefined;
       const result = await api.createSession({
-        model,
-        permissionMode: mode,
+        model: isTerminal ? undefined : model,
+        permissionMode: isTerminal ? undefined : mode,
         cwd: cwd || undefined,
         envSlug: selectedEnv || undefined,
-        branch: branchName,
-        createBranch: branchName && isNewBranch ? true : undefined,
-        useWorktree: useWorktree || undefined,
+        branch: isTerminal ? undefined : branchName,
+        createBranch: isTerminal ? undefined : (branchName && isNewBranch ? true : undefined),
+        useWorktree: isTerminal ? undefined : (useWorktree || undefined),
         backend,
       });
       const sessionId = result.sessionId;
+
+      // Add to sdkSessions so the sidebar picks it up
+      useStore.getState().setSdkSessions([
+        ...useStore.getState().sdkSessions,
+        {
+          sessionId,
+          state: "connected" as const,
+          cwd: cwd || "",
+          createdAt: Date.now(),
+          backendType: backend,
+        },
+      ]);
 
       // Assign a random session name
       const existingNames = new Set(useStore.getState().sessionNames.values());
@@ -269,11 +283,17 @@ export function HomePage() {
       // Save cwd to recent dirs
       if (cwd) addRecentDir(cwd);
 
+      // Switch to session
+      setCurrentSession(sessionId);
+
+      if (isTerminal) {
+        // Terminal sessions don't use the WsBridge WebSocket — TerminalView connects directly
+        return;
+      }
+
       // Store the permission mode for this session
       useStore.getState().setPreviousPermissionMode(sessionId, mode);
 
-      // Switch to session
-      setCurrentSession(sessionId);
       connectSession(sessionId);
 
       // Wait for WebSocket connection
@@ -301,7 +321,7 @@ export function HomePage() {
     }
   }
 
-  const canSend = text.trim().length > 0 && !sending;
+  const canSend = backend === "terminal" ? !sending : (text.trim().length > 0 && !sending);
 
   return (
     <div className="flex-1 h-full flex items-center justify-center px-3 sm:px-4">
@@ -349,6 +369,26 @@ export function HomePage() {
 
         {/* Input card */}
         <div className="bg-cc-card border border-cc-border rounded-[14px] shadow-sm overflow-hidden">
+          {backend === "terminal" ? (
+            <div className="flex items-center justify-between px-4 py-4">
+              <span className="text-sm text-cc-muted">Open an interactive terminal session</span>
+              <button
+                onClick={handleSend}
+                disabled={!canSend}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  canSend
+                    ? "bg-green-600 text-white hover:bg-green-700 cursor-pointer"
+                    : "bg-cc-hover text-cc-muted cursor-not-allowed"
+                }`}
+              >
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4">
+                  <path d="M0 2v12h16V2H0zm1 1h14v1H1V3zm0 2h14v8H1V5zm1 1v6h4V6H2zm5 0v2h7V6H7zm0 3v3h7V9H7z" />
+                </svg>
+                Open Terminal
+              </button>
+            </div>
+          ) : (
+          <>
           <textarea
             ref={textareaRef}
             value={text}
@@ -426,6 +466,8 @@ export function HomePage() {
               </button>
             </div>
           </div>
+          </>
+          )}
         </div>
 
         {/* Below-card selectors */}
@@ -482,6 +524,7 @@ export function HomePage() {
             )}
           </div>
 
+          {backend !== "terminal" && (<>
           {/* Branch picker (always visible when cwd is a git repo) */}
           {gitRepoInfo && (
             <div className="relative" ref={branchDropdownRef}>
@@ -735,6 +778,7 @@ export function HomePage() {
               </div>
             )}
           </div>
+          </>)}
         </div>
 
         {/* Error message */}

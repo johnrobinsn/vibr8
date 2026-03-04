@@ -13,7 +13,7 @@ import time
 from typing import Dict
 
 import numpy as np
-from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from av import AudioFrame
 
 from server.audio_track import QueuedAudioTrack
@@ -70,7 +70,8 @@ class AudioStatsLogger:
 class WebRTCManager:
     """Manages per-session RTCPeerConnection instances with STT and TTS audio."""
 
-    def __init__(self) -> None:
+    def __init__(self, ice_servers: list[dict] | None = None) -> None:
+        self._ice_servers = ice_servers or []
         self._connections: Dict[str, RTCPeerConnection] = {}
         self._stats: Dict[str, AudioStatsLogger] = {}
         self._outgoing_tracks: Dict[str, QueuedAudioTrack] = {}
@@ -79,6 +80,10 @@ class WebRTCManager:
         self._guard_enabled: Dict[str, bool] = {}
         self._tts_muted: Dict[str, bool] = {}
         self._ws_bridge = None
+
+    def get_client_ice_servers(self) -> list[dict]:
+        """Return ICE servers in the format the browser RTCPeerConnection expects."""
+        return self._ice_servers
 
     def set_ws_bridge(self, bridge) -> None:
         """Set a reference to WsBridge for submitting STT transcripts."""
@@ -151,8 +156,15 @@ class WebRTCManager:
         if session_id in self._connections:
             await self.close_connection(session_id)
 
-        # No STUN/TURN servers — local network only, avoids aioice retry errors.
-        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
+        # Build ICE server list from config (empty = local network only).
+        ice_server_objs = []
+        for srv in self._ice_servers:
+            ice_server_objs.append(RTCIceServer(
+                urls=srv["urls"],
+                username=srv.get("username"),
+                credential=srv.get("credential"),
+            ))
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_server_objs))
         self._connections[session_id] = pc
 
         # Create STT instance for this session.

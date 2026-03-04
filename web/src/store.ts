@@ -47,7 +47,7 @@ interface AppState {
   sidebarOpen: boolean;
   taskPanelOpen: boolean;
   homeResetKey: number;
-  activeTab: "chat" | "editor";
+  activeTab: "chat" | "editor" | "terminal";
   editorOpenFile: Map<string, string>;
   editorUrl: Map<string, string>;
   editorLoading: Map<string, boolean>;
@@ -132,20 +132,6 @@ interface AppState {
   reset: () => void;
 }
 
-function getInitialSessionNames(): Map<string, string> {
-  if (typeof window === "undefined") return new Map();
-  try {
-    return new Map(JSON.parse(localStorage.getItem("cc-session-names") || "[]"));
-  } catch {
-    return new Map();
-  }
-}
-
-function getInitialSessionId(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem("cc-current-session") || null;
-}
-
 function getInitialDarkMode(): boolean {
   if (typeof window === "undefined") return false;
   const stored = localStorage.getItem("cc-dark-mode");
@@ -163,7 +149,7 @@ function getInitialNotificationSound(): boolean {
 export const useStore = create<AppState>((set) => ({
   sessions: new Map(),
   sdkSessions: [],
-  currentSessionId: getInitialSessionId(),
+  currentSessionId: null,
   messages: new Map(),
   streaming: new Map(),
   streamingStartedAt: new Map(),
@@ -175,7 +161,7 @@ export const useStore = create<AppState>((set) => ({
   previousPermissionMode: new Map(),
   sessionTasks: new Map(),
   changedFiles: new Map(),
-  sessionNames: getInitialSessionNames(),
+  sessionNames: new Map(),
   recentlyRenamed: new Set(),
   darkMode: getInitialDarkMode(),
   notificationSound: getInitialNotificationSound(),
@@ -222,16 +208,10 @@ export const useStore = create<AppState>((set) => ({
     set({ taskPanelOpen: open });
   },
   newSession: () => {
-    localStorage.removeItem("cc-current-session");
     set((s) => ({ currentSessionId: null, homeResetKey: s.homeResetKey + 1 }));
   },
 
   setCurrentSession: (id) => {
-    if (id) {
-      localStorage.setItem("cc-current-session", id);
-    } else {
-      localStorage.removeItem("cc-current-session");
-    }
     set({ currentSessionId: id });
   },
 
@@ -296,10 +276,6 @@ export const useStore = create<AppState>((set) => ({
       webrtcStatus.delete(sessionId);
       const guardEnabled = new Map(s.guardEnabled);
       guardEnabled.delete(sessionId);
-      localStorage.setItem("cc-session-names", JSON.stringify(Array.from(sessionNames.entries())));
-      if (s.currentSessionId === sessionId) {
-        localStorage.removeItem("cc-current-session");
-      }
       return {
         sessions,
         messages,
@@ -327,7 +303,9 @@ export const useStore = create<AppState>((set) => ({
       };
     }),
 
-  setSdkSessions: (sessions) => set({ sdkSessions: sessions }),
+  setSdkSessions: (sessions) => {
+    set({ sdkSessions: sessions });
+  },
 
   appendMessage: (sessionId, msg) =>
     set((s) => {
@@ -452,7 +430,6 @@ export const useStore = create<AppState>((set) => ({
     set((s) => {
       const sessionNames = new Map(s.sessionNames);
       sessionNames.set(sessionId, name);
-      localStorage.setItem("cc-session-names", JSON.stringify(Array.from(sessionNames.entries())));
       return { sessionNames };
     }),
 
@@ -599,3 +576,4 @@ export const useStore = create<AppState>((set) => ({
       guardEnabled: new Map(),
     }),
 }));
+

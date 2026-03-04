@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { vi, describe, it, expect, beforeEach } from "vitest";
 
 // jsdom does not implement window.matchMedia, which the store uses for initial dark mode detection.
 // vi.hoisted runs before any imports, ensuring matchMedia is available when store.ts initializes.
@@ -193,17 +194,15 @@ describe("Session management", () => {
     expect(useStore.getState().currentSessionId).toBe("s1");
   });
 
-  it("setCurrentSession: persists to localStorage", () => {
+  it("setCurrentSession: updates state", () => {
     useStore.getState().setCurrentSession("s1");
     expect(useStore.getState().currentSessionId).toBe("s1");
-    expect(localStorage.getItem("cc-current-session")).toBe("s1");
   });
 
-  it("setCurrentSession(null): removes from localStorage", () => {
+  it("setCurrentSession(null): clears state", () => {
     useStore.getState().setCurrentSession("s1");
     useStore.getState().setCurrentSession(null);
     expect(useStore.getState().currentSessionId).toBeNull();
-    expect(localStorage.getItem("cc-current-session")).toBeNull();
   });
 });
 
@@ -387,24 +386,15 @@ describe("Tasks", () => {
 // ─── Session names ──────────────────────────────────────────────────────────
 
 describe("Session names", () => {
-  it("setSessionName: persists to localStorage as JSON", () => {
+  it("setSessionName: updates state", () => {
     useStore.getState().setSessionName("s1", "My Session");
-
     expect(useStore.getState().sessionNames.get("s1")).toBe("My Session");
-
-    const stored = JSON.parse(localStorage.getItem("cc-session-names") || "[]");
-    expect(stored).toEqual([["s1", "My Session"]]);
   });
 
   it("setSessionName: updates existing name", () => {
     useStore.getState().setSessionName("s1", "First");
     useStore.getState().setSessionName("s1", "Second");
-
     expect(useStore.getState().sessionNames.get("s1")).toBe("Second");
-
-    const stored = JSON.parse(localStorage.getItem("cc-session-names") || "[]");
-    const map = new Map(stored);
-    expect(map.get("s1")).toBe("Second");
   });
 });
 
@@ -453,7 +443,6 @@ describe("UI state", () => {
 
     expect(useStore.getState().currentSessionId).toBeNull();
     expect(useStore.getState().homeResetKey).toBe(keyBefore + 1);
-    expect(localStorage.getItem("cc-current-session")).toBeNull();
   });
 });
 

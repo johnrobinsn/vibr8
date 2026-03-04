@@ -1,4 +1,22 @@
 // @vitest-environment jsdom
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
+
+// jsdom does not implement window.matchMedia — stub it before store.ts imports
+vi.hoisted(() => {
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  });
+});
 
 import type { SessionState, PermissionRequest, ContentBlock } from "./types.js";
 

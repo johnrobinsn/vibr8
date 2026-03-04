@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from server.ws_bridge import WsBridge
     from server.session_store import SessionStore
     from server.webrtc import WebRTCManager
+    from server.terminal import TerminalManager
+    from server.auth import AuthManager
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +44,54 @@ def create_routes(
     session_store: SessionStore,
     worktree_tracker: WorktreeTracker,
     webrtc_manager: WebRTCManager | None = None,
+    terminal_manager: TerminalManager | None = None,
+    auth_manager: AuthManager | None = None,
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
+
+    # ── Auth ─────────────────────────────────────────────────────────────
+
+    @routes.post("/api/auth/login")
+    async def auth_login(request: web.Request) -> web.Response:
+        if not auth_manager or not auth_manager.enabled:
+            return web.json_response({"error": "Auth not configured"}, status=501)
+        body = await request.json()
+        username = body.get("username", "")
+        password = body.get("password", "")
+        if not auth_manager.verify(username, password):
+            return web.json_response({"error": "Invalid credentials"}, status=401)
+        token = auth_manager.create_session(username)
+        resp = web.json_response({"ok": True, "username": username})
+        resp.set_cookie(
+            "vibr8_session",
+            token,
+            httponly=True,
+            samesite="Lax",
+            secure=request.secure,
+            max_age=30 * 86400,
+            path="/",
+        )
+        return resp
+
+    @routes.post("/api/auth/logout")
+    async def auth_logout(request: web.Request) -> web.Response:
+        token = request.cookies.get("vibr8_session")
+        if token and auth_manager:
+            auth_manager.revoke_session(token)
+        resp = web.json_response({"ok": True})
+        resp.del_cookie("vibr8_session", path="/")
+        return resp
+
+    @routes.get("/api/auth/me")
+    async def auth_me(request: web.Request) -> web.Response:
+        if not auth_manager or not auth_manager.enabled:
+            return web.json_response({"authEnabled": False})
+        username = request.get("auth_user")
+        return web.json_response({
+            "authEnabled": True,
+            "authenticated": username is not None,
+            "username": username,
+        })
 
     # ── SDK Sessions ─────────────────────────────────────────────────────
 
@@ -56,8 +104,23 @@ def create_routes(
 
         try:
             backend = body.get("backend", "claude")
-            if backend not in ("claude", "codex"):
+            if backend not in ("claude", "codex", "terminal"):
                 return web.json_response({"error": f"Invalid backend: {backend}"}, status=400)
+
+            if backend == "terminal":
+                if not terminal_manager:
+                    return web.json_response({"error": "Terminal not available"}, status=501)
+                import uuid, time
+                session_id = str(uuid.uuid4())
+                cwd = body.get("cwd") or os.getcwd()
+                terminal_manager.create(session_id, cwd=cwd)
+                return web.json_response({
+                    "sessionId": session_id,
+                    "state": "connected",
+                    "cwd": cwd,
+                    "backendType": "terminal",
+                    "createdAt": time.time() * 1000,
+                })
 
             # Resolve environment variables
             env_vars: dict[str, str] | None = body.get("env")
@@ -133,7 +196,7 @@ def create_routes(
 
             return web.json_response(session_dict)
         except Exception as e:
-            logger.error(f"[routes] Failed to create session: {e}")
+            logger.exception(f"[routes] Failed to create session: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
     @routes.get("/api/sessions")
@@ -145,6 +208,20 @@ def create_routes(
             s_dict = s.to_dict() if hasattr(s, "to_dict") else (s if isinstance(s, dict) else s.__dict__)
             s_dict["name"] = names.get(s_dict.get("sessionId", ""), s_dict.get("name"))
             enriched.append(s_dict)
+        # Include terminal sessions
+        if terminal_manager:
+            import time
+            for sid in terminal_manager.get_all_ids():
+                term = terminal_manager.get(sid)
+                if term:
+                    enriched.append({
+                        "sessionId": sid,
+                        "state": "connected",
+                        "cwd": term._cwd,
+                        "backendType": "terminal",
+                        "name": names.get(sid),
+                        "createdAt": time.time() * 1000,
+                    })
         return web.json_response(enriched)
 
     @routes.get("/api/sessions/{id}")
@@ -190,6 +267,9 @@ def create_routes(
     @routes.delete("/api/sessions/{id}")
     async def delete_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
+        # Close terminal session if it exists
+        if terminal_manager:
+            terminal_manager.close(sid)
         await launcher.kill(sid)
         if webrtc_manager:
             await webrtc_manager.close_connection(sid)
@@ -228,6 +308,7 @@ def create_routes(
         backends = []
         backends.append({"id": "claude", "name": "Claude Code", "available": shutil.which("claude") is not None})
         backends.append({"id": "codex", "name": "Codex", "available": shutil.which("codex") is not None})
+        backends.append({"id": "terminal", "name": "Terminal", "available": True})
         return web.json_response(backends)
 
     @routes.get("/api/backends/{id}/models")
@@ -532,6 +613,12 @@ def create_routes(
         muted = bool(body.get("muted", False))
         webrtc_manager.set_tts_muted(sid, muted)
         return web.json_response({"ok": True, "muted": muted})
+
+    @routes.get("/api/webrtc/ice-servers")
+    async def get_ice_servers(request: web.Request) -> web.Response:
+        if webrtc_manager is None:
+            return web.json_response({"iceServers": []})
+        return web.json_response({"iceServers": webrtc_manager.get_client_ice_servers()})
 
     @routes.post("/api/webrtc/offer")
     async def webrtc_offer(request: web.Request) -> web.Response:

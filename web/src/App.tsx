@@ -1,6 +1,5 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useStore } from "./store.js";
-import { connectSession } from "./ws.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ChatView } from "./components/ChatView.js";
 import { TopBar } from "./components/TopBar.js";
@@ -8,6 +7,8 @@ import { HomePage } from "./components/HomePage.js";
 import { TaskPanel } from "./components/TaskPanel.js";
 import { EditorPanel } from "./components/EditorPanel.js";
 import { Playground } from "./components/Playground.js";
+import { TerminalView } from "./components/TerminalView.js";
+import { LoginPage } from "./components/LoginPage.js";
 
 function useHash() {
   return useSyncExternalStore(
@@ -17,25 +18,48 @@ function useHash() {
 }
 
 export default function App() {
+  const [authState, setAuthState] = useState<"loading" | "login" | "authenticated">("loading");
   const darkMode = useStore((s) => s.darkMode);
   const currentSessionId = useStore((s) => s.currentSessionId);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const taskPanelOpen = useStore((s) => s.taskPanelOpen);
   const homeResetKey = useStore((s) => s.homeResetKey);
   const activeTab = useStore((s) => s.activeTab);
+  const isTerminalSession = useStore((s) => {
+    if (!s.currentSessionId) return false;
+    const sdk = s.sdkSessions.find((x) => x.sessionId === s.currentSessionId);
+    return sdk?.backendType === "terminal";
+  });
+  const terminalIdsRef = useRef<string[]>([]);
+  const terminalSessionIds = useStore((s) => {
+    const ids = s.sdkSessions.filter((x) => x.backendType === "terminal").map((x) => x.sessionId);
+    const prev = terminalIdsRef.current;
+    if (ids.length === prev.length && ids.every((id, i) => id === prev[i])) return prev;
+    terminalIdsRef.current = ids;
+    return ids;
+  });
   const hash = useHash();
+
+  // Auth check on mount
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((r) => r.json())
+      .then((data) => {
+        if (!data.authEnabled || data.authenticated) {
+          setAuthState("authenticated");
+        } else {
+          setAuthState("login");
+        }
+      })
+      .catch(() => setAuthState("authenticated")); // If endpoint fails, assume no auth
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
 
-  // Auto-connect to restored session on mount
-  useEffect(() => {
-    const restoredId = useStore.getState().currentSessionId;
-    if (restoredId) {
-      connectSession(restoredId);
-    }
-  }, []);
+  if (authState === "loading") return null;
+  if (authState === "login") return <LoginPage onLogin={() => setAuthState("authenticated")} />;
 
   if (hash === "#/playground") {
     return <Playground />;
@@ -67,20 +91,32 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <TopBar />
         <div className="flex-1 overflow-hidden relative">
-          {/* Chat tab — visible when activeTab is "chat" or no session */}
-          <div className={`absolute inset-0 ${activeTab === "chat" || !currentSessionId ? "" : "hidden"}`}>
-            {currentSessionId ? (
-              <ChatView sessionId={currentSessionId} />
-            ) : (
-              <HomePage key={homeResetKey} />
-            )}
-          </div>
-
-          {/* Editor tab */}
-          {currentSessionId && activeTab === "editor" && (
-            <div className="absolute inset-0">
-              <EditorPanel sessionId={currentSessionId} />
+          {/* Terminal sessions — kept mounted but hidden to preserve buffer */}
+          {terminalSessionIds.map((id) => (
+            <div key={id} className={`absolute inset-0 ${currentSessionId === id ? "" : "hidden"}`}>
+              <TerminalView sessionId={id} visible={currentSessionId === id} />
             </div>
+          ))}
+
+          {/* Non-terminal content */}
+          {!isTerminalSession && (
+            <>
+              {/* Chat tab — visible when activeTab is "chat" or no session */}
+              <div className={`absolute inset-0 ${activeTab === "chat" || !currentSessionId ? "" : "hidden"}`}>
+                {currentSessionId ? (
+                  <ChatView sessionId={currentSessionId} />
+                ) : (
+                  <HomePage key={homeResetKey} />
+                )}
+              </div>
+
+              {/* Editor tab */}
+              {currentSessionId && activeTab === "editor" && (
+                <div className="absolute inset-0">
+                  <EditorPanel sessionId={currentSessionId} />
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>

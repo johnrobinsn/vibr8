@@ -3,6 +3,7 @@ import { useStore } from "../store.js";
 import { api } from "../api.js";
 import { connectSession, disconnectSession } from "../ws.js";
 import { stopWebRTC } from "../webrtc.js";
+import { destroyTerminal } from "./TerminalView.js";
 import { EnvManager } from "./EnvManager.js";
 
 export function Sidebar() {
@@ -64,12 +65,20 @@ export function Sidebar() {
 
   function handleSelectSession(sessionId: string) {
     if (currentSessionId === sessionId) return;
-    // Disconnect from old session, connect to new
+    const s = useStore.getState();
+    // Disconnect from old session (skip terminal sessions — they don't use WsBridge)
     if (currentSessionId) {
-      disconnectSession(currentSessionId);
+      const oldSdk = s.sdkSessions.find((x) => x.sessionId === currentSessionId);
+      if (oldSdk?.backendType !== "terminal") {
+        disconnectSession(currentSessionId);
+      }
     }
     setCurrentSession(sessionId);
-    connectSession(sessionId);
+    // Terminal sessions use their own WebSocket — don't connect via WsBridge
+    const newSdk = s.sdkSessions.find((x) => x.sessionId === sessionId);
+    if (newSdk?.backendType !== "terminal") {
+      connectSession(sessionId);
+    }
     // Close sidebar on mobile
     if (window.innerWidth < 768) {
       useStore.getState().setSidebarOpen(false);
@@ -78,7 +87,10 @@ export function Sidebar() {
 
   function handleNewSession() {
     if (currentSessionId) {
-      disconnectSession(currentSessionId);
+      const oldSdk = useStore.getState().sdkSessions.find((x) => x.sessionId === currentSessionId);
+      if (oldSdk?.backendType !== "terminal") {
+        disconnectSession(currentSessionId);
+      }
     }
     useStore.getState().newSession();
     if (window.innerWidth < 768) {
@@ -132,6 +144,27 @@ export function Sidebar() {
     }
     doArchive(sessionId);
   }, [sdkSessions, sessions]);
+
+  const handleCloseTerminal = useCallback(async (e: React.MouseEvent, sessionId: string) => {
+    e.stopPropagation();
+    try {
+      destroyTerminal(sessionId);
+      await api.deleteSession(sessionId);
+    } catch {
+      // best-effort
+    }
+    removeSession(sessionId);
+    if (useStore.getState().currentSessionId === sessionId) {
+      useStore.getState().newSession();
+    }
+    // Refresh session list
+    try {
+      const list = await api.listSessions();
+      useStore.getState().setSdkSessions(list);
+    } catch {
+      // best-effort
+    }
+  }, [removeSession]);
 
   const doArchive = useCallback(async (sessionId: string, force?: boolean) => {
     try {
@@ -201,7 +234,7 @@ export function Sidebar() {
       sdkState: sdkInfo?.state ?? null,
       createdAt: sdkInfo?.createdAt ?? 0,
       archived: sdkInfo?.archived ?? false,
-      backendType: bridgeState?.backend_type || sdkInfo?.backendType || "claude",
+      backendType: sdkInfo?.backendType || bridgeState?.backend_type || "claude",
     };
   }).sort((a, b) => b.createdAt - a.createdAt);
 
@@ -292,6 +325,9 @@ export function Sidebar() {
                 {s.backendType === "codex" && (
                   <span className="text-[9px] px-1 py-0.5 rounded bg-purple-500/15 text-purple-600 dark:text-purple-400 shrink-0">codex</span>
                 )}
+                {s.backendType === "terminal" && (
+                  <span className="text-[9px] px-1 py-0.5 rounded bg-green-500/15 text-green-600 dark:text-green-400 shrink-0">term</span>
+                )}
               </span>
             )}
           </div>
@@ -361,6 +397,16 @@ export function Sidebar() {
               </svg>
             </button>
           </>
+        ) : s.backendType === "terminal" ? (
+          <button
+            onClick={(e) => handleCloseTerminal(e, s.id)}
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md opacity-0 group-hover:opacity-100 hover:bg-cc-border text-cc-muted hover:text-red-400 transition-all cursor-pointer"
+            title="Close terminal"
+          >
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
+              <path d="M4 4l8 8M12 4l-8 8" />
+            </svg>
+          </button>
         ) : (
           <button
             onClick={(e) => handleArchiveSession(e, s.id)}
