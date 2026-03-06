@@ -205,6 +205,27 @@ class WebRTCManager:
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
 
+        # Wait for ICE gathering to complete so relay candidates (TURN) are
+        # included in the answer SDP.  Without this the answer may only
+        # contain host candidates (private IPs) that are unreachable from
+        # mobile networks.
+        if pc.iceGatheringState != "complete":
+            gathering_done = asyncio.Event()
+
+            @pc.on("icegatheringstatechange")
+            def _on_ice_gathering_state_change() -> None:
+                if pc.iceGatheringState == "complete":
+                    gathering_done.set()
+
+            try:
+                await asyncio.wait_for(gathering_done.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[webrtc] session %s: ICE gathering timed out (state=%s)",
+                    session_id,
+                    pc.iceGatheringState,
+                )
+
         return {
             "sdp": pc.localDescription.sdp,
             "type": pc.localDescription.type,

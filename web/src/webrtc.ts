@@ -66,10 +66,25 @@ export async function startWebRTC(sessionId: string): Promise<void> {
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  // Exchange SDP with the backend
+  // Wait for ICE gathering to complete so relay (TURN) candidates are
+  // included in the offer SDP.  Without trickle ICE signaling, candidates
+  // not in the initial SDP are lost.
+  if (pc.iceGatheringState !== "complete") {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 10_000); // 10s timeout
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === "complete") {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+    });
+  }
+
+  // Exchange SDP with the backend (now includes all candidates)
   const answer = await api.webrtcOffer(sessionId, {
-    sdp: offer.sdp!,
-    type: offer.type,
+    sdp: pc.localDescription!.sdp,
+    type: pc.localDescription!.type,
   });
 
   // Set the remote answer

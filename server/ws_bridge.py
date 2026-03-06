@@ -667,6 +667,9 @@ class WsBridge:
         await self._broadcast_to_browsers(session, browser_msg)
         self._persist_session(session)
 
+        # Refresh git ahead/behind counts (may have changed if agent committed)
+        await self._refresh_git_counts(session)
+
         # Auto-naming
         if (
             not msg.get("is_error")
@@ -677,6 +680,31 @@ class WsBridge:
             first = next((m for m in session.message_history if m.get("type") == "user_message"), None)
             if first:
                 self._on_first_turn_completed(session.id, first.get("content", ""))
+
+    async def _refresh_git_counts(self, session: Session) -> None:
+        """Recompute git ahead/behind and push to browsers if changed."""
+        cwd = session.state.get("repo_root") or session.state.get("cwd")
+        if not cwd:
+            return
+        try:
+            import asyncio
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+                cwd=cwd, capture_output=True, text=True, timeout=3,
+            )
+            parts = result.stdout.strip().split()
+            if len(parts) == 2:
+                new_behind, new_ahead = int(parts[0]), int(parts[1])
+                if new_ahead != session.state.get("git_ahead") or new_behind != session.state.get("git_behind"):
+                    session.state["git_ahead"] = new_ahead
+                    session.state["git_behind"] = new_behind
+                    await self._broadcast_to_browsers(session, {
+                        "type": "session_update",
+                        "session": {"git_ahead": new_ahead, "git_behind": new_behind},
+                    })
+        except Exception:
+            pass
 
     async def _handle_stream_event(self, session: Session, msg: dict[str, Any]) -> None:
         # Agent is streaming a response — stop thinking tone.
