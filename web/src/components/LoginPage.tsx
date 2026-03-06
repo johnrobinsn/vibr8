@@ -35,9 +35,9 @@ export function LoginPage({ onLogin }: Props) {
   return (
     <div className="h-[100dvh] flex items-center justify-center bg-cc-bg">
       <div className="w-full max-w-sm mx-4">
-        <div className="text-center mb-8">
-          <img src="/logo.svg" alt="vibr8" className="w-10 h-10 mx-auto mb-3" />
-          <h1 className="text-xl font-semibold text-cc-fg">vibr8</h1>
+        <div className="flex items-center justify-center gap-3 mb-8">
+          <img src="/logo.svg" alt="" className="w-10 h-10" />
+          <h1 className="text-2xl font-semibold text-cc-fg">vibr8</h1>
         </div>
 
         <form onSubmit={handleSubmit} className="bg-cc-card border border-cc-border rounded-xl p-6 shadow-sm">

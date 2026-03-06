@@ -1,4 +1,4 @@
-"""Track worktree-to-session mappings, persisted to ~/.companion/worktrees.json."""
+"""Track worktree-to-session mappings, persisted to ~/.vibr8/worktrees.json."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class WorktreeMapping:
 
 # -- Paths -------------------------------------------------------------------
 
-TRACKER_PATH = Path.home() / ".companion" / "worktrees.json"
+TRACKER_PATH = Path.home() / ".vibr8" / "worktrees.json"
 
 
 # -- Tracker -----------------------------------------------------------------

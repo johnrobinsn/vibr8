@@ -1,6 +1,6 @@
 """Fetch OAuth usage limits from the Anthropic API.
 
-Ported from companion/web/server/usage-limits.ts.
+Originally ported from The Vibe Companion (usage-limits.ts).
 Reads the OAuth access token from the macOS keychain (via ``security``) or
 from the credentials file on Windows/Linux, then queries the usage endpoint.
 Results are cached in memory with a 60-second TTL.

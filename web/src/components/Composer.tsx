@@ -44,6 +44,18 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const previousMode = useStore((s) => s.previousPermissionMode.get(sessionId) || "acceptEdits");
 
   const isConnected = cliConnected.get(sessionId) ?? false;
+
+  // Focus textarea when pendingFocus signals "composer"
+  // Wait until isConnected so the textarea isn't disabled (disabled elements ignore .focus())
+  const pendingFocus = useStore((s) => s.pendingFocus);
+  useEffect(() => {
+    if (pendingFocus === "composer" && isConnected) {
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        useStore.getState().setPendingFocus(null);
+      });
+    }
+  }, [pendingFocus, isConnected]);
   const currentMode = sessionData?.permissionMode || "acceptEdits";
   const isPlan = currentMode === "plan";
   const audioMode = useStore((s) => s.audioMode.get(sessionId) ?? "off");
@@ -120,6 +132,9 @@ export function Composer({ sessionId }: { sessionId: string }) {
       session_id: sessionId,
       images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64 })) : undefined,
     });
+
+    // Optimistic: show thinking/stop immediately instead of waiting for backend status
+    useStore.getState().setSessionStatus(sessionId, "running");
 
     useStore.getState().appendMessage(sessionId, {
       id: `user-${Date.now()}-${++idCounter}`,
@@ -452,11 +467,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
               {isRunning ? (
                 <button
                   onClick={handleInterrupt}
-                  className="flex items-center justify-center w-8 h-8 rounded-lg bg-cc-error/10 hover:bg-cc-error/20 text-cc-error transition-colors cursor-pointer"
+                  className="flex items-center justify-center w-8 h-8 rounded-full bg-cc-error text-white animate-pulse transition-colors cursor-pointer"
                   title="Stop generation"
                 >
                   <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                    <rect x="3" y="3" width="10" height="10" rx="1" />
+                    <rect x="3" y="3" width="10" height="10" rx="2" />
                   </svg>
                 </button>
               ) : (

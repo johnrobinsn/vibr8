@@ -1,7 +1,7 @@
 """Manage CLI backend processes (Claude Code via --sdk-url WebSocket,
 or Codex via app-server stdio).
 
-Ported from companion/web/server/cli-launcher.ts.
+Originally ported from The Vibe Companion (cli-launcher.ts).
 """
 
 from __future__ import annotations

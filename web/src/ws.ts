@@ -128,7 +128,10 @@ function handleMessage(sessionId: string, event: MessageEvent) {
     case "session_init": {
       store.addSession(data.session);
       store.setCliConnected(sessionId, true);
-      store.setSessionStatus(sessionId, "idle");
+      // Don't overwrite optimistic "running" status on init
+      if (store.sessionStatus.get(sessionId) !== "running") {
+        store.setSessionStatus(sessionId, "idle");
+      }
       if (!store.sessionNames.has(sessionId)) {
         const existingNames = new Set(store.sessionNames.values());
         const name = generateUniqueSessionName(existingNames);
@@ -281,6 +284,10 @@ function handleMessage(sessionId: string, event: MessageEvent) {
     case "status_change": {
       if (data.status === "compacting") {
         store.setSessionStatus(sessionId, "compacting");
+      } else if (data.status === "idle" && store.sessionStatus.get(sessionId) === "running") {
+        // Don't downgrade from running to idle via status_change —
+        // only the "result" message should clear "running" status.
+        // This prevents flickering when the backend sends intermediate idle states.
       } else {
         store.setSessionStatus(sessionId, data.status);
       }
@@ -412,16 +419,25 @@ export function connectSession(sessionId: string) {
   const ws = new WebSocket(getWsUrl(sessionId));
   sockets.set(sessionId, ws);
 
+  let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
+
   ws.onopen = () => {
     const s = useStore.getState();
     s.setConnectionStatus(sessionId, "connected");
     // Clear reconnect state on successful connection.
     clearReconnectState(sessionId);
+    // Application-level keepalive to prevent proxy timeouts
+    keepaliveInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "ping" }));
+      }
+    }, 15000);
   };
 
   ws.onmessage = (event) => handleMessage(sessionId, event);
 
   ws.onclose = () => {
+    if (keepaliveInterval) { clearInterval(keepaliveInterval); keepaliveInterval = null; }
     sockets.delete(sessionId);
     const s = useStore.getState();
     s.setConnectionStatus(sessionId, "disconnected");

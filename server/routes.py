@@ -86,7 +86,11 @@ def create_routes(
     async def auth_me(request: web.Request) -> web.Response:
         if not auth_manager or not auth_manager.enabled:
             return web.json_response({"authEnabled": False})
-        username = request.get("auth_user")
+        # This route is public (skips middleware), so validate cookie directly
+        username = None
+        token = request.cookies.get("vibr8_session")
+        if token:
+            username = auth_manager.validate_session(token)
         return web.json_response({
             "authEnabled": True,
             "authenticated": username is not None,
@@ -114,22 +118,25 @@ def create_routes(
                 session_id = str(uuid.uuid4())
                 cwd = body.get("cwd") or os.getcwd()
                 terminal_manager.create(session_id, cwd=cwd)
+                name = session_names.generate_random_name()
+                session_names.set_name(session_id, name)
                 return web.json_response({
                     "sessionId": session_id,
                     "state": "connected",
                     "cwd": cwd,
                     "backendType": "terminal",
                     "createdAt": time.time() * 1000,
+                    "name": name,
                 })
 
             # Resolve environment variables
             env_vars: dict[str, str] | None = body.get("env")
             env_slug = body.get("envSlug")
             if env_slug:
-                companion_env = env_manager.get_env(env_slug)
-                if companion_env:
-                    logger.info(f"[routes] Injecting env \"{companion_env.name}\" ({len(companion_env.variables)} vars)")
-                    env_vars = {**companion_env.variables, **(body.get("env") or {})}
+                resolved_env = env_manager.get_env(env_slug)
+                if resolved_env:
+                    logger.info(f"[routes] Injecting env \"{resolved_env.name}\" ({len(resolved_env.variables)} vars)")
+                    env_vars = {**resolved_env.variables, **(body.get("env") or {})}
                 else:
                     logger.warning(f"[routes] Environment \"{env_slug}\" not found, ignoring")
 

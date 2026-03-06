@@ -7,7 +7,7 @@ This allows the browser to be completely unaware of which backend is running --
 it sees the same message types regardless of whether Claude Code or Codex is
 the backend.
 
-Ported from companion/web/server/codex-adapter.ts.
+Originally ported from The Vibe Companion (codex-adapter.ts).
 """
 
 from __future__ import annotations

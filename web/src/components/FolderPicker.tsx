@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { api, type DirEntry } from "../api.js";
 import { getRecentDirs, addRecentDir } from "../utils/recent-dirs.js";
@@ -16,6 +16,27 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
   const [dirInput, setDirInput] = useState("");
   const [showDirInput, setShowDirInput] = useState(false);
   const [recentDirs] = useState<string[]>(() => getRecentDirs());
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Focus trap
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Tab" || !dialogRef.current) return;
+      const focusable = dialogRef.current.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+      } else {
+        if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   const loadDirs = useCallback(async (path?: string) => {
     setBrowseLoading(true);
@@ -52,6 +73,9 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50" onClick={onClose}>
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-label="Select Folder"
         className="w-full max-w-lg h-[min(480px,90vh)] mx-0 sm:mx-4 flex flex-col bg-cc-bg border border-cc-border rounded-t-[14px] sm:rounded-[14px] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >

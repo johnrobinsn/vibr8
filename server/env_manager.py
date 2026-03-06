@@ -1,4 +1,4 @@
-"""Manage environment profiles stored as JSON files in ~/.companion/envs/."""
+"""Manage environment profiles stored as JSON files in ~/.vibr8/envs/."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 @dataclass
-class CompanionEnv:
+class Vibr8Env:
     name: str
     slug: str
     variables: dict[str, str] = field(default_factory=dict)
@@ -24,7 +24,7 @@ class CompanionEnv:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> CompanionEnv:
+    def from_dict(cls, data: dict) -> Vibr8Env:
         return cls(
             name=data["name"],
             slug=data["slug"],
@@ -36,8 +36,8 @@ class CompanionEnv:
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
 
-COMPANION_DIR = Path.home() / ".companion"
-ENVS_DIR = COMPANION_DIR / "envs"
+VIBR8_DIR = Path.home() / ".vibr8"
+ENVS_DIR = VIBR8_DIR / "envs"
 
 
 def _ensure_dir() -> None:
@@ -68,18 +68,18 @@ def _now_ms() -> int:
 # ─── CRUD ───────────────────────────────────────────────────────────────────
 
 
-def list_envs() -> list[CompanionEnv]:
+def list_envs() -> list[Vibr8Env]:
     _ensure_dir()
     try:
         files = [f for f in ENVS_DIR.iterdir() if f.suffix == ".json"]
     except OSError:
         return []
 
-    envs: list[CompanionEnv] = []
+    envs: list[Vibr8Env] = []
     for file in files:
         try:
             data = json.loads(file.read_text(encoding="utf-8"))
-            envs.append(CompanionEnv.from_dict(data))
+            envs.append(Vibr8Env.from_dict(data))
         except Exception:
             # Skip corrupt files
             pass
@@ -88,11 +88,11 @@ def list_envs() -> list[CompanionEnv]:
     return envs
 
 
-def get_env(slug: str) -> CompanionEnv | None:
+def get_env(slug: str) -> Vibr8Env | None:
     _ensure_dir()
     try:
         data = json.loads(_file_path(slug).read_text(encoding="utf-8"))
-        return CompanionEnv.from_dict(data)
+        return Vibr8Env.from_dict(data)
     except Exception:
         return None
 
@@ -100,7 +100,7 @@ def get_env(slug: str) -> CompanionEnv | None:
 def create_env(
     name: str,
     variables: dict[str, str] | None = None,
-) -> CompanionEnv:
+) -> Vibr8Env:
     if not name or not name.strip():
         raise ValueError("Environment name is required")
 
@@ -115,7 +115,7 @@ def create_env(
         )
 
     now = _now_ms()
-    env = CompanionEnv(
+    env = Vibr8Env(
         name=name.strip(),
         slug=slug,
         variables=variables or {},
@@ -133,7 +133,7 @@ def update_env(
     *,
     name: str | None = None,
     variables: dict[str, str] | None = None,
-) -> CompanionEnv | None:
+) -> Vibr8Env | None:
     _ensure_dir()
     existing = get_env(slug)
     if existing is None:
@@ -150,7 +150,7 @@ def update_env(
             f'An environment with a similar name already exists ("{new_slug}")'
         )
 
-    env = CompanionEnv(
+    env = Vibr8Env(
         name=new_name,
         slug=new_slug,
         variables=variables if variables is not None else existing.variables,

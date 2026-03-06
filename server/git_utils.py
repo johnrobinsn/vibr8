@@ -1,6 +1,6 @@
 """Git utilities for worktree management and repository inspection.
 
-Ported from companion/web/server/git-utils.ts — maintains identical logic and behavior.
+Originally ported from The Vibe Companion (git-utils.ts).
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ class WorktreeCreateResult:
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
 
-WORKTREES_BASE = Path.home() / ".companion" / "worktrees"
+WORKTREES_BASE = Path.home() / ".vibr8" / "worktrees"
 
 
 def sanitize_branch(branch: str) -> str:
@@ -343,7 +343,7 @@ def ensure_worktree(
 
 
 def generate_unique_worktree_branch(repo_root: str, base_branch: str) -> str:
-    """Generate a unique branch name for a companion-managed worktree.
+    """Generate a unique branch name for a vibr8-managed worktree.
 
     Pattern: {branch}-wt-{random4digit} (e.g. main-wt-8374).
     Uses random suffixes to avoid collisions with leftover branches.
@@ -381,7 +381,7 @@ def remove_worktree(
     try:
         force_flag = " --force" if force else ""
         git(f'worktree remove "{worktree_path}"{force_flag}', repo_root)
-        # Clean up the companion-managed branch after worktree removal
+        # Clean up the vibr8-managed branch after worktree removal
         if branch_to_delete:
             git_safe(f"branch -D {branch_to_delete}", repo_root)
         return {"removed": True}

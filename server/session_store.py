@@ -1,6 +1,6 @@
 """Persistent session storage backed by JSON files on disk.
 
-Ported from companion/web/server/session-store.ts.
+Originally ported from The Vibe Companion (session-store.ts).
 """
 
 from __future__ import annotations

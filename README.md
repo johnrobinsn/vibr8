@@ -53,6 +53,37 @@ Open [http://localhost:5174](http://localhost:5174) in your browser.
 | `make test-py`       | Python tests (`pytest`)                        |
 | `make test-frontend` | Frontend tests (`vitest`)                      |
 
+## CLI Tools
+
+### User Management
+
+vibr8 supports optional password authentication. When enabled, all API and WebSocket endpoints require a session cookie.
+
+```bash
+# Add a user (prompts for password)
+uv run python -m server.manage_users add <username>
+
+# List all users
+uv run python -m server.manage_users list
+
+# Remove a user
+uv run python -m server.manage_users remove <username>
+```
+
+Auth is **opt-in**: if no users exist, all endpoints are open (local dev mode). Adding the first user enables auth and requires login.
+
+### Configuration Directory
+
+vibr8 stores configuration in `~/.vibr8/`:
+
+| File / Directory | Description |
+|---|---|
+| `users.json` | User credentials (bcrypt-hashed). Presence enables auth. |
+| `envs/` | Environment profiles (named sets of env vars) |
+| `worktrees/` | Worktree-to-session mappings |
+| `worktrees.json` | Worktree tracking metadata |
+| `ice-servers.json` | STUN/TURN server config for WebRTC (optional) |
+
 ## Environment Variables
 
 | Variable          | Default | Description                                      |

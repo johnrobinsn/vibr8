@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-import { api, type CompanionEnv } from "../api.js";
+import { api, type Vibr8Env } from "../api.js";
 
 interface Props {
   onClose: () => void;
@@ -12,7 +12,7 @@ interface VarRow {
 }
 
 export function EnvManager({ onClose }: Props) {
-  const [envs, setEnvs] = useState<CompanionEnv[]>([]);
+  const [envs, setEnvs] = useState<Vibr8Env[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingSlug, setEditingSlug] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -24,13 +24,44 @@ export function EnvManager({ onClose }: Props) {
   const [newVars, setNewVars] = useState<VarRow[]>([{ key: "", value: "" }]);
   const [creating, setCreating] = useState(false);
 
+  const dialogRef = useRef<HTMLDivElement>(null);
+
   const refresh = () => {
     api.listEnvs().then(setEnvs).catch(() => {}).finally(() => setLoading(false));
   };
 
   useEffect(() => { refresh(); }, []);
 
-  function startEdit(env: CompanionEnv) {
+  // Escape to close
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  // Focus trap
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Tab" || !dialogRef.current) return;
+      const focusable = dialogRef.current.querySelectorAll<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+      } else {
+        if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  function startEdit(env: Vibr8Env) {
     setEditingSlug(env.slug);
     setEditName(env.name);
     const rows = Object.entries(env.variables).map(([key, value]) => ({ key, value }));
@@ -96,6 +127,9 @@ export function EnvManager({ onClose }: Props) {
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50" onClick={onClose}>
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-label="Manage Environments"
         className="w-full max-w-lg max-h-[90vh] sm:max-h-[80vh] mx-0 sm:mx-4 flex flex-col bg-cc-bg border border-cc-border rounded-t-[14px] sm:rounded-[14px] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >

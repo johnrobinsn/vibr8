@@ -9,6 +9,7 @@ import { EditorPanel } from "./components/EditorPanel.js";
 import { Playground } from "./components/Playground.js";
 import { TerminalView } from "./components/TerminalView.js";
 import { LoginPage } from "./components/LoginPage.js";
+import { CommandPalette } from "./components/CommandPalette.js";
 
 function useHash() {
   return useSyncExternalStore(
@@ -38,6 +39,7 @@ export default function App() {
     terminalIdsRef.current = ids;
     return ids;
   });
+  const commandPaletteOpen = useStore((s) => s.commandPaletteOpen);
   const hash = useHash();
 
   // Auth check on mount
@@ -57,6 +59,32 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
+
+  // Keyboard shortcuts: Escape to close overlays, Ctrl/Cmd+Alt+S to toggle sidebar
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        if (useStore.getState().commandPaletteOpen) { useStore.getState().setCommandPaletteOpen(false); return; }
+        if (taskPanelOpen) { useStore.getState().setTaskPanelOpen(false); return; }
+        if (sidebarOpen) { useStore.getState().setSidebarOpen(false); return; }
+      }
+      if (e.altKey && (e.metaKey || e.ctrlKey)) {
+        if (e.key === "p") {
+          e.preventDefault();
+          useStore.getState().toggleCommandPalette();
+          return;
+        }
+        if (e.key === "s") {
+          e.preventDefault();
+          const s = useStore.getState();
+          s.setSidebarOpen(!s.sidebarOpen);
+          return;
+        }
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [sidebarOpen, taskPanelOpen]);
 
   if (authState === "loading") return null;
   if (authState === "login") return <LoginPage onLogin={() => setAuthState("authenticated")} />;
@@ -144,6 +172,8 @@ export default function App() {
           </div>
         </>
       )}
+
+      {commandPaletteOpen && <CommandPalette />}
     </div>
   );
 }

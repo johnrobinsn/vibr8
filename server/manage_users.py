@@ -16,7 +16,7 @@ from pathlib import Path
 
 import bcrypt
 
-USERS_FILE = Path.home() / ".companion" / "users.json"
+USERS_FILE = Path.home() / ".vibr8" / "users.json"
 
 
 def load() -> dict:

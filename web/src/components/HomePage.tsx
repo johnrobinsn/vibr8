@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useStore } from "../store.js";
-import { api, type CompanionEnv, type GitRepoInfo, type GitBranchInfo, type BackendInfo } from "../api.js";
+import { api, type Vibr8Env, type GitRepoInfo, type GitBranchInfo, type BackendInfo } from "../api.js";
 import { connectSession, waitForConnection, sendToSession } from "../ws.js";
 import { disconnectSession } from "../ws.js";
 import { generateUniqueSessionName } from "../utils/names.js";
@@ -53,7 +53,7 @@ export function HomePage() {
   const MODES = getModesForBackend(backend);
 
   // Environment state
-  const [envs, setEnvs] = useState<CompanionEnv[]>([]);
+  const [envs, setEnvs] = useState<Vibr8Env[]>([]);
   const [selectedEnv, setSelectedEnv] = useState(() => localStorage.getItem("cc-selected-env") || "");
   const [showEnvDropdown, setShowEnvDropdown] = useState(false);
   const [showEnvManager, setShowEnvManager] = useState(false);
@@ -83,10 +83,19 @@ export function HomePage() {
   const setCurrentSession = useStore((s) => s.setCurrentSession);
   const currentSessionId = useStore((s) => s.currentSessionId);
 
-  // Auto-focus textarea
+  // Auto-focus textarea on mount
   useEffect(() => {
     textareaRef.current?.focus();
   }, []);
+
+  // Focus textarea when pendingFocus signals "home"
+  const pendingFocus = useStore((s) => s.pendingFocus);
+  useEffect(() => {
+    if (pendingFocus === "home") {
+      textareaRef.current?.focus();
+      useStore.getState().setPendingFocus(null);
+    }
+  }, [pendingFocus]);
 
   // Load server home/cwd and available backends on mount
   useEffect(() => {
@@ -147,6 +156,21 @@ export function HomePage() {
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
+
+  // Close dropdowns on Escape
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        if (showModelDropdown) { setShowModelDropdown(false); e.stopPropagation(); }
+        if (showModeDropdown) { setShowModeDropdown(false); e.stopPropagation(); }
+        if (showEnvDropdown) { setShowEnvDropdown(false); e.stopPropagation(); }
+        if (showBranchDropdown) { setShowBranchDropdown(false); e.stopPropagation(); }
+        if (showFolderPicker) { setShowFolderPicker(false); e.stopPropagation(); }
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [showModelDropdown, showModeDropdown, showEnvDropdown, showBranchDropdown, showFolderPicker]);
 
   // Detect git repo when cwd changes
   useEffect(() => {
@@ -235,10 +259,8 @@ export function HomePage() {
   }
 
   async function handleSend() {
-    const isTerminal = backend === "terminal";
     const msg = text.trim();
-    if (!isTerminal && (!msg || sending)) return;
-    if (isTerminal && sending) return;
+    if (!msg || sending) return;
 
     setSending(true);
     setError("");
@@ -252,13 +274,13 @@ export function HomePage() {
       // Create session (with optional worktree)
       const branchName = worktreeBranch.trim() || undefined;
       const result = await api.createSession({
-        model: isTerminal ? undefined : model,
-        permissionMode: isTerminal ? undefined : mode,
+        model,
+        permissionMode: mode,
         cwd: cwd || undefined,
         envSlug: selectedEnv || undefined,
-        branch: isTerminal ? undefined : branchName,
-        createBranch: isTerminal ? undefined : (branchName && isNewBranch ? true : undefined),
-        useWorktree: isTerminal ? undefined : (useWorktree || undefined),
+        branch: branchName,
+        createBranch: branchName && isNewBranch ? true : undefined,
+        useWorktree: useWorktree || undefined,
         backend,
       });
       const sessionId = result.sessionId;
@@ -285,11 +307,6 @@ export function HomePage() {
 
       // Switch to session
       setCurrentSession(sessionId);
-
-      if (isTerminal) {
-        // Terminal sessions don't use the WsBridge WebSocket — TerminalView connects directly
-        return;
-      }
 
       // Store the permission mode for this session
       useStore.getState().setPreviousPermissionMode(sessionId, mode);
@@ -321,7 +338,34 @@ export function HomePage() {
     }
   }
 
-  const canSend = backend === "terminal" ? !sending : (text.trim().length > 0 && !sending);
+  async function handleCreateTerminal() {
+    if (sending) return;
+    setSending(true);
+    setError("");
+    try {
+      if (currentSessionId) disconnectSession(currentSessionId);
+      const result = await api.createSession({
+        cwd: cwd || undefined,
+        envSlug: selectedEnv || undefined,
+        backend: "terminal",
+      });
+      const sessionId = result.sessionId;
+      useStore.getState().setSdkSessions([
+        ...useStore.getState().sdkSessions,
+        { sessionId, state: "connected" as const, cwd: cwd || "", createdAt: Date.now(), backendType: "terminal" },
+      ]);
+      const existingNames = new Set(useStore.getState().sessionNames.values());
+      const sessionName = generateUniqueSessionName(existingNames);
+      useStore.getState().setSessionName(sessionId, sessionName);
+      if (cwd) addRecentDir(cwd);
+      setCurrentSession(sessionId);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+      setSending(false);
+    }
+  }
+
+  const canSend = text.trim().length > 0 && !sending;
 
   return (
     <div className="flex-1 h-full flex items-center justify-center px-3 sm:px-4">
@@ -369,26 +413,6 @@ export function HomePage() {
 
         {/* Input card */}
         <div className="bg-cc-card border border-cc-border rounded-[14px] shadow-sm overflow-hidden">
-          {backend === "terminal" ? (
-            <div className="flex items-center justify-between px-4 py-4">
-              <span className="text-sm text-cc-muted">Open an interactive terminal session</span>
-              <button
-                onClick={handleSend}
-                disabled={!canSend}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  canSend
-                    ? "bg-green-600 text-white hover:bg-green-700 cursor-pointer"
-                    : "bg-cc-hover text-cc-muted cursor-not-allowed"
-                }`}
-              >
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4">
-                  <path d="M0 2v12h16V2H0zm1 1h14v1H1V3zm0 2h14v8H1V5zm1 1v6h4V6H2zm5 0v2h7V6H7zm0 3v3h7V9H7z" />
-                </svg>
-                Open Terminal
-              </button>
-            </div>
-          ) : (
-          <>
           <textarea
             ref={textareaRef}
             value={text}
@@ -452,13 +476,13 @@ export function HomePage() {
               {/* Send button */}
               <button
                 onClick={handleSend}
-                disabled={!canSend}
+                aria-disabled={!canSend}
                 className={`flex items-center justify-center w-8 h-8 rounded-full transition-colors ${
                   canSend
                     ? "bg-cc-primary hover:bg-cc-primary-hover text-white cursor-pointer"
                     : "bg-cc-hover text-cc-muted cursor-not-allowed"
                 }`}
-                title="Send message"
+                title="Send message (Enter)"
               >
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
                   <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
@@ -466,8 +490,6 @@ export function HomePage() {
               </button>
             </div>
           </div>
-          </>
-          )}
         </div>
 
         {/* Below-card selectors */}
@@ -475,7 +497,7 @@ export function HomePage() {
           {/* Backend toggle */}
           {backends.length > 1 && (
             <div className="flex items-center bg-cc-hover/50 rounded-lg p-0.5">
-              {backends.map((b) => (
+              {backends.filter((b) => b.id !== "terminal").map((b) => (
                 <button
                   key={b.id}
                   onClick={() => b.available && switchBackend(b.id as BackendType)}
@@ -501,6 +523,22 @@ export function HomePage() {
             </div>
           )}
 
+          {/* Terminal button */}
+          <button
+            onClick={handleCreateTerminal}
+            disabled={sending}
+            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg transition-colors ${
+              sending
+                ? "bg-cc-hover text-cc-muted cursor-not-allowed"
+                : "bg-green-600 text-white hover:bg-green-700 cursor-pointer"
+            }`}
+          >
+            <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+              <path d="M0 2v12h16V2H0zm1 3h14v8H1V5zm1.5 1L5 8.5 2.5 11l1-1L5 8.5 3.5 7l-1-1zM7 10h4v1H7v-1z" />
+            </svg>
+            Terminal
+          </button>
+
           {/* Folder selector */}
           <div>
             <button
@@ -524,7 +562,6 @@ export function HomePage() {
             )}
           </div>
 
-          {backend !== "terminal" && (<>
           {/* Branch picker (always visible when cwd is a git repo) */}
           {gitRepoInfo && (
             <div className="relative" ref={branchDropdownRef}>
@@ -778,7 +815,6 @@ export function HomePage() {
               </div>
             )}
           </div>
-          </>)}
         </div>
 
         {/* Error message */}
@@ -791,6 +827,9 @@ export function HomePage() {
           </div>
         )}
       </div>
+
+      {/* Focus wrap sentinel — sends Tab back to textarea */}
+      <div tabIndex={0} onFocus={() => textareaRef.current?.focus()} aria-hidden="true" />
 
       {/* Environment manager modal */}
       {showEnvManager && (

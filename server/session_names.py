@@ -1,70 +1,81 @@
 """
-Session name storage.
+Session name storage (in-memory).
 
-Stores session names in a JSON file at ~/.companion/session-names.json.
-Lazy-loads from disk on first access and persists on every write.
+Session names are ephemeral — they live only as long as the server process.
 """
 
-import json
-from pathlib import Path
-
-# ── Paths ────────────────────────────────────────────────────────────────────
-
-_DEFAULT_PATH = Path.home() / ".companion" / "session-names.json"
+import random
 
 # ── Store ────────────────────────────────────────────────────────────────────
 
 _names: dict[str, str] = {}
-_loaded = False
-_file_path = _DEFAULT_PATH
+
+# ── Random name generator ───────────────────────────────────────────────────
+
+_ADJECTIVES = [
+    "amber", "azure", "bold", "bright", "calm", "cedar", "clear", "coral",
+    "crisp", "cyan", "deft", "dusty", "ember", "fern", "fleet", "frost",
+    "gilt", "hazy", "ivory", "jade", "keen", "lemon", "lilac", "lunar",
+    "maple", "mint", "misty", "moss", "noble", "opal", "pale", "peach",
+    "pine", "plum", "quiet", "rapid", "reed", "ruby", "sage", "silk",
+    "slate", "slim", "solar", "stark", "steel", "stone", "swift", "teal",
+    "vivid", "warm", "wild", "zinc",
+]
+
+_NOUNS = [
+    "arch", "bass", "beam", "bell", "bird", "blade", "bloom", "bolt",
+    "brook", "cairn", "cliff", "cloud", "cove", "crane", "creek", "crow",
+    "dune", "echo", "elm", "fawn", "finch", "fjord", "flame", "flint",
+    "forge", "fox", "gate", "glen", "grove", "hawk", "heron", "hill",
+    "horn", "isle", "jay", "knoll", "lake", "lark", "leaf", "marsh",
+    "mesa", "moth", "oak", "owl", "peak", "pine", "pond", "quill",
+    "reef", "ridge", "river", "rock", "shell", "shore", "spruce", "stone",
+    "stream", "trail", "vale", "wave", "wren",
+]
 
 
-def _ensure_loaded() -> None:
-    global _names, _loaded
-    if _loaded:
-        return
-    try:
-        if _file_path.exists():
-            raw = _file_path.read_text(encoding="utf-8")
-            _names = json.loads(raw)
-    except Exception:
-        _names = {}
-    _loaded = True
+def generate_random_name() -> str:
+    """Generate a random 'Adjective Noun' name for a session."""
+    adj = random.choice(_ADJECTIVES)
+    noun = random.choice(_NOUNS)
+    return f"{adj.title()} {noun.title()}"
 
 
-def _persist() -> None:
-    _file_path.parent.mkdir(parents=True, exist_ok=True)
-    _file_path.write_text(json.dumps(_names, indent=2), encoding="utf-8")
+def _existing_names() -> set[str]:
+    return set(_names.values())
+
+
+def _make_unique(name: str) -> str:
+    """Append a numeric suffix if *name* already exists."""
+    existing = _existing_names()
+    if name not in existing:
+        return name
+    n = 2
+    while f"{name} {n}" in existing:
+        n += 1
+    return f"{name} {n}"
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
 
 def get_name(session_id: str) -> str | None:
-    _ensure_loaded()
     return _names.get(session_id)
 
 
-def set_name(session_id: str, name: str) -> None:
-    _ensure_loaded()
-    _names[session_id] = name
-    _persist()
+def set_name(session_id: str, name: str, unique: bool = True) -> None:
+    _names[session_id] = _make_unique(name) if unique else name
 
 
 def get_all_names() -> dict[str, str]:
-    _ensure_loaded()
     return dict(_names)
 
 
 def remove_name(session_id: str) -> None:
-    _ensure_loaded()
     _names.pop(session_id, None)
-    _persist()
 
 
 def _reset_for_test(custom_path: str | None = None) -> None:
-    """Reset internal state and optionally set a custom file path (for testing)."""
-    global _names, _loaded, _file_path
+    """Reset internal state (for testing)."""
+    global _names
     _names = {}
-    _loaded = False
-    _file_path = Path(custom_path) if custom_path else _DEFAULT_PATH

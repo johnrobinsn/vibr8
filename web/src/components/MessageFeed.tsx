@@ -374,14 +374,18 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
+  const justSwitchedRef = useRef(true);
+  const programmaticScrollUntil = useRef(0);
   const [elapsed, setElapsed] = useState(0);
   const [visibleCount, setVisibleCount] = useState(FEED_PAGE_SIZE);
 
   const grouped = useMemo(() => groupMessages(messages), [messages]);
 
-  // Reset visible count when switching sessions
+  // Reset visible count and scroll state when switching sessions
   useEffect(() => {
     setVisibleCount(FEED_PAGE_SIZE);
+    isNearBottom.current = true;
+    justSwitchedRef.current = true;
   }, [sessionId]);
 
   const totalEntries = grouped.length;
@@ -415,6 +419,8 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
   }, [streamingStartedAt, sessionStatus]);
 
   function handleScroll() {
+    // Ignore scroll events fired during programmatic smooth scroll
+    if (Date.now() < programmaticScrollUntil.current) return;
     const el = containerRef.current;
     if (!el) return;
     isNearBottom.current =
@@ -423,7 +429,16 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     if (isNearBottom.current) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      const behavior = justSwitchedRef.current ? "instant" : "smooth";
+      // Only clear the flag once we've actually scrolled with messages present
+      if (justSwitchedRef.current && messages.length > 0) {
+        justSwitchedRef.current = false;
+      }
+      // Suppress handleScroll during smooth animation so isNearBottom stays true
+      if (behavior === "smooth") {
+        programmaticScrollUntil.current = Date.now() + 500;
+      }
+      bottomRef.current?.scrollIntoView({ behavior });
     }
   }, [messages.length, streamingText]);
 
@@ -451,7 +466,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="h-full overflow-y-auto scroll-smooth px-3 sm:px-4 py-4 sm:py-6"
+        className="h-full overflow-y-auto px-3 sm:px-4 py-4 sm:py-6"
       >
         <div className="max-w-3xl mx-auto space-y-3 sm:space-y-5">
           {hasMore && (

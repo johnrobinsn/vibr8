@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useStore } from "../store.js";
@@ -31,6 +31,12 @@ export function PermissionBanner({
 }) {
   const [loading, setLoading] = useState(false);
   const removePermission = useStore((s) => s.removePermission);
+  const primaryRef = useRef<HTMLButtonElement>(null);
+
+  // Auto-focus the primary action button when the banner appears
+  useEffect(() => {
+    primaryRef.current?.focus();
+  }, []);
 
   function handleAllow(updatedInput?: Record<string, unknown>, updatedPermissions?: PermissionUpdate[]) {
     setLoading(true);
@@ -104,6 +110,7 @@ export function PermissionBanner({
             {!isAskUser && (
               <div className="flex items-center gap-2 mt-3 flex-wrap">
                 <button
+                  ref={primaryRef}
                   onClick={() => handleAllow()}
                   disabled={loading}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-cc-success/90 hover:bg-cc-success text-white disabled:opacity-50 transition-colors cursor-pointer"

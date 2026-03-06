@@ -1,6 +1,6 @@
 """Types for the WebSocket bridge between Claude Code CLI and the browser.
 
-Ported from companion/web/server/session-types.ts.
+Originally ported from The Vibe Companion (session-types.ts).
 Field names are kept identical to the TypeScript version for wire compatibility.
 """
 

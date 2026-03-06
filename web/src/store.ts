@@ -57,12 +57,19 @@ interface AppState {
   reconnectGaveUp: Map<string, boolean>;
 
   // WebRTC audio state per session
-  audioMode: Map<string, "off" | "in_out" | "in_only">;
+  audioMode: Map<string, "off" | "connecting" | "in_out" | "in_only">;
   isRecording: Map<string, boolean>;
   webrtcStatus: Map<string, string | null>;
+  webrtcTransport: Map<string, "direct" | "relay" | null>;
 
   // Guard mode per session
   guardEnabled: Map<string, boolean>;
+
+  // Focus management
+  pendingFocus: "composer" | "terminal" | "home" | null;
+
+  // Command palette
+  commandPaletteOpen: boolean;
 
   // Actions
   setDarkMode: (v: boolean) => void;
@@ -122,9 +129,17 @@ interface AppState {
   setEditorLoading: (sessionId: string, loading: boolean) => void;
 
   // WebRTC audio actions
-  setAudioMode: (sessionId: string, mode: "off" | "in_out" | "in_only") => void;
+  setAudioMode: (sessionId: string, mode: "off" | "connecting" | "in_out" | "in_only") => void;
   setIsRecording: (sessionId: string, recording: boolean) => void;
   setWebRTCStatus: (sessionId: string, status: string | null) => void;
+  setWebRTCTransport: (sessionId: string, transport: "direct" | "relay" | null) => void;
+
+  // Focus management actions
+  setPendingFocus: (target: "composer" | "terminal" | "home" | null) => void;
+
+  // Command palette actions
+  setCommandPaletteOpen: (open: boolean) => void;
+  toggleCommandPalette: () => void;
 
   // Guard mode actions
   setGuardEnabled: (sessionId: string, enabled: boolean) => void;
@@ -177,7 +192,10 @@ export const useStore = create<AppState>((set) => ({
   audioMode: new Map(),
   isRecording: new Map(),
   webrtcStatus: new Map(),
+  webrtcTransport: new Map(),
   guardEnabled: new Map(),
+  pendingFocus: null,
+  commandPaletteOpen: false,
 
   setDarkMode: (v) => {
     localStorage.setItem("cc-dark-mode", String(v));
@@ -212,6 +230,9 @@ export const useStore = create<AppState>((set) => ({
   },
 
   setCurrentSession: (id) => {
+    if (id) {
+      localStorage.setItem("cc-last-session", id);
+    }
     set({ currentSessionId: id });
   },
 
@@ -274,6 +295,8 @@ export const useStore = create<AppState>((set) => ({
       isRecording.delete(sessionId);
       const webrtcStatus = new Map(s.webrtcStatus);
       webrtcStatus.delete(sessionId);
+      const webrtcTransport = new Map(s.webrtcTransport);
+      webrtcTransport.delete(sessionId);
       const guardEnabled = new Map(s.guardEnabled);
       guardEnabled.delete(sessionId);
       return {
@@ -297,6 +320,7 @@ export const useStore = create<AppState>((set) => ({
         audioMode,
         isRecording,
         webrtcStatus,
+        webrtcTransport,
         guardEnabled,
         sdkSessions: s.sdkSessions.filter((sdk) => sdk.sessionId !== sessionId),
         currentSessionId: s.currentSessionId === sessionId ? null : s.currentSessionId,
@@ -541,12 +565,27 @@ export const useStore = create<AppState>((set) => ({
       return { webrtcStatus };
     }),
 
+  setWebRTCTransport: (sessionId, transport) =>
+    set((s) => {
+      const webrtcTransport = new Map(s.webrtcTransport);
+      if (transport === null) {
+        webrtcTransport.delete(sessionId);
+      } else {
+        webrtcTransport.set(sessionId, transport);
+      }
+      return { webrtcTransport };
+    }),
+
   setGuardEnabled: (sessionId, enabled) =>
     set((s) => {
       const guardEnabled = new Map(s.guardEnabled);
       guardEnabled.set(sessionId, enabled);
       return { guardEnabled };
     }),
+
+  setPendingFocus: (target) => set({ pendingFocus: target }),
+  setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
+  toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
 
   reset: () =>
     set({
@@ -573,7 +612,10 @@ export const useStore = create<AppState>((set) => ({
       audioMode: new Map(),
       isRecording: new Map(),
       webrtcStatus: new Map(),
+      webrtcTransport: new Map(),
       guardEnabled: new Map(),
+      pendingFocus: null,
+      commandPaletteOpen: false,
     }),
 }));
 

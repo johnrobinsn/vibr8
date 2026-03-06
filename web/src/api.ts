@@ -126,7 +126,7 @@ export interface WorktreeCreateResult {
   isNew: boolean;
 }
 
-export interface CompanionEnv {
+export interface Vibr8Env {
   name: string;
   slug: string;
   variables: Record<string, string>;
@@ -202,15 +202,15 @@ export const api = {
   getHome: () => get<{ home: string; cwd: string }>("/fs/home"),
 
   // Environments
-  listEnvs: () => get<CompanionEnv[]>("/envs"),
+  listEnvs: () => get<Vibr8Env[]>("/envs"),
   getEnv: (slug: string) =>
-    get<CompanionEnv>(`/envs/${encodeURIComponent(slug)}`),
+    get<Vibr8Env>(`/envs/${encodeURIComponent(slug)}`),
   createEnv: (name: string, variables: Record<string, string>) =>
-    post<CompanionEnv>("/envs", { name, variables }),
+    post<Vibr8Env>("/envs", { name, variables }),
   updateEnv: (
     slug: string,
     data: { name?: string; variables?: Record<string, string> },
-  ) => put<CompanionEnv>(`/envs/${encodeURIComponent(slug)}`, data),
+  ) => put<Vibr8Env>(`/envs/${encodeURIComponent(slug)}`, data),
   deleteEnv: (slug: string) => del(`/envs/${encodeURIComponent(slug)}`),
 
   // Git operations

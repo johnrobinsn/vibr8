@@ -1,6 +1,6 @@
 """vibr8 — aiohttp server entry point.
 
-Ported from companion/web/server/index.ts.
+Originally ported from The Vibe Companion (index.ts).
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ async def handle_cli_ws(request: web.Request) -> web.WebSocketResponse:
 
 async def handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
     """Handle WebSocket connections from the browser UI."""
-    ws = web.WebSocketResponse()
+    ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
     session_id = request.match_info["session_id"]
 
@@ -117,7 +117,7 @@ async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
     """Handle WebSocket connections for terminal (PTY) sessions."""
     import json as _json
 
-    ws = web.WebSocketResponse()
+    ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
     session_id = request.match_info["session_id"]
 
@@ -148,9 +148,11 @@ async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
                 # User input → PTY
                 term.write(msg.data)
             elif msg.type == aiohttp.WSMsgType.TEXT:
-                # Control message (resize, etc.)
+                # Control message (resize, ping, etc.)
                 ctrl = _json.loads(msg.data)
-                if ctrl.get("type") == "resize":
+                if ctrl.get("type") == "ping":
+                    pass  # keepalive — no action needed
+                elif ctrl.get("type") == "resize":
                     term.resize(ctrl["cols"], ctrl["rows"])
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 break
@@ -182,7 +184,7 @@ def create_app() -> web.Application:
     if ice_env:
         ice_servers = _json.loads(ice_env)
     else:
-        ice_config = Path.home() / ".companion" / "ice-servers.json"
+        ice_config = Path.home() / ".vibr8" / "ice-servers.json"
         if ice_config.exists():
             ice_servers = _json.loads(ice_config.read_text())
     if ice_servers:

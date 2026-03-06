@@ -1,11 +1,15 @@
 """Authentication — user/password auth with session cookies.
 
-Users stored in ~/.companion/users.json (bcrypt-hashed passwords).
+Users stored in ~/.vibr8/users.json (bcrypt-hashed passwords).
 Auth is opt-in: if no users.json exists, auth is disabled.
+
+Session tokens are HMAC-signed (stateless) so they survive server restarts.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -18,10 +22,15 @@ from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
-USERS_FILE = Path.home() / ".companion" / "users.json"
+VIBR8_DIR = Path.home() / ".vibr8"
+USERS_FILE = VIBR8_DIR / "users.json"
+SECRET_FILE = VIBR8_DIR / "secret.key"
+
+SESSION_MAX_AGE = 30 * 86400  # 30 days
 
 # Routes that don't require auth
 PUBLIC_PREFIXES = (
+    "/ws/cli/",
     "/api/auth/login",
     "/api/auth/me",
     "/assets/",
@@ -33,10 +42,22 @@ PUBLIC_PREFIXES = (
 )
 
 
+def _load_or_create_secret() -> str:
+    """Load persistent HMAC secret from disk, creating one if needed."""
+    VIBR8_DIR.mkdir(parents=True, exist_ok=True)
+    if SECRET_FILE.exists():
+        return SECRET_FILE.read_text().strip()
+    secret = secrets.token_hex(32)
+    SECRET_FILE.write_text(secret)
+    SECRET_FILE.chmod(0o600)
+    logger.info("[auth] Generated new signing secret at %s", SECRET_FILE)
+    return secret
+
+
 class AuthManager:
     def __init__(self) -> None:
         self._users: dict[str, str] = {}  # username → bcrypt hash
-        self._sessions: dict[str, dict] = {}  # token → {username, created_at}
+        self._secret = ""
         self._load_users()
 
     def _load_users(self) -> None:
@@ -44,6 +65,7 @@ class AuthManager:
             try:
                 data = json.loads(USERS_FILE.read_text())
                 self._users = data.get("users", {})
+                self._secret = _load_or_create_secret()
                 logger.info(
                     "[auth] Loaded %d user(s) from %s", len(self._users), USERS_FILE
                 )
@@ -63,25 +85,43 @@ class AuthManager:
         return bcrypt.checkpw(password.encode(), stored_hash.encode())
 
     def create_session(self, username: str) -> str:
-        token = secrets.token_urlsafe(32)
-        self._sessions[token] = {
-            "username": username,
-            "created_at": time.time(),
-        }
-        return token
+        """Create an HMAC-signed session token: username:timestamp:signature."""
+        ts = str(int(time.time()))
+        payload = f"{username}:{ts}"
+        sig = hmac.new(
+            self._secret.encode(), payload.encode(), hashlib.sha256
+        ).hexdigest()
+        return f"{payload}:{sig}"
 
     def validate_session(self, token: str) -> Optional[str]:
-        session = self._sessions.get(token)
-        if not session:
+        """Validate an HMAC-signed token. Stateless — survives server restarts."""
+        parts = token.split(":", 2)
+        if len(parts) != 3:
             return None
-        # 30-day expiry
-        if time.time() - session["created_at"] > 30 * 86400:
-            self._sessions.pop(token, None)
+        username, ts_str, sig = parts
+        # Verify signature
+        payload = f"{username}:{ts_str}"
+        expected = hmac.new(
+            self._secret.encode(), payload.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(sig, expected):
             return None
-        return session["username"]
+        # Check expiry
+        try:
+            created = int(ts_str)
+        except ValueError:
+            return None
+        if time.time() - created > SESSION_MAX_AGE:
+            return None
+        # Verify user still exists
+        if username not in self._users:
+            return None
+        return username
 
     def revoke_session(self, token: str) -> None:
-        self._sessions.pop(token, None)
+        # Stateless tokens can't be individually revoked server-side.
+        # The cookie is deleted client-side via del_cookie.
+        pass
 
 
 @web.middleware

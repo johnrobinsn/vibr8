@@ -20,7 +20,9 @@ export function TopBar() {
   const reconnectGaveUp = useStore((s) => s.reconnectGaveUp);
   const audioMode = useStore((s) => s.audioMode);
   const webrtcStatus = useStore((s) => s.webrtcStatus);
+  const webrtcTransport = useStore((s) => s.webrtcTransport);
   const sdkSessions = useStore((s) => s.sdkSessions);
+  const sessionNames = useStore((s) => s.sessionNames);
 
   const isTerminalSession = currentSessionId
     ? sdkSessions.find((x) => x.sessionId === currentSessionId)?.backendType === "terminal"
@@ -33,6 +35,9 @@ export function TopBar() {
   const status = currentSessionId ? (sessionStatus.get(currentSessionId) ?? null) : null;
   const currentAudioMode = currentSessionId ? (audioMode.get(currentSessionId) ?? "off") : "off";
   const rtcStatus = currentSessionId ? (webrtcStatus.get(currentSessionId) ?? null) : null;
+  const rtcTransport = currentSessionId ? (webrtcTransport.get(currentSessionId) ?? null) : null;
+  const isRelay = rtcTransport === "relay";
+  const sessionName = currentSessionId ? (sessionNames.get(currentSessionId) ?? null) : null;
 
   async function handleAudioCycle() {
     if (!currentSessionId) return;
@@ -43,9 +48,12 @@ export function TopBar() {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error("[webrtc] Failed to start:", msg);
+        stopWebRTC(currentSessionId);
         setAudioError(msg);
         setTimeout(() => setAudioError(null), 5000);
       }
+    } else if (currentAudioMode === "connecting") {
+      stopWebRTC(currentSessionId);
     } else if (currentAudioMode === "in_out") {
       setAudioInOnly(currentSessionId);
     } else {
@@ -59,6 +67,8 @@ export function TopBar() {
         {/* Sidebar toggle */}
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
+          aria-label={sidebarOpen ? "Close sidebar (Ctrl+Alt+S)" : "Open sidebar (Ctrl+Alt+S)"}
+          title="Toggle sidebar (Ctrl+Alt+S)"
           className="flex items-center justify-center w-7 h-7 rounded-lg text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
         >
           <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
@@ -108,15 +118,48 @@ export function TopBar() {
         )}
       </div>
 
+      {/* Center — session name / thinking status (alternate on small screens) */}
+      {currentSessionId && (
+        <div className="absolute left-1/2 -translate-x-1/2 max-w-[50%] sm:max-w-[40%] pointer-events-none">
+          {status === "running" || status === "compacting" ? (
+            <>
+              {/* Small screens: show status instead of name */}
+              <div className="sm:hidden flex items-center justify-center gap-1.5">
+                {status === "compacting" ? (
+                  <span className="text-[12px] text-cc-warning font-medium animate-pulse">Compacting...</span>
+                ) : (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-cc-primary animate-[pulse-dot_1s_ease-in-out_infinite]" />
+                    <span className="text-[12px] text-cc-primary font-medium">Thinking</span>
+                  </>
+                )}
+              </div>
+              {/* Large screens: show name as usual */}
+              {sessionName && (
+                <span className="hidden sm:block text-sm text-cc-fg font-semibold truncate">
+                  {sessionName}
+                </span>
+              )}
+            </>
+          ) : (
+            sessionName && (
+              <span className="text-sm text-cc-fg font-semibold truncate block">
+                {sessionName}
+              </span>
+            )
+          )}
+        </div>
+      )}
+
       {/* Right side (not shown for terminal sessions) */}
       {currentSessionId && !isTerminalSession && (
         <div className="flex items-center gap-1.5 sm:gap-3 text-[12px] text-cc-muted">
           {status === "compacting" && (
-            <span className="text-cc-warning font-medium animate-pulse">Compacting...</span>
+            <span className="text-cc-warning font-medium animate-pulse hidden sm:inline">Compacting...</span>
           )}
 
           {status === "running" && (
-            <div className="flex items-center gap-1.5">
+            <div className="hidden sm:flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-cc-primary animate-[pulse-dot_1s_ease-in-out_infinite]" />
               <span className="text-cc-primary font-medium">Thinking</span>
             </div>
@@ -146,15 +189,19 @@ export function TopBar() {
             </button>
           </div>
 
-          {/* Audio cycle: off → in+out → in-only → off */}
+          {/* Audio cycle: off → connecting → in+out → in-only → off */}
           <button
             onClick={handleAudioCycle}
             disabled={!isConnected}
             className={`flex items-center justify-center w-7 h-7 rounded-lg transition-colors ${
               !isConnected
                 ? "text-cc-muted opacity-30 cursor-not-allowed"
+                : currentAudioMode === "connecting"
+                ? "text-cc-success bg-cc-success/10 animate-pulse cursor-pointer"
                 : currentAudioMode === "in_out"
-                ? "text-cc-success bg-cc-success/10 hover:bg-cc-success/20 cursor-pointer"
+                ? isRelay
+                  ? "text-cc-warning bg-cc-warning/10 hover:bg-cc-warning/20 cursor-pointer"
+                  : "text-cc-success bg-cc-success/10 hover:bg-cc-success/20 cursor-pointer"
                 : currentAudioMode === "in_only"
                 ? "text-cc-warning bg-cc-warning/10 hover:bg-cc-warning/20 cursor-pointer"
                 : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
@@ -162,15 +209,19 @@ export function TopBar() {
             title={
               !isConnected
                 ? "Connect to enable audio"
+                : currentAudioMode === "connecting"
+                ? "Connecting audio…"
                 : currentAudioMode === "in_out"
-                ? "Audio in+out — click for mic only"
+                ? isRelay
+                  ? "Audio in+out (using TURN relay) — click for mic only"
+                  : "Audio in+out — click for mic only"
                 : currentAudioMode === "in_only"
                 ? "Mic only — click to disable audio"
                 : "Enable audio"
             }
           >
-            {currentAudioMode === "in_out" ? (
-              /* Speaker icon (green) — in+out mode */
+            {currentAudioMode === "connecting" || currentAudioMode === "in_out" ? (
+              /* Speaker icon — green (direct/connecting) or amber (relay) */
               <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
                 <path d="M13.5 4.06c0-1.336-1.616-2.005-2.56-1.06l-4.5 4.5H4.508c-1.141 0-2.318.664-2.66 1.905A9.76 9.76 0 001.5 12c0 .898.121 1.768.35 2.595.341 1.24 1.518 1.905 2.659 1.905h1.93l4.5 4.5c.945.945 2.561.276 2.561-1.06V4.06zM18.584 5.106a.75.75 0 011.06 0c3.808 3.807 3.808 9.98 0 13.788a.75.75 0 01-1.06-1.06 8.25 8.25 0 000-11.668.75.75 0 010-1.06z" />
                 <path d="M15.932 7.757a.75.75 0 011.061 0 6 6 0 010 8.486.75.75 0 01-1.06-1.061 4.5 4.5 0 000-6.364.75.75 0 010-1.06z" />
@@ -198,6 +249,7 @@ export function TopBar() {
                 ? "text-cc-primary bg-cc-active"
                 : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
             }`}
+            aria-label={taskPanelOpen ? "Close session panel" : "Open session panel"}
             title="Toggle session panel"
           >
             <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">

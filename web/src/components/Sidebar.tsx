@@ -10,6 +10,7 @@ export function Sidebar() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [showEnvManager, setShowEnvManager] = useState(false);
+  const [authEnabled, setAuthEnabled] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
@@ -27,10 +28,46 @@ export function Sidebar() {
   const sessionNames = useStore((s) => s.sessionNames);
   const recentlyRenamed = useStore((s) => s.recentlyRenamed);
   const pendingPermissions = useStore((s) => s.pendingPermissions);
+  const sidebarOpen = useStore((s) => s.sidebarOpen);
+  const sidebarListRef = useRef<HTMLDivElement>(null);
+  const newSessionRef = useRef<HTMLButtonElement>(null);
+
+  // Focus the current session (or first session, or New Session button) when sidebar opens
+  // Skip on initial mount — only focus when user actively toggles the sidebar open
+  const sidebarMountedRef = useRef(false);
+  useEffect(() => {
+    if (!sidebarMountedRef.current) {
+      sidebarMountedRef.current = true;
+      return;
+    }
+    if (!sidebarOpen) return;
+    requestAnimationFrame(() => {
+      // Try current session first
+      if (currentSessionId && sidebarListRef.current) {
+        const btn = sidebarListRef.current.querySelector<HTMLElement>(`[data-session-id="${currentSessionId}"]`);
+        if (btn) { btn.focus(); return; }
+      }
+      // Fall back to first session button
+      if (sidebarListRef.current) {
+        const first = sidebarListRef.current.querySelector<HTMLElement>("[data-session-btn]");
+        if (first) { first.focus(); return; }
+      }
+      // Fall back to New Session button
+      newSessionRef.current?.focus();
+    });
+  }, [sidebarOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Check if auth is enabled
+  useEffect(() => {
+    fetch("/api/auth/me").then((r) => r.json()).then((data) => {
+      if (data.authEnabled) setAuthEnabled(true);
+    }).catch(() => {});
+  }, []);
 
   // Poll for SDK sessions on mount
   useEffect(() => {
     let active = true;
+    let isFirstPoll = true;
     async function poll() {
       try {
         const list = await api.listSessions();
@@ -50,6 +87,29 @@ export function Sidebar() {
               }
             }
           }
+
+          // On first load, restore last session (or pick the most recent active one)
+          if (isFirstPoll && !store.currentSessionId && list.length > 0) {
+            isFirstPoll = false;
+            const activeSessions = list.filter((s) => !s.archived);
+            if (activeSessions.length > 0) {
+              const lastId = localStorage.getItem("cc-last-session");
+              const lastSession = lastId ? activeSessions.find((s) => s.sessionId === lastId) : null;
+              const target = lastSession || activeSessions.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0];
+              const isTerminal = target.backendType === "terminal";
+              store.setCurrentSession(target.sessionId);
+              store.setPendingFocus(isTerminal ? "terminal" : "composer");
+              // Close sidebar so it doesn't compete for focus
+              store.setSidebarOpen(false);
+              if (!isTerminal) {
+                connectSession(target.sessionId);
+              }
+            } else {
+              // No active sessions — show sidebar so user sees "New Session"
+              store.setSidebarOpen(true);
+            }
+          }
+          isFirstPoll = false;
         }
       } catch {
         // server not ready
@@ -64,21 +124,25 @@ export function Sidebar() {
   }, []);
 
   function handleSelectSession(sessionId: string) {
-    if (currentSessionId === sessionId) return;
     const s = useStore.getState();
-    // Disconnect from old session (skip terminal sessions — they don't use WsBridge)
-    if (currentSessionId) {
-      const oldSdk = s.sdkSessions.find((x) => x.sessionId === currentSessionId);
-      if (oldSdk?.backendType !== "terminal") {
-        disconnectSession(currentSessionId);
+    const newSdk = s.sdkSessions.find((x) => x.sessionId === sessionId);
+    const isTerminal = newSdk?.backendType === "terminal";
+    if (currentSessionId !== sessionId) {
+      // Disconnect from old session (skip terminal sessions — they don't use WsBridge)
+      if (currentSessionId) {
+        const oldSdk = s.sdkSessions.find((x) => x.sessionId === currentSessionId);
+        if (oldSdk?.backendType !== "terminal") {
+          disconnectSession(currentSessionId);
+        }
+      }
+      setCurrentSession(sessionId);
+      // Terminal sessions use their own WebSocket — don't connect via WsBridge
+      if (!isTerminal) {
+        connectSession(sessionId);
       }
     }
-    setCurrentSession(sessionId);
-    // Terminal sessions use their own WebSocket — don't connect via WsBridge
-    const newSdk = s.sdkSessions.find((x) => x.sessionId === sessionId);
-    if (newSdk?.backendType !== "terminal") {
-      connectSession(sessionId);
-    }
+    // Signal where focus should land
+    s.setPendingFocus(isTerminal ? "terminal" : "composer");
     // Close sidebar on mobile
     if (window.innerWidth < 768) {
       useStore.getState().setSidebarOpen(false);
@@ -93,6 +157,7 @@ export function Sidebar() {
       }
     }
     useStore.getState().newSession();
+    useStore.getState().setPendingFocus("home");
     if (window.innerWidth < 768) {
       useStore.getState().setSidebarOpen(false);
     }
@@ -258,12 +323,31 @@ export function Sidebar() {
     return (
       <div key={s.id} className={`relative group ${archived ? "opacity-60" : ""}`}>
         <button
-          onClick={() => handleSelectSession(s.id)}
+          data-session-id={s.id}
+          onClick={(e) => {
+            // Skip when renaming (space in input triggers native button click)
+            if (isEditing) return;
+            // Skip navigation on double-click (let onDoubleClick handle it)
+            if (e.detail === 2) return;
+            handleSelectSession(s.id);
+          }}
           onDoubleClick={(e) => {
             e.preventDefault();
             setEditingSessionId(s.id);
             setEditingName(label);
           }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+              e.preventDefault();
+              const items = Array.from(
+                e.currentTarget.closest("[data-session-list]")?.querySelectorAll<HTMLElement>("[data-session-btn]") ?? []
+              );
+              const idx = items.indexOf(e.currentTarget);
+              const next = e.key === "ArrowDown" ? items[idx + 1] : items[idx - 1];
+              next?.focus();
+            }
+          }}
+          data-session-btn
           className={`w-full px-3 py-2.5 ${archived ? "pr-14" : "pr-8"} text-left rounded-[10px] transition-all duration-100 cursor-pointer ${
             isActive
               ? "bg-cc-active"
@@ -280,7 +364,7 @@ export function Sidebar() {
                     ? "bg-cc-warning"
                     : s.sdkState === "exited"
                     ? "bg-cc-muted opacity-40"
-                    : s.isConnected
+                    : (s.isConnected || s.backendType === "terminal")
                     ? isRunning
                       ? "bg-cc-success"
                       : isCompacting
@@ -369,7 +453,7 @@ export function Sidebar() {
           )}
         </button>
         {!archived && permCount > 0 && (
-          <span className="absolute right-2 top-1/2 -translate-y-1/2 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-cc-warning text-white text-[10px] font-bold leading-none px-1 group-hover:opacity-0 transition-opacity pointer-events-none">
+          <span className="absolute right-2 top-1/2 -translate-y-1/2 min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-cc-warning text-white text-[10px] font-bold leading-none px-1 transition-opacity pointer-events-none">
             {permCount}
           </span>
         )}
@@ -378,7 +462,7 @@ export function Sidebar() {
             {/* Unarchive button */}
             <button
               onClick={(e) => handleUnarchiveSession(e, s.id)}
-              className="absolute right-8 top-1/2 -translate-y-1/2 p-1 rounded-md opacity-0 group-hover:opacity-100 hover:bg-cc-border text-cc-muted hover:text-cc-fg transition-all cursor-pointer"
+              className="absolute right-8 top-1/2 -translate-y-1/2 p-1 rounded-md hover:bg-cc-border text-cc-muted hover:text-cc-fg transition-all cursor-pointer"
               title="Restore session"
             >
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
@@ -389,7 +473,7 @@ export function Sidebar() {
             {/* Delete button */}
             <button
               onClick={(e) => handleDeleteSession(e, s.id)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md opacity-0 group-hover:opacity-100 hover:bg-cc-border text-cc-muted hover:text-red-400 transition-all cursor-pointer"
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md hover:bg-cc-border text-cc-muted hover:text-red-400 transition-all cursor-pointer"
               title="Delete permanently"
             >
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
@@ -400,7 +484,7 @@ export function Sidebar() {
         ) : s.backendType === "terminal" ? (
           <button
             onClick={(e) => handleCloseTerminal(e, s.id)}
-            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md opacity-0 group-hover:opacity-100 hover:bg-cc-border text-cc-muted hover:text-red-400 transition-all cursor-pointer"
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md hover:bg-cc-border text-cc-muted hover:text-red-400 transition-all cursor-pointer"
             title="Close terminal"
           >
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
@@ -410,7 +494,7 @@ export function Sidebar() {
         ) : (
           <button
             onClick={(e) => handleArchiveSession(e, s.id)}
-            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md opacity-0 group-hover:opacity-100 hover:bg-cc-border text-cc-muted hover:text-cc-fg transition-all cursor-pointer"
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md hover:bg-cc-border text-cc-muted hover:text-cc-fg transition-all cursor-pointer"
             title="Archive session"
           >
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
@@ -424,23 +508,13 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="w-[260px] h-full flex flex-col bg-cc-sidebar border-r border-cc-border">
+    <aside aria-label="Sessions" className="w-[260px] h-full flex flex-col bg-cc-sidebar border-r border-cc-border">
       {/* Header */}
       <div className="p-4 pb-3">
-        <div className="flex items-center gap-2 mb-4">
+        <div className="flex items-center gap-2">
           <img src={logoSrc} alt="" className="h-[2.2em] w-auto" />
           <span className="text-2xl font-semibold text-cc-fg tracking-tight">vibr8</span>
         </div>
-
-        <button
-          onClick={handleNewSession}
-          className="w-full py-2 px-3 text-sm font-medium rounded-[10px] bg-cc-primary hover:bg-cc-primary-hover text-white transition-colors duration-150 flex items-center justify-center gap-1.5 cursor-pointer"
-        >
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5">
-            <path d="M8 3v10M3 8h10" />
-          </svg>
-          New Session
-        </button>
       </div>
 
       {/* Worktree archive confirmation */}
@@ -474,37 +548,54 @@ export function Sidebar() {
       )}
 
       {/* Session list */}
-      <div className="flex-1 overflow-y-auto px-2 pb-2">
-        {activeSessions.length === 0 && archivedSessions.length === 0 ? (
-          <p className="px-3 py-8 text-xs text-cc-muted text-center leading-relaxed">
-            No sessions yet.
-          </p>
-        ) : (
-          <>
-            <div className="space-y-0.5">
-              {activeSessions.map((s) => renderSessionItem(s))}
-            </div>
-
-            {archivedSessions.length > 0 && (
-              <div className="mt-2 pt-2 border-t border-cc-border">
-                <button
-                  onClick={() => setShowArchived(!showArchived)}
-                  className="w-full px-3 py-1.5 text-[11px] font-medium text-cc-muted uppercase tracking-wider flex items-center gap-1.5 hover:text-cc-fg transition-colors cursor-pointer"
-                >
-                  <svg viewBox="0 0 16 16" fill="currentColor" className={`w-3 h-3 transition-transform ${showArchived ? "rotate-90" : ""}`}>
-                    <path d="M6 4l4 4-4 4" />
-                  </svg>
-                  Archived ({archivedSessions.length})
-                </button>
-                {showArchived && (
-                  <div className="space-y-0.5 mt-1">
-                    {archivedSessions.map((s) => renderSessionItem(s, { isArchived: true }))}
-                  </div>
-                )}
+      <div className="flex-1 overflow-hidden relative">
+        <div ref={sidebarListRef} className="h-full overflow-y-auto px-2 pb-14" data-session-list>
+          <div className="px-3 pt-1 pb-1.5 text-[10px] uppercase tracking-wider text-cc-muted font-medium">
+            Sessions
+          </div>
+          {activeSessions.length === 0 && archivedSessions.length === 0 ? (
+            <p className="px-3 py-8 text-xs text-cc-muted text-center leading-relaxed">
+              No sessions yet.
+            </p>
+          ) : (
+            <>
+              <div className="space-y-0.5">
+                {activeSessions.map((s) => renderSessionItem(s))}
               </div>
-            )}
-          </>
-        )}
+
+              {archivedSessions.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-cc-border">
+                  <button
+                    onClick={() => setShowArchived(!showArchived)}
+                    className="w-full px-3 py-1.5 text-[11px] font-medium text-cc-muted uppercase tracking-wider flex items-center gap-1.5 hover:text-cc-fg transition-colors cursor-pointer"
+                  >
+                    <svg viewBox="0 0 16 16" fill="currentColor" className={`w-3 h-3 transition-transform ${showArchived ? "rotate-90" : ""}`}>
+                      <path d="M6 4l4 4-4 4" />
+                    </svg>
+                    Archived ({archivedSessions.length})
+                  </button>
+                  {showArchived && (
+                    <div className="space-y-0.5 mt-1">
+                      {archivedSessions.map((s) => renderSessionItem(s, { isArchived: true }))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Floating new session button */}
+        <button
+          ref={newSessionRef}
+          onClick={handleNewSession}
+          className="absolute bottom-3 right-3 w-10 h-10 rounded-full bg-cc-primary hover:bg-cc-primary-hover text-white shadow-lg flex items-center justify-center transition-colors cursor-pointer z-10"
+          title="New Session"
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5" className="w-4 h-4">
+            <path d="M8 3v10M3 8h10" strokeLinecap="round" />
+          </svg>
+        </button>
       </div>
 
       {/* Footer */}
@@ -548,6 +639,21 @@ export function Sidebar() {
           )}
           <span>{darkMode ? "Light mode" : "Dark mode"}</span>
         </button>
+        {authEnabled && (
+          <button
+            onClick={() => {
+              fetch("/api/auth/logout", { method: "POST" }).finally(() => {
+                window.location.reload();
+              });
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-[10px] text-sm text-cc-muted hover:text-red-400 hover:bg-cc-hover transition-colors cursor-pointer"
+          >
+            <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+              <path fillRule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 001 1h5a1 1 0 100-2H4V5h4a1 1 0 100-2H3zm11.293 3.293a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 01-1.414-1.414L15.586 11H8a1 1 0 110-2h7.586l-1.293-1.293a1 1 0 010-1.414z" clipRule="evenodd" />
+            </svg>
+            <span>Sign out</span>
+          </button>
+        )}
       </div>
 
       {/* Environment manager modal */}

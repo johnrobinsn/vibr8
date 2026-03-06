@@ -198,7 +198,7 @@ Open these ports:
 
 ## 5. ICE Server Configuration
 
-On each dev machine, create `~/.companion/ice-servers.json`:
+On each dev machine, create `~/.vibr8/ice-servers.json`:
 
 ```json
 [
@@ -248,7 +248,7 @@ uv run python -m server.manage_users list
 uv run python -m server.manage_users remove myuser
 ```
 
-Credentials are stored in `~/.companion/users.json` with bcrypt hashes.
+Credentials are stored in `~/.vibr8/users.json` with bcrypt hashes.
 When the file exists, all API/WebSocket endpoints require authentication via
 session cookie. No file = no auth (local dev mode).
 

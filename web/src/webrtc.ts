@@ -12,6 +12,9 @@ const rtcSessions = new Map<string, WebRTCSession>();
 export async function startWebRTC(sessionId: string): Promise<void> {
   if (rtcSessions.has(sessionId)) return;
 
+  // Show blinking "connecting" state immediately
+  useStore.getState().setAudioMode(sessionId, "connecting");
+
   const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
   // Fetch ICE servers from backend (STUN/TURN config)
@@ -46,7 +49,15 @@ export async function startWebRTC(sessionId: string): Promise<void> {
   pc.onconnectionstatechange = () => {
     useStore.getState().setWebRTCStatus(sessionId, pc.connectionState);
 
-    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+    if (pc.connectionState === "connected") {
+      // Connection established — detect transport type (direct vs relay)
+      detectTransportType(sessionId, pc);
+      const store = useStore.getState();
+      store.setAudioMode(sessionId, "in_out");
+      store.setIsRecording(sessionId, true);
+      store.setGuardEnabled(sessionId, true);
+      api.setGuard(sessionId, true).catch(() => {});
+    } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
       stopWebRTC(sessionId);
     }
   };
@@ -71,13 +82,33 @@ export async function startWebRTC(sessionId: string): Promise<void> {
 
   // Store the session
   rtcSessions.set(sessionId, { pc, localStream, remoteAudio });
+}
 
-  // Update store: audio in+out, mic hot, guard mode default
-  const store = useStore.getState();
-  store.setAudioMode(sessionId, "in_out");
-  store.setIsRecording(sessionId, true);
-  store.setGuardEnabled(sessionId, true);
-  api.setGuard(sessionId, true).catch(() => {});
+async function detectTransportType(
+  sessionId: string,
+  pc: RTCPeerConnection,
+): Promise<void> {
+  try {
+    const stats = await pc.getStats();
+    let transport: "direct" | "relay" = "direct";
+    stats.forEach((report) => {
+      if (
+        report.type === "candidate-pair" &&
+        report.state === "succeeded" &&
+        report.nominated
+      ) {
+        // Look up the local candidate to check its type
+        const localCandidate = stats.get(report.localCandidateId);
+        if (localCandidate?.candidateType === "relay") {
+          transport = "relay";
+        }
+      }
+    });
+    useStore.getState().setWebRTCTransport(sessionId, transport);
+  } catch {
+    // Stats API not available, assume direct
+    useStore.getState().setWebRTCTransport(sessionId, "direct");
+  }
 }
 
 export function toggleGuard(sessionId: string): void {
@@ -117,6 +148,7 @@ export function stopWebRTC(sessionId: string): void {
   store.setAudioMode(sessionId, "off");
   store.setIsRecording(sessionId, false);
   store.setWebRTCStatus(sessionId, null);
+  store.setWebRTCTransport(sessionId, null);
 }
 
 export function isWebRTCActive(sessionId: string): boolean {
