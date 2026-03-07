@@ -32,6 +32,7 @@ class PersistedSession:
     pendingMessages: List[str]
     pendingPermissions: List[Tuple[str, PermissionRequest]]
     archived: Optional[bool] = None
+    name: Optional[str] = None
 
     # -- Serialization helpers ------------------------------------------------
 
@@ -45,6 +46,8 @@ class PersistedSession:
         }
         if self.archived is not None:
             d["archived"] = self.archived
+        if self.name is not None:
+            d["name"] = self.name
         return d
 
     @classmethod
@@ -59,6 +62,7 @@ class PersistedSession:
                 for pair in data.get("pendingPermissions", [])
             ],
             archived=data.get("archived"),
+            name=data.get("name"),
         )
 
 

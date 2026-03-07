@@ -22,6 +22,7 @@ from server import session_names
 from server.routes import create_routes
 from server.webrtc import WebRTCManager
 from server.terminal import TerminalManager
+from server.ring0 import Ring0Manager
 import json as _json
 from server.auth import AuthManager, auth_middleware
 
@@ -98,8 +99,9 @@ async def handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
     session_id = request.match_info["session_id"]
 
     bridge: WsBridge = request.app["bridge"]
+    client_id = request.rel_url.query.get("clientId", "")
 
-    await bridge.handle_browser_open(ws, session_id)
+    await bridge.handle_browser_open(ws, session_id, client_id)
 
     try:
         async for msg in ws:
@@ -192,6 +194,7 @@ def create_app() -> web.Application:
 
     webrtc_manager = WebRTCManager(ice_servers=ice_servers)
     terminal_manager = TerminalManager()
+    ring0_manager = Ring0Manager(PORT)
 
     # Track background tasks so we can cancel them on shutdown.
     background_tasks: set[asyncio.Task] = set()
@@ -206,7 +209,10 @@ def create_app() -> web.Application:
     # Wire up stores and managers
     ws_bridge.set_store(session_store)
     ws_bridge.set_webrtc_manager(webrtc_manager)
+    ws_bridge.set_ring0_manager(ring0_manager)
     webrtc_manager.set_ws_bridge(ws_bridge)
+    webrtc_manager.set_ring0_manager(ring0_manager)
+    webrtc_manager.set_launcher(launcher)
     launcher.set_store(session_store)
 
     # Restore persisted state
@@ -287,7 +293,7 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/terminal/{session_id}", handle_terminal_ws)
 
     # REST API
-    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager)
+    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager)
     app.router.add_routes(api_routes)
 
     # Production static file serving
@@ -310,6 +316,7 @@ def create_app() -> web.Application:
     app["webrtc_manager"] = webrtc_manager
     app["terminal_manager"] = terminal_manager
     app["auth_manager"] = auth_manager
+    app["ring0_manager"] = ring0_manager
 
     # ── Startup / Shutdown hooks ──────────────────────────────────────────
 
