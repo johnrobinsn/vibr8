@@ -115,18 +115,16 @@ class WsBridge:
         self._activate_thinking(session_id)
 
     def _activate_thinking(self, session_id: str) -> None:
-        """Actually turn on the thinking tone and mute STT."""
+        """Actually turn on the thinking tone."""
         self._thinking_timers.pop(session_id, None)
         if self._webrtc_manager:
-            self._webrtc_manager.mute_stt(session_id)
             self._webrtc_manager.set_thinking(session_id, True)
 
     def _stop_thinking(self, session_id: str) -> None:
-        """Stop the thinking tone, cancel any pending timer, and unmute STT."""
+        """Stop the thinking tone and cancel any pending timer."""
         self._cancel_thinking_timer(session_id)
         if self._webrtc_manager:
             self._webrtc_manager.set_thinking(session_id, False)
-            self._webrtc_manager.unmute_stt(session_id)
 
     def _cancel_thinking_timer(self, session_id: str) -> None:
         handle = self._thinking_timers.pop(session_id, None)
@@ -662,11 +660,9 @@ class WsBridge:
                 track.push_opus_frame(frame)
 
             # Stop thinking tone — TTS is taking over.
-            # Keep STT muted during TTS to prevent echo-triggered barge-in.
             self._cancel_thinking_timer(session_id)
             if self._webrtc_manager:
                 self._webrtc_manager.set_thinking(session_id, False)
-                self._webrtc_manager.mute_stt(session_id)
             logger.info("[ws-bridge] TTS starting for session %s: %d chars", session_id, len(text))
             from server.tts import TTS_OpenAI
             tts = TTS_OpenAI(opus_frame_handler=on_frame)
@@ -973,6 +969,7 @@ class WsBridge:
             "type": "user_message",
             "content": text,
             "source": "voice",
+            "sessionId": session_id,
         }
         if source_client_id:
             broadcast["sourceClientId"] = source_client_id
