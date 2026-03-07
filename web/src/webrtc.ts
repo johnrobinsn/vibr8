@@ -7,13 +7,17 @@ export interface WebRTCSession {
   remoteAudio: HTMLAudioElement;
 }
 
-const rtcSessions = new Map<string, WebRTCSession>();
+// Store on window to survive Vite HMR module reloads
+const _w = window as unknown as Record<string, unknown>;
+const rtcSessions = (_w.__v8_rtcSessions ??= new Map<string, WebRTCSession>()) as Map<string, WebRTCSession>;
 
 export async function startWebRTC(sessionId: string): Promise<void> {
   if (rtcSessions.has(sessionId)) return;
 
   // Show blinking "connecting" state immediately
-  useStore.getState().setAudioMode(sessionId, "connecting");
+  const store0 = useStore.getState();
+  store0.setAudioSessionId(sessionId);
+  store0.setAudioMode("connecting");
 
   const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
@@ -43,20 +47,23 @@ export async function startWebRTC(sessionId: string): Promise<void> {
     } else {
       remoteAudio.srcObject = new MediaStream([event.track]);
     }
+    // Ensure playback starts (may be blocked by autoplay policy)
+    remoteAudio.play().catch(() => {});
   };
 
   // Monitor connection state changes
   pc.onconnectionstatechange = () => {
-    useStore.getState().setWebRTCStatus(sessionId, pc.connectionState);
+    useStore.getState().setWebRTCStatus(pc.connectionState);
 
     if (pc.connectionState === "connected") {
       // Connection established — detect transport type (direct vs relay)
-      detectTransportType(sessionId, pc);
+      detectTransportType(pc);
       const store = useStore.getState();
-      store.setAudioMode(sessionId, "in_out");
-      store.setIsRecording(sessionId, true);
-      store.setGuardEnabled(sessionId, true);
-      api.setGuard(sessionId, true).catch(() => {});
+      store.setAudioMode("in_out");
+      store.setIsRecording(true);
+      // Restore persisted guard state (defaults to true for fresh sessions)
+      const guard = store.guardEnabled;
+      api.setGuard(sessionId, guard).catch(() => {});
     } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
       stopWebRTC(sessionId);
     }
@@ -82,10 +89,11 @@ export async function startWebRTC(sessionId: string): Promise<void> {
   }
 
   // Exchange SDP with the backend (now includes all candidates)
-  const answer = await api.webrtcOffer(sessionId, {
-    sdp: pc.localDescription!.sdp,
-    type: pc.localDescription!.type,
-  });
+  const answer = await api.webrtcOffer(
+    sessionId,
+    { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
+    useStore.getState().clientId,
+  );
 
   // Set the remote answer
   await pc.setRemoteDescription(
@@ -100,7 +108,6 @@ export async function startWebRTC(sessionId: string): Promise<void> {
 }
 
 async function detectTransportType(
-  sessionId: string,
   pc: RTCPeerConnection,
 ): Promise<void> {
   try {
@@ -119,26 +126,26 @@ async function detectTransportType(
         }
       }
     });
-    useStore.getState().setWebRTCTransport(sessionId, transport);
+    useStore.getState().setWebRTCTransport(transport);
   } catch {
     // Stats API not available, assume direct
-    useStore.getState().setWebRTCTransport(sessionId, "direct");
+    useStore.getState().setWebRTCTransport("direct");
   }
 }
 
 export function toggleGuard(sessionId: string): void {
-  const current = useStore.getState().guardEnabled.get(sessionId) ?? true;
+  const current = useStore.getState().guardEnabled;
   api.setGuard(sessionId, !current).catch(() => {});
 }
 
 export function setAudioInOnly(sessionId: string): void {
   api.setTtsMuted(sessionId, true).catch(() => {});
-  useStore.getState().setAudioMode(sessionId, "in_only");
+  useStore.getState().setAudioMode("in_only");
 }
 
 export function setAudioInOut(sessionId: string): void {
   api.setTtsMuted(sessionId, false).catch(() => {});
-  useStore.getState().setAudioMode(sessionId, "in_out");
+  useStore.getState().setAudioMode("in_out");
 }
 
 export function stopWebRTC(sessionId: string): void {
@@ -160,10 +167,11 @@ export function stopWebRTC(sessionId: string): void {
 
   // Update store
   const store = useStore.getState();
-  store.setAudioMode(sessionId, "off");
-  store.setIsRecording(sessionId, false);
-  store.setWebRTCStatus(sessionId, null);
-  store.setWebRTCTransport(sessionId, null);
+  store.setAudioSessionId(null);
+  store.setAudioMode("off");
+  store.setIsRecording(false);
+  store.setWebRTCStatus(null);
+  store.setWebRTCTransport(null);
 }
 
 export function isWebRTCActive(sessionId: string): boolean {

@@ -11,6 +11,10 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>vibr8</title>
+    <script>
+      // Apply dark mode + background color before first paint to prevent white flash
+      (function(){var d=localStorage.getItem("cc-dark-mode"),dark=d==="true"||(d===null&&matchMedia("(prefers-color-scheme: dark)").matches);if(dark){document.documentElement.classList.add("dark");document.documentElement.style.background="#2b2a27"}else{document.documentElement.style.background="#F5F5F0"}})();
+    </script>
   </head>
   <body class="bg-cc-bg text-cc-fg">
     <div id="root"></div>

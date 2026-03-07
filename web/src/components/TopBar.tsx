@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useStore } from "../store.js";
-import { startWebRTC, stopWebRTC, setAudioInOnly } from "../webrtc.js";
+import { api } from "../api.js";
+import { startWebRTC, stopWebRTC, setAudioInOnly, toggleGuard } from "../webrtc.js";
 import { cancelReconnect, manualReconnect } from "../ws.js";
+import { ShieldIcon } from "./ShieldIcon.js";
 
 
 export function TopBar() {
@@ -19,8 +21,10 @@ export function TopBar() {
   const reconnecting = useStore((s) => s.reconnecting);
   const reconnectGaveUp = useStore((s) => s.reconnectGaveUp);
   const audioMode = useStore((s) => s.audioMode);
+  const audioSessionId = useStore((s) => s.audioSessionId);
   const webrtcStatus = useStore((s) => s.webrtcStatus);
   const webrtcTransport = useStore((s) => s.webrtcTransport);
+  const guardEnabled = useStore((s) => s.guardEnabled);
   const sdkSessions = useStore((s) => s.sdkSessions);
   const sessionNames = useStore((s) => s.sessionNames);
 
@@ -33,15 +37,15 @@ export function TopBar() {
   const isReconnecting = currentSessionId ? (reconnecting.get(currentSessionId) ?? false) : false;
   const hasGaveUp = currentSessionId ? (reconnectGaveUp.get(currentSessionId) ?? false) : false;
   const status = currentSessionId ? (sessionStatus.get(currentSessionId) ?? null) : null;
-  const currentAudioMode = currentSessionId ? (audioMode.get(currentSessionId) ?? "off") : "off";
-  const rtcStatus = currentSessionId ? (webrtcStatus.get(currentSessionId) ?? null) : null;
-  const rtcTransport = currentSessionId ? (webrtcTransport.get(currentSessionId) ?? null) : null;
-  const isRelay = rtcTransport === "relay";
+  const currentAudioMode = audioMode;
+  const isRelay = webrtcTransport === "relay";
   const sessionName = currentSessionId ? (sessionNames.get(currentSessionId) ?? null) : null;
 
   async function handleAudioCycle() {
     if (!currentSessionId) return;
     setAudioError(null);
+    // Use the session that actually has WebRTC active (not necessarily the viewed session)
+    const activeId = audioSessionId ?? currentSessionId;
     if (currentAudioMode === "off") {
       try {
         await startWebRTC(currentSessionId);
@@ -53,11 +57,11 @@ export function TopBar() {
         setTimeout(() => setAudioError(null), 5000);
       }
     } else if (currentAudioMode === "connecting") {
-      stopWebRTC(currentSessionId);
+      stopWebRTC(activeId);
     } else if (currentAudioMode === "in_out") {
-      setAudioInOnly(currentSessionId);
+      setAudioInOnly(activeId);
     } else {
-      stopWebRTC(currentSessionId);
+      stopWebRTC(activeId);
     }
   }
 
@@ -188,6 +192,29 @@ export function TopBar() {
               Editor
             </button>
           </div>
+
+          {/* Ring0 meta-agent toggle */}
+          {/* Guard word toggle — only shown when audio is active */}
+          {currentAudioMode !== "off" && audioSessionId && (
+            <button
+              onClick={() => toggleGuard(audioSessionId)}
+              className={`flex items-center justify-center w-7 h-7 rounded-lg transition-colors cursor-pointer ${
+                guardEnabled
+                  ? "text-cc-warning bg-cc-warning/10 hover:bg-cc-warning/20"
+                  : "text-cc-error bg-cc-error/10 animate-pulse"
+              }`}
+              title={guardEnabled ? 'Guard mode — say "vibrate" to command' : "Listening — click for guard mode"}
+            >
+              {guardEnabled ? (
+                <ShieldIcon className="w-4 h-4" />
+              ) : (
+                <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                  <path d="M7 4a3 3 0 016 0v4a3 3 0 01-6 0V4z" />
+                  <path d="M5.5 9.643a.75.75 0 00-1.5 0V10c0 3.06 2.29 5.585 5.25 5.954V17.5h-1.5a.75.75 0 000 1.5h4.5a.75.75 0 000-1.5h-1.5v-1.546A6.001 6.001 0 0016 10v-.357a.75.75 0 00-1.5 0V10a4.5 4.5 0 01-9 0v-.357z" />
+                </svg>
+              )}
+            </button>
+          )}
 
           {/* Audio cycle: off → connecting → in+out → in-only → off */}
           <button

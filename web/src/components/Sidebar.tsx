@@ -12,6 +12,10 @@ export function Sidebar() {
   const [showEnvManager, setShowEnvManager] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [ring0SessionId, setRing0SessionId] = useState<string | null>(null);
+  useEffect(() => {
+    api.getRing0Status().then((s) => setRing0SessionId(s.sessionId ?? null)).catch(() => {});
+  }, []);
   const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
   const sessions = useStore((s) => s.sessions);
@@ -301,7 +305,13 @@ export function Sidebar() {
       archived: sdkInfo?.archived ?? false,
       backendType: sdkInfo?.backendType || bridgeState?.backend_type || "claude",
     };
-  }).sort((a, b) => b.createdAt - a.createdAt);
+  }).sort((a, b) => {
+    // Ring0 always first
+    const ring0Id = ring0SessionId;
+    if (a.id === ring0Id) return -1;
+    if (b.id === ring0Id) return 1;
+    return b.createdAt - a.createdAt;
+  });
 
   const activeSessions = allSessionList.filter((s) => !s.archived);
   const archivedSessions = allSessionList.filter((s) => s.archived);
@@ -406,6 +416,9 @@ export function Sidebar() {
                 onAnimationEnd={() => useStore.getState().clearRecentlyRenamed(s.id)}
               >
                 <span className="truncate">{label}</span>
+                {s.id === ring0SessionId && (
+                  <span className="text-[9px] px-1 py-0.5 rounded bg-purple-500/15 text-purple-600 dark:text-purple-400 shrink-0">R0</span>
+                )}
                 {s.backendType === "codex" && (
                   <span className="text-[9px] px-1 py-0.5 rounded bg-purple-500/15 text-purple-600 dark:text-purple-400 shrink-0">codex</span>
                 )}

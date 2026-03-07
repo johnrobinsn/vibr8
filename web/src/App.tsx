@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useStore } from "./store.js";
+import { api } from "./api.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ChatView } from "./components/ChatView.js";
 import { TopBar } from "./components/TopBar.js";
@@ -10,6 +11,8 @@ import { Playground } from "./components/Playground.js";
 import { TerminalView } from "./components/TerminalView.js";
 import { LoginPage } from "./components/LoginPage.js";
 import { CommandPalette } from "./components/CommandPalette.js";
+import { connectSession, disconnectSession } from "./ws.js";
+import { startWebRTC, setAudioInOnly } from "./webrtc.js";
 
 function useHash() {
   return useSyncExternalStore(
@@ -40,6 +43,11 @@ export default function App() {
     return ids;
   });
   const commandPaletteOpen = useStore((s) => s.commandPaletteOpen);
+  const [ring0SessionId, setRing0SessionId] = useState<string | null>(null);
+  useEffect(() => {
+    api.getRing0Status().then((s) => setRing0SessionId(s.sessionId ?? null)).catch(() => {});
+  }, []);
+  const previousSessionRef = useRef<string | null>(null);
   const hash = useHash();
 
   // Auth check on mount
@@ -60,6 +68,36 @@ export default function App() {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
 
+  // Auto-reconnect audio if it was active before reload
+  const audioReconnectedRef = useRef(false);
+  useEffect(() => {
+    if (audioReconnectedRef.current) return;
+    const savedMode = localStorage.getItem("cc-audio-mode");
+    const savedSession = localStorage.getItem("cc-audio-session");
+    if (!savedMode || savedMode === "off" || !savedSession) return;
+
+    // Wait for the session's CLI to be connected before starting WebRTC
+    const unsub = useStore.subscribe((s) => {
+      if (audioReconnectedRef.current) return;
+      const isConnected = s.cliConnected.get(savedSession);
+      if (isConnected) {
+        audioReconnectedRef.current = true;
+        unsub();
+        startWebRTC(savedSession)
+          .then(() => {
+            // Restore saved audio mode (startWebRTC defaults to in_out)
+            if (savedMode === "in_only") {
+              setAudioInOnly(savedSession);
+            }
+          })
+          .catch((err) => {
+            console.warn("[webrtc] Auto-reconnect failed:", err);
+          });
+      }
+    });
+    return () => unsub();
+  }, []);
+
   // Keyboard shortcuts: Escape to close overlays, Ctrl/Cmd+Alt+S to toggle sidebar
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -67,6 +105,34 @@ export default function App() {
         if (useStore.getState().commandPaletteOpen) { useStore.getState().setCommandPaletteOpen(false); return; }
         if (taskPanelOpen) { useStore.getState().setTaskPanelOpen(false); return; }
         if (sidebarOpen) { useStore.getState().setSidebarOpen(false); return; }
+      }
+      // Ctrl/Cmd+` — toggle between Ring0 and previous session
+      if (e.key === "`" && (e.metaKey || e.ctrlKey) && ring0SessionId) {
+        e.preventDefault();
+        const s = useStore.getState();
+        if (s.currentSessionId === ring0SessionId) {
+          // Switch back to previous session
+          const prevId = previousSessionRef.current;
+          if (prevId) {
+            if (s.currentSessionId) {
+              const oldSdk = s.sdkSessions.find((x) => x.sessionId === s.currentSessionId);
+              if (oldSdk?.backendType !== "terminal") disconnectSession(s.currentSessionId);
+            }
+            s.setCurrentSession(prevId);
+            const newSdk = s.sdkSessions.find((x) => x.sessionId === prevId);
+            if (newSdk?.backendType !== "terminal") connectSession(prevId);
+          }
+        } else {
+          // Switch to Ring0, remember current
+          previousSessionRef.current = s.currentSessionId;
+          if (s.currentSessionId) {
+            const oldSdk = s.sdkSessions.find((x) => x.sessionId === s.currentSessionId);
+            if (oldSdk?.backendType !== "terminal") disconnectSession(s.currentSessionId);
+          }
+          s.setCurrentSession(ring0SessionId);
+          connectSession(ring0SessionId);
+        }
+        return;
       }
       if (e.altKey && (e.metaKey || e.ctrlKey)) {
         if (e.key === "p") {
@@ -84,7 +150,7 @@ export default function App() {
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [sidebarOpen, taskPanelOpen]);
+  }, [sidebarOpen, taskPanelOpen, ring0SessionId]);
 
   if (authState === "loading") return null;
   if (authState === "login") return <LoginPage onLogin={() => setAuthState("authenticated")} />;
