@@ -47,6 +47,7 @@ class SdkSessionInfo:
     actualBranch: Optional[str] = None
     name: Optional[str] = None
     backendType: Optional[BackendType] = None
+    mcpConfig: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -81,6 +82,7 @@ class LaunchOptions:
     env: Optional[Dict[str, str]] = None
     backendType: Optional[BackendType] = None
     worktreeInfo: Optional[WorktreeInfo] = None
+    mcpConfig: Optional[str] = None
 
 
 @dataclass
@@ -97,6 +99,7 @@ class _RelaunchOptions:
     backendType: Optional[BackendType] = None
     worktreeInfo: Optional[WorktreeInfo] = None
     resumeSessionId: Optional[str] = None
+    mcpConfig: Optional[str] = None
 
 
 # ─── CliLauncher ─────────────────────────────────────────────────────────────
@@ -204,6 +207,10 @@ class CliLauncher:
             backendType=backend_type,
         )
 
+        # Store MCP config path for relaunch
+        if options.mcpConfig:
+            info.mcpConfig = options.mcpConfig
+
         # Store worktree metadata if provided
         if options.worktreeInfo:
             info.isWorktree = options.worktreeInfo.isWorktree
@@ -226,6 +233,7 @@ class CliLauncher:
                 env=options.env,
                 backendType=options.backendType,
                 worktreeInfo=options.worktreeInfo,
+                mcpConfig=options.mcpConfig,
             )
             asyncio.ensure_future(self._spawn_cli(session_id, info, relaunch_opts))
 
@@ -281,6 +289,7 @@ class CliLauncher:
                     permissionMode=info.permissionMode,
                     cwd=info.cwd,
                     resumeSessionId=info.cliSessionId,
+                    mcpConfig=info.mcpConfig,
                 ),
             )
         return True
@@ -322,6 +331,8 @@ class CliLauncher:
         if options.allowedTools:
             for tool in options.allowedTools:
                 args.extend(["--allowedTools", tool])
+        if options.mcpConfig:
+            args.extend(["--mcp-config", options.mcpConfig, "--strict-mcp-config"])
 
         # Inject CLAUDE.md guardrails for worktree sessions
         if info.isWorktree and info.branch:
@@ -645,6 +656,10 @@ class CliLauncher:
     def get_session(self, session_id: str) -> Optional[SdkSessionInfo]:
         """Get a specific session."""
         return self._sessions.get(session_id)
+
+    def get_all_session_ids(self) -> List[str]:
+        """Get all session IDs."""
+        return list(self._sessions.keys())
 
     def is_alive(self, session_id: str) -> bool:
         """Check if a session exists and is alive (not exited)."""

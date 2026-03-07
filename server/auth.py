@@ -33,6 +33,7 @@ PUBLIC_PREFIXES = (
     "/ws/cli/",
     "/api/auth/login",
     "/api/auth/me",
+    "/api/ring0/",
     "/assets/",
     "/sw.js",
     "/manifest.json",
