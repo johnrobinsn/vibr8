@@ -164,7 +164,8 @@ export type BrowserOutgoingMessage =
   | { type: "permission_response"; request_id: string; behavior: "allow" | "deny"; updated_input?: Record<string, unknown>; updated_permissions?: PermissionUpdate[]; message?: string }
   | { type: "interrupt" }
   | { type: "set_model"; model: string }
-  | { type: "set_permission_mode"; mode: string };
+  | { type: "set_permission_mode"; mode: string }
+  | { type: "rpc_response"; id: string; result?: unknown; error?: string };
 
 /** Messages the bridge sends to the browser */
 export type BrowserIncomingMessage =
@@ -187,7 +188,9 @@ export type BrowserIncomingMessage =
   | { type: "session_name_update"; name: string }
   | { type: "guard_state"; enabled: boolean }
   | { type: "audio_off" }
-  | { type: "tts_muted"; muted: boolean };
+  | { type: "tts_muted"; muted: boolean }
+  | { type: "ring0_switch_ui"; sessionId: string }
+  | { type: "rpc_request"; id: string; method: string; params?: Record<string, unknown> };
 
 // ─── Session State ────────────────────────────────────────────────────────────
 

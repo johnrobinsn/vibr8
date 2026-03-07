@@ -1,7 +1,21 @@
 import { create } from "zustand";
 import type { SessionState, PermissionRequest, ChatMessage, SdkSessionInfo, TaskItem } from "./types.js";
 
+function getClientId(): string {
+  if (typeof window === "undefined") return crypto.randomUUID();
+  const key = "vibr8_client_id";
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+  }
+  return id;
+}
+
 interface AppState {
+  // Per-app client identity
+  clientId: string;
+
   // Sessions
   sessions: Map<string, SessionState>;
   sdkSessions: SdkSessionInfo[];
@@ -56,14 +70,13 @@ interface AppState {
   reconnecting: Map<string, boolean>;
   reconnectGaveUp: Map<string, boolean>;
 
-  // WebRTC audio state per session
-  audioMode: Map<string, "off" | "connecting" | "in_out" | "in_only">;
-  isRecording: Map<string, boolean>;
-  webrtcStatus: Map<string, string | null>;
-  webrtcTransport: Map<string, "direct" | "relay" | null>;
-
-  // Guard mode per session
-  guardEnabled: Map<string, boolean>;
+  // WebRTC audio state (global singleton — one audio session at a time)
+  audioSessionId: string | null;
+  audioMode: "off" | "connecting" | "in_out" | "in_only";
+  isRecording: boolean;
+  webrtcStatus: string | null;
+  webrtcTransport: "direct" | "relay" | null;
+  guardEnabled: boolean;
 
   // Focus management
   pendingFocus: "composer" | "terminal" | "home" | null;
@@ -128,11 +141,12 @@ interface AppState {
   setEditorUrl: (sessionId: string, url: string) => void;
   setEditorLoading: (sessionId: string, loading: boolean) => void;
 
-  // WebRTC audio actions
-  setAudioMode: (sessionId: string, mode: "off" | "connecting" | "in_out" | "in_only") => void;
-  setIsRecording: (sessionId: string, recording: boolean) => void;
-  setWebRTCStatus: (sessionId: string, status: string | null) => void;
-  setWebRTCTransport: (sessionId: string, transport: "direct" | "relay" | null) => void;
+  // WebRTC audio actions (global)
+  setAudioSessionId: (sessionId: string | null) => void;
+  setAudioMode: (mode: "off" | "connecting" | "in_out" | "in_only") => void;
+  setIsRecording: (recording: boolean) => void;
+  setWebRTCStatus: (status: string | null) => void;
+  setWebRTCTransport: (transport: "direct" | "relay" | null) => void;
 
   // Focus management actions
   setPendingFocus: (target: "composer" | "terminal" | "home" | null) => void;
@@ -141,8 +155,8 @@ interface AppState {
   setCommandPaletteOpen: (open: boolean) => void;
   toggleCommandPalette: () => void;
 
-  // Guard mode actions
-  setGuardEnabled: (sessionId: string, enabled: boolean) => void;
+  // Guard mode actions (global)
+  setGuardEnabled: (enabled: boolean) => void;
 
   reset: () => void;
 }
@@ -162,6 +176,7 @@ function getInitialNotificationSound(): boolean {
 }
 
 export const useStore = create<AppState>((set) => ({
+  clientId: getClientId(),
   sessions: new Map(),
   sdkSessions: [],
   currentSessionId: null,
@@ -189,11 +204,12 @@ export const useStore = create<AppState>((set) => ({
   editorLoading: new Map(),
   reconnecting: new Map(),
   reconnectGaveUp: new Map(),
-  audioMode: new Map(),
-  isRecording: new Map(),
-  webrtcStatus: new Map(),
-  webrtcTransport: new Map(),
-  guardEnabled: new Map(),
+  audioSessionId: null,
+  audioMode: "off" as const,
+  isRecording: false,
+  webrtcStatus: null,
+  webrtcTransport: null,
+  guardEnabled: typeof window !== "undefined" ? localStorage.getItem("cc-guard-enabled") !== "false" : true,
   pendingFocus: null,
   commandPaletteOpen: false,
 
@@ -289,16 +305,10 @@ export const useStore = create<AppState>((set) => ({
       editorUrl.delete(sessionId);
       const editorLoading = new Map(s.editorLoading);
       editorLoading.delete(sessionId);
-      const audioMode = new Map(s.audioMode);
-      audioMode.delete(sessionId);
-      const isRecording = new Map(s.isRecording);
-      isRecording.delete(sessionId);
-      const webrtcStatus = new Map(s.webrtcStatus);
-      webrtcStatus.delete(sessionId);
-      const webrtcTransport = new Map(s.webrtcTransport);
-      webrtcTransport.delete(sessionId);
-      const guardEnabled = new Map(s.guardEnabled);
-      guardEnabled.delete(sessionId);
+      // Reset global audio state if the removed session owns the audio
+      const audioReset = s.audioSessionId === sessionId
+        ? { audioSessionId: null, audioMode: "off" as const, isRecording: false, webrtcStatus: null, webrtcTransport: null, guardEnabled: true }
+        : {};
       return {
         sessions,
         messages,
@@ -317,18 +327,25 @@ export const useStore = create<AppState>((set) => ({
         editorOpenFile,
         editorUrl,
         editorLoading,
-        audioMode,
-        isRecording,
-        webrtcStatus,
-        webrtcTransport,
-        guardEnabled,
+        ...audioReset,
         sdkSessions: s.sdkSessions.filter((sdk) => sdk.sessionId !== sessionId),
         currentSessionId: s.currentSessionId === sessionId ? null : s.currentSessionId,
       };
     }),
 
   setSdkSessions: (sessions) => {
-    set({ sdkSessions: sessions });
+    set((s) => {
+      // Populate sessionNames from server data for any sessions without a name
+      const names = new Map(s.sessionNames);
+      let changed = false;
+      for (const sdk of sessions) {
+        if (sdk.name && !names.has(sdk.sessionId)) {
+          names.set(sdk.sessionId, sdk.name);
+          changed = true;
+        }
+      }
+      return changed ? { sdkSessions: sessions, sessionNames: names } : { sdkSessions: sessions };
+    });
   },
 
   appendMessage: (sessionId, msg) =>
@@ -540,48 +557,25 @@ export const useStore = create<AppState>((set) => ({
       return { editorLoading };
     }),
 
-  setAudioMode: (sessionId, mode) =>
-    set((s) => {
-      const audioMode = new Map(s.audioMode);
-      audioMode.set(sessionId, mode);
-      return { audioMode };
-    }),
-
-  setIsRecording: (sessionId, recording) =>
-    set((s) => {
-      const isRecording = new Map(s.isRecording);
-      isRecording.set(sessionId, recording);
-      return { isRecording };
-    }),
-
-  setWebRTCStatus: (sessionId, status) =>
-    set((s) => {
-      const webrtcStatus = new Map(s.webrtcStatus);
-      if (status === null) {
-        webrtcStatus.delete(sessionId);
-      } else {
-        webrtcStatus.set(sessionId, status);
-      }
-      return { webrtcStatus };
-    }),
-
-  setWebRTCTransport: (sessionId, transport) =>
-    set((s) => {
-      const webrtcTransport = new Map(s.webrtcTransport);
-      if (transport === null) {
-        webrtcTransport.delete(sessionId);
-      } else {
-        webrtcTransport.set(sessionId, transport);
-      }
-      return { webrtcTransport };
-    }),
-
-  setGuardEnabled: (sessionId, enabled) =>
-    set((s) => {
-      const guardEnabled = new Map(s.guardEnabled);
-      guardEnabled.set(sessionId, enabled);
-      return { guardEnabled };
-    }),
+  setAudioSessionId: (sessionId) => {
+    if (sessionId) {
+      localStorage.setItem("cc-audio-session", sessionId);
+    } else {
+      localStorage.removeItem("cc-audio-session");
+    }
+    set({ audioSessionId: sessionId });
+  },
+  setAudioMode: (mode) => {
+    localStorage.setItem("cc-audio-mode", mode);
+    set({ audioMode: mode });
+  },
+  setIsRecording: (recording) => set({ isRecording: recording }),
+  setWebRTCStatus: (status) => set({ webrtcStatus: status }),
+  setWebRTCTransport: (transport) => set({ webrtcTransport: transport }),
+  setGuardEnabled: (enabled) => {
+    localStorage.setItem("cc-guard-enabled", String(enabled));
+    set({ guardEnabled: enabled });
+  },
 
   setPendingFocus: (target) => set({ pendingFocus: target }),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
@@ -609,11 +603,12 @@ export const useStore = create<AppState>((set) => ({
       editorOpenFile: new Map(),
       editorUrl: new Map(),
       editorLoading: new Map(),
-      audioMode: new Map(),
-      isRecording: new Map(),
-      webrtcStatus: new Map(),
-      webrtcTransport: new Map(),
-      guardEnabled: new Map(),
+      audioSessionId: null,
+      audioMode: "off" as const,
+      isRecording: false,
+      webrtcStatus: null,
+      webrtcTransport: null,
+      guardEnabled: true,
       pendingFocus: null,
       commandPaletteOpen: false,
     }),

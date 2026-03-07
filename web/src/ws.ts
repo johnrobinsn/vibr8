@@ -1,17 +1,18 @@
 import { useStore } from "./store.js";
 import { stopWebRTC } from "./webrtc.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem } from "./types.js";
-import { generateUniqueSessionName } from "./utils/names.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
 
-const sockets = new Map<string, WebSocket>();
-const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const reconnectStartTimes = new Map<string, number>();
+// Store on window to survive Vite HMR module reloads (prevents duplicate WebSockets)
+const _w = window as unknown as Record<string, unknown>;
+const sockets = (_w.__v8_sockets ??= new Map<string, WebSocket>()) as Map<string, WebSocket>;
+const reconnectTimers = (_w.__v8_reconnectTimers ??= new Map()) as Map<string, ReturnType<typeof setTimeout>>;
+const reconnectStartTimes = (_w.__v8_reconnectStartTimes ??= new Map()) as Map<string, number>;
 const RECONNECT_TIMEOUT_MS = 60_000;
 const RECONNECT_INTERVAL_MS = 2_000;
-const taskCounters = new Map<string, number>();
+const taskCounters = (_w.__v8_taskCounters ??= new Map()) as Map<string, number>;
 /** Track processed tool_use IDs to prevent duplicate task creation */
-const processedToolUseIds = new Map<string, Set<string>>();
+const processedToolUseIds = (_w.__v8_processedToolUseIds ??= new Map()) as Map<string, Set<string>>;
 
 function getProcessedSet(sessionId: string): Set<string> {
   let set = processedToolUseIds.get(sessionId);
@@ -101,7 +102,8 @@ function nextId(): string {
 
 function getWsUrl(sessionId: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}/ws/browser/${sessionId}`;
+  const clientId = useStore.getState().clientId;
+  return `${proto}//${location.host}/ws/browser/${sessionId}?clientId=${encodeURIComponent(clientId)}`;
 }
 
 function extractTextFromBlocks(blocks: ContentBlock[]): string {
@@ -133,9 +135,11 @@ function handleMessage(sessionId: string, event: MessageEvent) {
         store.setSessionStatus(sessionId, "idle");
       }
       if (!store.sessionNames.has(sessionId)) {
-        const existingNames = new Set(store.sessionNames.values());
-        const name = generateUniqueSessionName(existingNames);
-        store.setSessionName(sessionId, name);
+        // Prefer server-assigned name from SDK session list
+        const sdkSession = store.sdkSessions.find((s) => s.sessionId === sessionId);
+        if (sdkSession?.name) {
+          store.setSessionName(sessionId, sdkSession.name);
+        }
       }
       break;
     }
@@ -317,7 +321,7 @@ function handleMessage(sessionId: string, event: MessageEvent) {
     }
 
     case "guard_state": {
-      store.setGuardEnabled(sessionId, data.enabled);
+      store.setGuardEnabled(data.enabled);
       break;
     }
 
@@ -327,10 +331,55 @@ function handleMessage(sessionId: string, event: MessageEvent) {
     }
 
     case "tts_muted": {
-      const currentMode = store.audioMode.get(sessionId);
+      const currentMode = store.audioMode;
       if (currentMode && currentMode !== "off") {
-        store.setAudioMode(sessionId, data.muted ? "in_only" : "in_out");
+        store.setAudioMode(data.muted ? "in_only" : "in_out");
       }
+      break;
+    }
+
+    case "ring0_switch_ui": {
+      // Ring0 requests switching to a specific session
+      const targetId = data.sessionId;
+      if (targetId && targetId !== store.currentSessionId) {
+        // Disconnect from old session
+        if (store.currentSessionId) {
+          const oldSdk = store.sdkSessions.find((x) => x.sessionId === store.currentSessionId);
+          if (oldSdk?.backendType !== "terminal") {
+            disconnectSession(store.currentSessionId);
+          }
+        }
+        store.setCurrentSession(targetId);
+        const newSdk = store.sdkSessions.find((x) => x.sessionId === targetId);
+        if (newSdk?.backendType !== "terminal") {
+          connectSession(targetId);
+        }
+      }
+      break;
+    }
+
+    case "rpc_request": {
+      const rpcId = data.id as string;
+      const method = data.method as string;
+      let response: Record<string, unknown>;
+
+      if (method === "get_state") {
+        response = {
+          type: "rpc_response",
+          id: rpcId,
+          result: {
+            currentSessionId: store.currentSessionId,
+            clientId: store.clientId,
+            timestamp: Date.now(),
+            userAgent: navigator.userAgent,
+            url: location.href,
+          },
+        };
+      } else {
+        response = { type: "rpc_response", id: rpcId, error: `unknown method: ${method}` };
+      }
+
+      sendToSession(sessionId, response as BrowserOutgoingMessage);
       break;
     }
 
@@ -548,3 +597,4 @@ export function sendToSession(sessionId: string, msg: BrowserOutgoingMessage) {
     ws.send(JSON.stringify(msg));
   }
 }
+

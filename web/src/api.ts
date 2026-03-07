@@ -290,14 +290,25 @@ export const api = {
       { muted },
     ),
 
+  // Ring0 meta-agent
+  getRing0Status: () =>
+    get<{ enabled: boolean; sessionId: string | null }>("/ring0/status"),
+
+  toggleRing0: (enabled: boolean) =>
+    post<{ ok: boolean; enabled: boolean; sessionId: string | null }>(
+      "/ring0/toggle",
+      { enabled },
+    ),
+
   // WebRTC signaling
   getIceServers: () =>
     get<{ iceServers: RTCIceServer[] }>("/webrtc/ice-servers"),
 
-  webrtcOffer: (sessionId: string, offer: { sdp: string; type: string }) =>
+  webrtcOffer: (sessionId: string, offer: { sdp: string; type: string }, clientId?: string) =>
     post<{ sdp: string; type: string }>("/webrtc/offer", {
       sessionId,
       sdp: offer.sdp,
       type: offer.type,
+      ...(clientId ? { clientId } : {}),
     }),
 };

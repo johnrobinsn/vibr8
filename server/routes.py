@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from server.terminal import TerminalManager
     from server.auth import AuthManager
 
+from server.ring0 import Ring0Manager
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +48,7 @@ def create_routes(
     webrtc_manager: WebRTCManager | None = None,
     terminal_manager: TerminalManager | None = None,
     auth_manager: AuthManager | None = None,
+    ring0_manager: Ring0Manager | None = None,
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
 
@@ -639,6 +642,7 @@ def create_routes(
         session_id = body.get("sessionId")
         sdp = body.get("sdp")
         sdp_type = body.get("type", "offer")
+        client_id = body.get("clientId", "")
 
         if not session_id or not sdp:
             return web.json_response(
@@ -646,13 +650,137 @@ def create_routes(
             )
 
         try:
-            answer = await webrtc_manager.handle_offer(session_id, sdp, sdp_type)
+            answer = await webrtc_manager.handle_offer(session_id, sdp, sdp_type, client_id=client_id)
             return web.json_response(answer)
         except Exception as e:
             logger.error("[webrtc] Failed to handle offer: %s", e)
             return web.json_response({"error": str(e)}, status=500)
 
+    # ── Ring0 ─────────────────────────────────────────────────────────────
+
+    @routes.get("/api/ring0/sessions")
+    async def ring0_sessions(request: web.Request) -> web.Response:
+        """List sessions — proxied for Ring0 MCP server (auth-exempt)."""
+        sessions = []
+        for sid in launcher.get_all_session_ids():
+            info = launcher.get_session(sid)
+            if not info:
+                continue
+            name = session_names.get_name(sid) or info.name or "unnamed"
+            sessions.append({
+                "sessionId": sid,
+                "name": name,
+                "state": info.state,
+                "cwd": info.cwd,
+                "backendType": info.backendType,
+                "archived": info.archived,
+            })
+        return web.json_response(sessions)
+
+    @routes.get("/api/ring0/status")
+    async def ring0_status(request: web.Request) -> web.Response:
+        if ring0_manager is None:
+            return web.json_response({"enabled": False, "sessionId": None})
+        return web.json_response({
+            "enabled": ring0_manager.is_enabled,
+            "sessionId": ring0_manager.session_id,
+        })
+
+    @routes.post("/api/ring0/toggle")
+    async def ring0_toggle(request: web.Request) -> web.Response:
+        if ring0_manager is None:
+            return web.json_response({"error": "Ring0 not available"}, status=501)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        enabled = bool(body.get("enabled", False))
+        ring0_manager.toggle(enabled)
+        # Ensure session exists when enabling
+        if enabled:
+            session_id = await ring0_manager.ensure_session(launcher, ws_bridge)
+            return web.json_response({"ok": True, "enabled": True, "sessionId": session_id})
+        return web.json_response({"ok": True, "enabled": False, "sessionId": ring0_manager.session_id})
+
+    @routes.post("/api/ring0/send-message")
+    async def ring0_send_message(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        session_id = body.get("sessionId")
+        message = body.get("message")
+        if not session_id or not message:
+            return web.json_response({"error": "sessionId and message required"}, status=400)
+        # Resolve short session ID prefix
+        resolved = _resolve_session_id(session_id, launcher)
+        if not resolved:
+            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+        await ws_bridge.submit_user_message(resolved, message)
+        return web.json_response({"ok": True, "sessionId": resolved})
+
+    @routes.post("/api/ring0/switch-ui")
+    async def ring0_switch_ui(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        session_id = body.get("sessionId")
+        if not session_id:
+            return web.json_response({"error": "sessionId required"}, status=400)
+        resolved = _resolve_session_id(session_id, launcher)
+        if not resolved:
+            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+        client_id = body.get("clientId", "")
+        await ws_bridge.broadcast_ring0_switch_ui(resolved, client_id=client_id)
+        return web.json_response({"ok": True, "sessionId": resolved})
+
+    @routes.get("/api/ring0/session-output/{id}")
+    async def ring0_session_output(request: web.Request) -> web.Response:
+        session_id = request.match_info["id"]
+        resolved = _resolve_session_id(session_id, launcher)
+        if not resolved:
+            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+        messages = ws_bridge.get_message_history(resolved)
+        return web.json_response({"messages": messages})
+
+    @routes.get("/api/ring0/clients")
+    async def ring0_clients(request: web.Request) -> web.Response:
+        clients = ws_bridge.get_all_clients()
+        return web.json_response(clients)
+
+    @routes.post("/api/ring0/query-client")
+    async def ring0_query_client(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        client_id = body.get("clientId", "")
+        method = body.get("method", "")
+        params = body.get("params")
+        if not client_id or not method:
+            return web.json_response({"error": "clientId and method required"}, status=400)
+        try:
+            result = await ws_bridge.rpc_call(client_id, method, params)
+            return web.json_response({"ok": True, "result": result})
+        except RuntimeError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
     return routes
+
+
+def _resolve_session_id(session_id: str, launcher: CliLauncher) -> str | None:
+    """Resolve a full or prefix session ID to a full session ID."""
+    info = launcher.get_session(session_id)
+    if info:
+        return session_id
+    # Try prefix match
+    for sid in launcher.get_all_session_ids():
+        if sid.startswith(session_id):
+            return sid
+    return None
 
 
 def _cleanup_worktree(

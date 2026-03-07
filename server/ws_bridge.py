@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import subprocess
@@ -57,7 +58,7 @@ class Session:
     backend_type: str = "claude"
     cli_socket: web.WebSocketResponse | None = None
     codex_adapter: Any = None  # CodexAdapter
-    browser_sockets: set[web.WebSocketResponse] = field(default_factory=set)
+    browser_sockets: dict[web.WebSocketResponse, str] = field(default_factory=dict)  # ws → clientId
     state: dict[str, Any] = field(default_factory=dict)
     pending_permissions: dict[str, dict[str, Any]] = field(default_factory=dict)
     message_history: list[dict[str, Any]] = field(default_factory=list)
@@ -71,17 +72,25 @@ class WsBridge:
         self._sessions: dict[str, Session] = {}
         self._store: SessionStore | None = None
         self._webrtc_manager: WebRTCManager | None = None
+        self._ring0_manager: Any = None  # Ring0Manager (avoid circular import)
         self._active_tts: dict[str, Any] = {}  # session_id → TTS_OpenAI instance
         self._thinking_timers: dict[str, asyncio.TimerHandle] = {}
         self._on_cli_session_id: Callable[[str, str], None] | None = None
         self._on_cli_relaunch_needed: Callable[[str], None] | None = None
         self._on_first_turn_completed: Callable[[str, str], None] | None = None
         self._auto_naming_attempted: set[str] = set()
+        # Client identity tracking
+        self._client_sessions: dict[str, str] = {}  # clientId → sessionId
+        self._ws_by_client: dict[str, web.WebSocketResponse] = {}  # clientId → ws
+        self._rpc_pending: dict[str, asyncio.Future] = {}  # rpc_id → Future
 
     # ── WebRTC manager ─────────────────────────────────────────────────
 
     def set_webrtc_manager(self, manager: WebRTCManager) -> None:
         self._webrtc_manager = manager
+
+    def set_ring0_manager(self, manager: Any) -> None:
+        self._ring0_manager = manager
 
     def cancel_tts(self, session_id: str) -> None:
         """Cancel any in-progress TTS for *session_id* (called on barge-in)."""
@@ -143,6 +152,7 @@ class WsBridge:
     def restore_from_disk(self) -> int:
         if not self._store:
             return 0
+        from server import session_names
         persisted = self._store.load_all()
         count = 0
         for p in persisted:
@@ -160,6 +170,8 @@ class WsBridge:
             )
             session.state["backend_type"] = session.backend_type
             self._sessions[sid] = session
+            if p.name:
+                session_names.set_name(sid, p.name, unique=False)
             if session.state.get("num_turns", 0) > 0:
                 self._auto_naming_attempted.add(sid)
             count += 1
@@ -171,12 +183,14 @@ class WsBridge:
         if not self._store:
             return
         from server.session_store import PersistedSession
+        from server import session_names
         self._store.save(PersistedSession(
             id=session.id,
             state=session.state,
             messageHistory=session.message_history,
             pendingMessages=session.pending_messages,
             pendingPermissions=list(session.pending_permissions.items()),
+            name=session_names.get_name(session.id),
         ))
 
     # ── Session management ───────────────────────────────────────────────
@@ -248,8 +262,11 @@ class WsBridge:
         if session.codex_adapter:
             await session.codex_adapter.disconnect()
             session.codex_adapter = None
-        for ws in list(session.browser_sockets):
+        for ws, client_id in list(session.browser_sockets.items()):
             await ws.close()
+            if client_id:
+                self._client_sessions.pop(client_id, None)
+                self._ws_by_client.pop(client_id, None)
         session.browser_sockets.clear()
         self._sessions.pop(session_id, None)
         self._auto_naming_attempted.discard(session_id)
@@ -402,10 +419,13 @@ class WsBridge:
 
     # ── Browser WebSocket handlers ───────────────────────────────────────
 
-    async def handle_browser_open(self, ws: web.WebSocketResponse, session_id: str) -> None:
+    async def handle_browser_open(self, ws: web.WebSocketResponse, session_id: str, client_id: str = "") -> None:
         session = self.get_or_create_session(session_id)
-        session.browser_sockets.add(ws)
-        logger.info(f"[ws-bridge] Browser connected for session {session_id} ({len(session.browser_sockets)} browsers)")
+        session.browser_sockets[ws] = client_id
+        if client_id:
+            self._client_sessions[client_id] = session_id
+            self._ws_by_client[client_id] = ws
+        logger.info(f"[ws-bridge] Browser connected for session {session_id} client={client_id or '(none)'} ({len(session.browser_sockets)} browsers)")
 
         # Send current session state
         await self._send_to_browser(ws, {"type": "session_init", "session": session.state})
@@ -448,13 +468,27 @@ class WsBridge:
             logger.warning(f"[ws-bridge] Failed to parse browser message: {raw[:200]}")
             return
 
-        await self._route_browser_message(session, msg)
+        # Handle RPC responses from clients
+        if msg.get("type") == "rpc_response":
+            rpc_id = msg.get("id", "")
+            future = self._rpc_pending.pop(rpc_id, None)
+            if future and not future.done():
+                if "error" in msg:
+                    future.set_exception(RuntimeError(msg["error"]))
+                else:
+                    future.set_result(msg.get("result", {}))
+            return
+
+        await self._route_browser_message(session, msg, ws)
 
     async def handle_browser_close(self, ws: web.WebSocketResponse) -> None:
         for sid, s in self._sessions.items():
             if ws in s.browser_sockets:
-                s.browser_sockets.discard(ws)
-                logger.info(f"[ws-bridge] Browser disconnected for session {sid} ({len(s.browser_sockets)} browsers)")
+                client_id = s.browser_sockets.pop(ws, "")
+                if client_id:
+                    self._client_sessions.pop(client_id, None)
+                    self._ws_by_client.pop(client_id, None)
+                logger.info(f"[ws-bridge] Browser disconnected for session {sid} client={client_id or '(none)'} ({len(s.browser_sockets)} browsers)")
                 break
 
     # ── CLI message routing ──────────────────────────────────────────────
@@ -550,18 +584,28 @@ class WsBridge:
             })
 
     async def _handle_assistant_message(self, session: Session, msg: dict[str, Any]) -> None:
+        # Detect idle → running transition
+        if not session.state.get("is_running"):
+            session.state["is_running"] = True
+            import asyncio
+            asyncio.ensure_future(self._notify_ring0_state_change(session, "idle→running"))
+
         text = msg.get("message")
 
         # TTS: speak assistant response if audio is active and TTS not muted.
+        # When Ring0 is enabled, only Ring0's responses trigger TTS.
         if text and self._webrtc_manager:
+            ring0 = self._ring0_manager
+            is_ring0_session = ring0 and ring0.is_enabled and session.id == ring0.session_id
+            tts_allowed = not ring0 or not ring0.is_enabled or is_ring0_session
             track = self._webrtc_manager.get_outgoing_track(session.id)
             tts_muted = self._webrtc_manager.is_tts_muted(session.id)
             text_preview = repr(text)[:200] if not isinstance(text, str) else f"{len(text)} chars"
             logger.info(
-                "[ws-bridge] TTS check: session=%s, text_type=%s, preview=%s, track=%s, tts_muted=%s",
-                session.id, type(text).__name__, text_preview, track is not None, tts_muted,
+                "[ws-bridge] TTS check: session=%s, text_type=%s, preview=%s, track=%s, tts_muted=%s, tts_allowed=%s",
+                session.id, type(text).__name__, text_preview, track is not None, tts_muted, tts_allowed,
             )
-            if track and not tts_muted:
+            if track and not tts_muted and tts_allowed:
                 import asyncio
                 asyncio.ensure_future(self._speak_text(session.id, text, track))
 
@@ -643,6 +687,12 @@ class WsBridge:
             self._stop_thinking(session_id)
 
     async def _handle_result_message(self, session: Session, msg: dict[str, Any]) -> None:
+        # Detect running → idle transition
+        if session.state.get("is_running"):
+            session.state["is_running"] = False
+            import asyncio
+            asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
+
         # Turn finished — stop thinking tone and re-enable STT.
         self._stop_thinking(session.id)
 
@@ -762,16 +812,20 @@ class WsBridge:
 
     # ── Browser message routing ──────────────────────────────────────────
 
-    async def _route_browser_message(self, session: Session, msg: dict[str, Any]) -> None:
+    async def _route_browser_message(self, session: Session, msg: dict[str, Any], ws: web.WebSocketResponse | None = None) -> None:
         # For Codex sessions, delegate to the adapter
         if session.backend_type == "codex":
             if msg.get("type") == "user_message":
                 import time
-                session.message_history.append({
+                source_client_id = session.browser_sockets.get(ws, "") if ws else ""
+                history_entry: dict[str, Any] = {
                     "type": "user_message",
                     "content": msg.get("content", ""),
                     "timestamp": int(time.time() * 1000),
-                })
+                }
+                if source_client_id:
+                    history_entry["sourceClientId"] = source_client_id
+                session.message_history.append(history_entry)
                 self._persist_session(session)
             if msg.get("type") == "permission_response":
                 session.pending_permissions.pop(msg.get("request_id", ""), None)
@@ -784,10 +838,11 @@ class WsBridge:
                 session.pending_messages.append(json.dumps(msg))
             return
 
-        # Claude Code path
+        # Claude Code path — look up which client sent this message
+        source_client_id = session.browser_sockets.get(ws, "") if ws else ""
         msg_type = msg.get("type")
         if msg_type == "user_message":
-            await self._handle_user_message(session, msg)
+            await self._handle_user_message(session, msg, source_client_id=source_client_id)
         elif msg_type == "permission_response":
             await self._handle_permission_response(session, msg)
         elif msg_type == "interrupt":
@@ -797,13 +852,22 @@ class WsBridge:
         elif msg_type == "set_permission_mode":
             self._handle_set_permission_mode(session, msg.get("mode", ""))
 
-    async def _handle_user_message(self, session: Session, msg: dict[str, Any]) -> None:
+    async def _handle_user_message(self, session: Session, msg: dict[str, Any], source_client_id: str = "") -> None:
         import time
-        session.message_history.append({
+        history_entry: dict[str, Any] = {
             "type": "user_message",
             "content": msg.get("content", ""),
             "timestamp": int(time.time() * 1000),
-        })
+        }
+        if source_client_id:
+            history_entry["sourceClientId"] = source_client_id
+        session.message_history.append(history_entry)
+
+        # If this session is Ring0, prepend client context to message content
+        raw_content = msg.get("content", "")
+        ring0 = self._ring0_manager
+        if ring0 and ring0.session_id == session.id and source_client_id:
+            raw_content = f"[from client {source_client_id}]\n{raw_content}"
 
         images = msg.get("images")
         if images:
@@ -813,17 +877,20 @@ class WsBridge:
                     "type": "image",
                     "source": {"type": "base64", "media_type": img["media_type"], "data": img["data"]},
                 })
-            blocks.append({"type": "text", "text": msg.get("content", "")})
+            blocks.append({"type": "text", "text": raw_content})
             content: Any = blocks
         else:
-            content = msg.get("content", "")
+            content = raw_content
 
-        ndjson = json.dumps({
+        ndjson_msg: dict[str, Any] = {
             "type": "user",
             "message": {"role": "user", "content": content},
             "parent_tool_use_id": None,
             "session_id": msg.get("session_id") or session.state.get("session_id", ""),
-        })
+        }
+        if source_client_id:
+            ndjson_msg["sourceClientId"] = source_client_id
+        ndjson = json.dumps(ndjson_msg)
         self._send_to_cli(session, ndjson)
         self._persist_session(session)
 
@@ -887,23 +954,76 @@ class WsBridge:
 
     # ── Public API for submitting messages programmatically ────────────
 
-    async def submit_user_message(self, session_id: str, text: str) -> None:
+    async def submit_user_message(self, session_id: str, text: str, source_client_id: str = "") -> None:
         """Submit a user message to the CLI (e.g. from STT transcript)."""
         session = self._sessions.get(session_id)
         if not session:
             logger.warning("[ws-bridge] Cannot submit message: no session %s", session_id)
             return
+        if source_client_id:
+            logger.info("[ws-bridge] Message from client=%s for session %s", source_client_id, session_id)
+
         msg = {"type": "user_message", "content": text}
-        await self._handle_user_message(session, msg)
+        await self._handle_user_message(session, msg, source_client_id=source_client_id)
         # Schedule thinking tone after a delay — gives the agent time to
         # start streaming a response before we play the tone.
         self._start_thinking_delayed(session_id)
         # Also broadcast to browsers so the transcript appears in chat.
-        await self._broadcast_to_browsers(session, {
+        broadcast: dict[str, Any] = {
             "type": "user_message",
             "content": text,
             "source": "voice",
-        })
+        }
+        if source_client_id:
+            broadcast["sourceClientId"] = source_client_id
+        await self._broadcast_to_browsers(session, broadcast)
+
+    # ── Ring0 event notifications ────────────────────────────────────────
+
+    async def _notify_ring0_state_change(self, session: Session, transition: str) -> None:
+        """Notify Ring0 of a session state transition (e.g. idle→running)."""
+        ring0 = self._ring0_manager
+        if not ring0 or not ring0.is_enabled or not ring0.session_id:
+            return
+        # Don't notify Ring0 about its own session
+        if session.id == ring0.session_id:
+            return
+        # Only notify if Ring0's CLI is connected
+        ring0_session = self._sessions.get(ring0.session_id)
+        if not ring0_session or not ring0_session.cli_socket:
+            return
+        from server import session_names
+        name = session_names.get_name(session.id) or session.id[:8]
+        event_text = f"[event session_state_change] session={name} (id={session.id[:8]}) transition={transition}"
+        logger.info("[ws-bridge] Ring0 event: %s", event_text)
+        await self.submit_user_message(ring0.session_id, event_text)
+
+    # ── Client RPC ────────────────────────────────────────────────────────
+
+    def get_all_clients(self) -> dict[str, str]:
+        """Return {clientId: sessionId} for all connected browser clients."""
+        return dict(self._client_sessions)
+
+    async def rpc_call(self, client_id: str, method: str, params: dict | None = None, timeout: float = 5.0) -> dict:
+        """Send an RPC request to a specific browser client and await the response."""
+        ws = self._ws_by_client.get(client_id)
+        if not ws or ws.closed:
+            raise RuntimeError(f"Client {client_id} not connected")
+        rpc_id = str(uuid.uuid4())
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._rpc_pending[rpc_id] = future
+        msg = {"type": "rpc_request", "id": rpc_id, "method": method}
+        if params:
+            msg["params"] = params
+        try:
+            await ws.send_str(json.dumps(msg))
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._rpc_pending.pop(rpc_id, None)
+            raise RuntimeError(f"RPC call to client {client_id} timed out after {timeout}s")
+        except Exception:
+            self._rpc_pending.pop(rpc_id, None)
+            raise
 
     # ── Shutdown ──────────────────────────────────────────────────────────
 
@@ -941,6 +1061,43 @@ class WsBridge:
         if not session:
             return
         await self._broadcast_to_browsers(session, {"type": "session_name_update", "name": name})
+        self._persist_session(session)
+
+    async def broadcast_ring0_switch_ui(self, target_session_id: str, *, client_id: str = "") -> None:
+        """Send ring0_switch_ui to a specific client or broadcast to all browsers."""
+        msg = {"type": "ring0_switch_ui", "sessionId": target_session_id}
+        data = json.dumps(msg)
+
+        # Target a specific client if provided
+        if client_id:
+            ws = self._ws_by_client.get(client_id)
+            if ws:
+                try:
+                    await ws.send_str(data)
+                except Exception:
+                    pass
+            return
+
+        # Broadcast to all browsers
+        for session in self._sessions.values():
+            dead: list[web.WebSocketResponse] = []
+            for ws in session.browser_sockets:
+                try:
+                    await ws.send_str(data)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                cid = session.browser_sockets.pop(ws, "")
+                if cid:
+                    self._client_sessions.pop(cid, None)
+                    self._ws_by_client.pop(cid, None)
+
+    def get_message_history(self, session_id: str) -> list[dict[str, Any]]:
+        """Get message history for a session (used by Ring0 MCP)."""
+        session = self._sessions.get(session_id)
+        if not session:
+            return []
+        return list(session.message_history)
 
     async def _broadcast_to_browsers(self, session: Session, msg: dict[str, Any]) -> None:
         if not session.browser_sockets and msg.get("type") in ("assistant", "stream_event", "result"):
@@ -954,7 +1111,10 @@ class WsBridge:
             except Exception:
                 dead.append(ws)
         for ws in dead:
-            session.browser_sockets.discard(ws)
+            client_id = session.browser_sockets.pop(ws, "")
+            if client_id:
+                self._client_sessions.pop(client_id, None)
+                self._ws_by_client.pop(client_id, None)
 
     async def _send_to_browser(self, ws: web.WebSocketResponse, msg: dict[str, Any]) -> None:
         try:

@@ -79,7 +79,10 @@ class WebRTCManager:
         self._stt_muted: set[str] = set()
         self._guard_enabled: Dict[str, bool] = {}
         self._tts_muted: Dict[str, bool] = {}
+        self._client_ids: Dict[str, str] = {}  # session_id → client_id
         self._ws_bridge = None
+        self._ring0_manager = None
+        self._launcher = None  # Set by main.py for Ring0 lazy-create
 
     def get_client_ice_servers(self) -> list[dict]:
         """Return ICE servers in the format the browser RTCPeerConnection expects."""
@@ -88,6 +91,18 @@ class WebRTCManager:
     def set_ws_bridge(self, bridge) -> None:
         """Set a reference to WsBridge for submitting STT transcripts."""
         self._ws_bridge = bridge
+
+    def set_ring0_manager(self, manager) -> None:
+        """Set a reference to Ring0Manager for voice routing."""
+        self._ring0_manager = manager
+
+    def set_launcher(self, launcher) -> None:
+        """Set a reference to CliLauncher for Ring0 lazy session creation."""
+        self._launcher = launcher
+
+    def has_active_connections(self) -> bool:
+        """Return True if any WebRTC connections are active."""
+        return bool(self._connections)
 
     def get_outgoing_track(self, session_id: str) -> QueuedAudioTrack | None:
         """Return the outgoing audio track for *session_id*, or None."""
@@ -145,7 +160,7 @@ class WebRTCManager:
             )
 
     async def handle_offer(
-        self, session_id: str, sdp: str, sdp_type: str
+        self, session_id: str, sdp: str, sdp_type: str, client_id: str = ""
     ) -> dict[str, str]:
         """Process an SDP offer and return an SDP answer.
 
@@ -155,6 +170,9 @@ class WebRTCManager:
         # Tear down any pre-existing connection for this session.
         if session_id in self._connections:
             await self.close_connection(session_id)
+
+        if client_id:
+            self._client_ids[session_id] = client_id
 
         # Build ICE server list from config (empty = local network only).
         ice_server_objs = []
@@ -170,7 +188,7 @@ class WebRTCManager:
         # Create STT instance for this session.
         # aiortc typically delivers stereo (2-channel) audio even if source is mono.
         stt = AsyncSTT(sample_rate=48000, num_channels=2)
-        stt.add_listener(self._make_stt_listener(session_id))
+        stt.add_listener(self._make_stt_listener(session_id, client_id))
         self._stt_instances[session_id] = stt
 
         @pc.on("connectionstatechange")
@@ -243,7 +261,7 @@ class WebRTCManager:
                 return (idx, idx + len(word))
         return None
 
-    def _make_stt_listener(self, session_id: str):
+    def _make_stt_listener(self, session_id: str, client_id: str = ""):
         """Create an STT event listener that submits transcripts to the agent."""
 
         async def _on_stt_event(stt, event_type: str, data) -> None:
@@ -282,6 +300,16 @@ class WebRTCManager:
                         self.set_tts_muted(session_id, False)
                         asyncio.ensure_future(self._speak_short(session_id, "Speaking"))
                         return
+                    if after_word.startswith("ring zero on") or after_word.startswith("ring 0 on"):
+                        if self._ring0_manager:
+                            self._ring0_manager.enable()
+                            asyncio.ensure_future(self._speak_short(session_id, "Ring zero on"))
+                        return
+                    if after_word.startswith("ring zero off") or after_word.startswith("ring 0 off"):
+                        if self._ring0_manager:
+                            self._ring0_manager.disable()
+                            asyncio.ensure_future(self._speak_short(session_id, "Ring zero off"))
+                        return
 
                 # If guard is enabled, require guard word
                 if self.is_guard_enabled(session_id):
@@ -294,7 +322,17 @@ class WebRTCManager:
                         return  # guard word alone, nothing to submit
                     transcript = after
 
-                await self._ws_bridge.submit_user_message(session_id, transcript)
+                # Ring0 routing: if enabled, route to Ring0 session
+                if self._ring0_manager and self._ring0_manager.is_enabled:
+                    ring0_sid = self._ring0_manager.session_id
+                    if not ring0_sid and self._launcher and self._ws_bridge:
+                        ring0_sid = await self._ring0_manager.ensure_session(self._launcher, self._ws_bridge)
+                    if ring0_sid:
+                        logger.info("[ring0] Routing voice to Ring0 session %s", ring0_sid)
+                        await self._ws_bridge.submit_user_message(ring0_sid, transcript, source_client_id=client_id)
+                        return
+
+                await self._ws_bridge.submit_user_message(session_id, transcript, source_client_id=client_id)
             elif event_type == "voice_was_detected":
                 logger.info("[stt] session %s: voice detected — barge-in", session_id)
                 self.barge_in(session_id)
@@ -370,6 +408,7 @@ class WebRTCManager:
         self._outgoing_tracks.pop(session_id, None)
         self._guard_enabled.pop(session_id, None)
         self._tts_muted.pop(session_id, None)
+        self._client_ids.pop(session_id, None)
 
         # Clean up STT.
         stt = self._stt_instances.pop(session_id, None)
