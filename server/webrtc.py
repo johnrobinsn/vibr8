@@ -347,14 +347,11 @@ class WebRTCManager:
         if not track:
             return
         try:
-            self.mute_stt(session_id)
             from server.tts import TTS_OpenAI
             tts = TTS_OpenAI(opus_frame_handler=track.push_opus_frame)
             await tts.say(phrase)
         except Exception:
             logger.exception("[guard] TTS failed for session %s phrase=%r", session_id, phrase)
-        finally:
-            self.unmute_stt(session_id)
 
     async def _consume_audio(
         self,

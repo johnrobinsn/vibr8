@@ -19,7 +19,9 @@ export async function startWebRTC(sessionId: string): Promise<void> {
   store0.setAudioSessionId(sessionId);
   store0.setAudioMode("connecting");
 
-  const localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const localStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
 
   // Fetch ICE servers from backend (STUN/TURN config)
   let iceServers: RTCIceServer[] = [];
