@@ -11,6 +11,7 @@ import { Playground } from "./components/Playground.js";
 import { TerminalView } from "./components/TerminalView.js";
 import { LoginPage } from "./components/LoginPage.js";
 import { CommandPalette } from "./components/CommandPalette.js";
+import { SettingsPage } from "./components/SettingsPage.js";
 import { connectSession, disconnectSession } from "./ws.js";
 import { startWebRTC, setAudioInOnly } from "./webrtc.js";
 
@@ -157,6 +158,10 @@ export default function App() {
 
   if (hash === "#/playground") {
     return <Playground />;
+  }
+
+  if (hash === "#/settings") {
+    return <SettingsPage />;
   }
 
   return (
