@@ -164,6 +164,40 @@ export interface UsageLimits {
   } | null;
 }
 
+export interface VoiceProfile {
+  id: string | null;
+  name: string;
+  user: string;
+  micGain: number;
+  vadThresholdDb: number;
+  sileroVadThreshold: number;
+  eouThreshold: number;
+  eouMaxRetries: number;
+  minSegmentDuration: number;
+  isActive: boolean;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export interface VoiceSegment {
+  id: string;
+  sessionId: string;
+  transcript: string;
+  timeBegin: number;
+  timeEnd: number;
+  recordingId: string | null;
+  profileId: string | null;
+  createdAt: number;
+}
+
+export interface VoiceRecording {
+  id: string;
+  sessionId: string;
+  duration: number;
+  startedAt: number;
+  endedAt: number | null;
+}
+
 export const api = {
   createSession: (opts?: CreateSessionOpts) =>
     post<{ sessionId: string; state: string; cwd: string }>(
@@ -304,11 +338,37 @@ export const api = {
   getIceServers: () =>
     get<{ iceServers: RTCIceServer[] }>("/webrtc/ice-servers"),
 
-  webrtcOffer: (sessionId: string, offer: { sdp: string; type: string }, clientId?: string) =>
+  webrtcOffer: (sessionId: string, offer: { sdp: string; type: string }, clientId?: string, opts?: { playground?: boolean; profileId?: string }) =>
     post<{ sdp: string; type: string }>("/webrtc/offer", {
       sessionId,
       sdp: offer.sdp,
       type: offer.type,
       ...(clientId ? { clientId } : {}),
+      ...(opts?.playground ? { playground: true } : {}),
+      ...(opts?.profileId ? { profileId: opts.profileId } : {}),
     }),
+
+  // Voice Profiles
+  listVoiceProfiles: () => get<VoiceProfile[]>("/voice/profiles"),
+  createVoiceProfile: (data: Partial<VoiceProfile>) => post<VoiceProfile>("/voice/profiles", data),
+  updateVoiceProfile: (id: string, data: Partial<VoiceProfile>) => put<VoiceProfile>(`/voice/profiles/${encodeURIComponent(id)}`, data),
+  deleteVoiceProfile: (id: string) => del(`/voice/profiles/${encodeURIComponent(id)}`),
+  activateVoiceProfile: (id: string) => post<VoiceProfile>(`/voice/profiles/${encodeURIComponent(id)}/activate`),
+  deactivateVoiceProfiles: () => post("/voice/profiles/deactivate"),
+  getActiveVoiceProfile: () => get<VoiceProfile>("/voice/profiles/active"),
+
+  // Voice Recordings
+  listVoiceRecordings: () => get<VoiceRecording[]>("/voice/recordings"),
+
+  // Voice Logs
+  listVoiceLogs: (opts?: { q?: string; offset?: number; limit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.q) params.set("q", opts.q);
+    if (opts?.offset) params.set("offset", String(opts.offset));
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return get<VoiceSegment[]>(`/voice/logs${qs ? `?${qs}` : ""}`);
+  },
+  deleteVoiceLog: (id: string) => del(`/voice/logs/${encodeURIComponent(id)}`),
+  clearVoiceLogs: () => del("/voice/logs"),
 };

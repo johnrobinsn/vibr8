@@ -17,7 +17,9 @@ from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSession
 from av import AudioFrame
 
 from server.audio_track import QueuedAudioTrack
-from server.stt import AsyncSTT
+from server.stt import AsyncSTT, STTParams
+from server.voice_logger import VoiceLogger
+from server import voice_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +82,9 @@ class WebRTCManager:
         self._guard_enabled: Dict[str, bool] = {}
         self._tts_muted: Dict[str, bool] = {}
         self._client_ids: Dict[str, str] = {}  # session_id → client_id
+        self._voice_loggers: Dict[str, VoiceLogger] = {}
+        self._playground_ws: Dict[str, object] = {}  # client_id → WS
+        self._playground_sessions: set[str] = set()  # session_ids that are playground
         self._ws_bridge = None
         self._ring0_manager = None
         self._launcher = None  # Set by main.py for Ring0 lazy-create
@@ -160,12 +165,17 @@ class WebRTCManager:
             )
 
     async def handle_offer(
-        self, session_id: str, sdp: str, sdp_type: str, client_id: str = ""
+        self, session_id: str, sdp: str, sdp_type: str, client_id: str = "",
+        playground: bool = False, profile_id: str | None = None,
+        username: str = "default",
     ) -> dict[str, str]:
         """Process an SDP offer and return an SDP answer.
 
         Creates a :class:`QueuedAudioTrack` for outgoing TTS audio and
         an :class:`AsyncSTT` instance for incoming speech recognition.
+
+        If *playground* is True, STT events go to the playground WS
+        instead of the agent session.
         """
         # Tear down any pre-existing connection for this session.
         if session_id in self._connections:
@@ -173,6 +183,9 @@ class WebRTCManager:
 
         if client_id:
             self._client_ids[session_id] = client_id
+
+        if playground:
+            self._playground_sessions.add(session_id)
 
         # Build ICE server list from config (empty = local network only).
         ice_server_objs = []
@@ -185,11 +198,24 @@ class WebRTCManager:
         pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_server_objs))
         self._connections[session_id] = pc
 
+        # Resolve voice profile → STT params
+        stt_params = voice_profiles.get_stt_params(username, profile_id)
+
         # Create STT instance for this session.
         # aiortc typically delivers stereo (2-channel) audio even if source is mono.
-        stt = AsyncSTT(sample_rate=48000, num_channels=2)
-        stt.add_listener(self._make_stt_listener(session_id, client_id))
+        stt = AsyncSTT(sample_rate=48000, num_channels=2, params=stt_params)
+
+        if playground:
+            stt.add_listener(self._make_playground_listener(session_id, client_id))
+        else:
+            stt.add_listener(self._make_stt_listener(session_id, client_id))
+
         self._stt_instances[session_id] = stt
+
+        # Create voice logger for audio persistence
+        vl = VoiceLogger(username, session_id)
+        self._voice_loggers[session_id] = vl
+        await vl.start_recording()
 
         @pc.on("connectionstatechange")
         async def _on_connection_state_change() -> None:
@@ -268,6 +294,16 @@ class WebRTCManager:
             if event_type == "final_transcript":
                 transcript = data["transcript"].strip()
                 logger.info("[stt] session %s transcript: %s", session_id, transcript)
+
+                # Log segment audio if available
+                audio = data.get("audio")
+                voice_log = self._voice_loggers.get(session_id)
+                if voice_log and audio is not None:
+                    try:
+                        await voice_log.log_segment(audio, data)
+                    except Exception:
+                        logger.exception("[voice-log] Failed to log segment")
+
                 if not transcript or not self._ws_bridge:
                     return
 
@@ -341,6 +377,72 @@ class WebRTCManager:
 
         return _on_stt_event
 
+    def _make_playground_listener(self, session_id: str, client_id: str = ""):
+        """Create an STT event listener that sends events to the playground WS."""
+
+        async def _on_playground_event(stt, event_type: str, data) -> None:
+            ws = self._playground_ws.get(client_id)
+            if not ws:
+                return
+
+            import json as _json
+
+            if event_type == "voice_level":
+                try:
+                    await ws.send_str(_json.dumps({
+                        "type": "voice_level",
+                        "rmsDb": data["rmsDb"],
+                    }))
+                except Exception:
+                    pass
+            elif event_type == "voice_was_detected":
+                try:
+                    await ws.send_str(_json.dumps({"type": "voice_activity", "active": True}))
+                except Exception:
+                    pass
+            elif event_type == "voice_not_detected":
+                try:
+                    await ws.send_str(_json.dumps({"type": "voice_activity", "active": False}))
+                except Exception:
+                    pass
+            elif event_type == "final_transcript":
+                transcript = data["transcript"].strip()
+                if not transcript:
+                    return
+                # Save segment audio and get segment ID for playback
+                segment_id = None
+                audio = data.get("audio")
+                if audio is not None:
+                    vl = self._voice_loggers.get(session_id)
+                    if vl:
+                        segment_id = await vl.log_segment(audio, data)
+                try:
+                    await ws.send_str(_json.dumps({
+                        "type": "segment",
+                        "transcript": transcript,
+                        "timeBegin": data.get("timeBegin", 0),
+                        "timeEnd": data.get("timeEnd", 0),
+                        "segmentId": segment_id,
+                    }))
+                except Exception:
+                    pass
+
+        return _on_playground_event
+
+    def register_playground_ws(self, client_id: str, ws) -> None:
+        """Register a playground WebSocket for a client."""
+        self._playground_ws[client_id] = ws
+
+    def unregister_playground_ws(self, client_id: str) -> None:
+        """Unregister a playground WebSocket."""
+        self._playground_ws.pop(client_id, None)
+
+    def update_stt_params(self, session_id: str, params: STTParams) -> None:
+        """Update STT params for a live session (e.g. from playground slider)."""
+        stt = self._stt_instances.get(session_id)
+        if stt:
+            stt.update_params(params)
+
     async def _speak_short(self, session_id: str, phrase: str) -> None:
         """Speak a short acknowledgment phrase via TTS (e.g. 'Guard on')."""
         track = self.get_outgoing_track(session_id)
@@ -363,6 +465,8 @@ class WebRTCManager:
         stt = self._stt_instances.get(session_id)
         audio_buffer: list[np.ndarray] = []
 
+        voice_log = self._voice_loggers.get(session_id)
+
         try:
             while True:
                 frame = await track.recv()
@@ -384,6 +488,16 @@ class WebRTCManager:
                                 session_id, batch.shape, rms,
                             )
                         stt.process_buffer(batch)
+
+                        # Log raw stereo 48kHz audio to voice logger
+                        if voice_log:
+                            try:
+                                # batch shape: (channels, N) — interleave for WAV
+                                interleaved = batch.T.flatten().astype(np.int16)
+                                await voice_log.log_chunk(interleaved)
+                            except Exception:
+                                pass
+
                         audio_buffer = []
         except Exception:
             # Flush any remaining audio to STT on track end.
@@ -392,6 +506,12 @@ class WebRTCManager:
                     batch = np.concatenate(audio_buffer, axis=1)
                     stt.process_buffer(batch)
                     stt.flush()
+                except Exception:
+                    pass
+            # Stop voice logger recording
+            if voice_log:
+                try:
+                    await voice_log.stop_recording()
                 except Exception:
                     pass
             logger.info(
@@ -405,13 +525,26 @@ class WebRTCManager:
         self._outgoing_tracks.pop(session_id, None)
         self._guard_enabled.pop(session_id, None)
         self._tts_muted.pop(session_id, None)
-        self._client_ids.pop(session_id, None)
+        client_id = self._client_ids.pop(session_id, None)
+        self._playground_sessions.discard(session_id)
+
+        # Clean up playground WS reference
+        if client_id:
+            self._playground_ws.pop(client_id, None)
 
         # Clean up STT.
         stt = self._stt_instances.pop(session_id, None)
         if stt:
             stt.flush()
             stt.stop()
+
+        # Clean up voice logger.
+        voice_log = self._voice_loggers.pop(session_id, None)
+        if voice_log:
+            try:
+                await voice_log.stop_recording()
+            except Exception:
+                pass
 
         if pc is not None:
             await pc.close()

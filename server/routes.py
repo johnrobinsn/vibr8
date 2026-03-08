@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 from server import env_manager, git_utils, session_names
+from server import voice_profiles, voice_logger
 from server.usage_limits import get_usage_limits
 from server.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
 from server.worktree_tracker import WorktreeTracker, WorktreeMapping
@@ -643,6 +644,9 @@ def create_routes(
         sdp = body.get("sdp")
         sdp_type = body.get("type", "offer")
         client_id = body.get("clientId", "")
+        playground = bool(body.get("playground", False))
+        profile_id = body.get("profileId")
+        username = _get_username(request)
 
         if not session_id or not sdp:
             return web.json_response(
@@ -650,7 +654,13 @@ def create_routes(
             )
 
         try:
-            answer = await webrtc_manager.handle_offer(session_id, sdp, sdp_type, client_id=client_id)
+            answer = await webrtc_manager.handle_offer(
+                session_id, sdp, sdp_type,
+                client_id=client_id,
+                playground=playground,
+                profile_id=profile_id,
+                username=username,
+            )
             return web.json_response(answer)
         except Exception as e:
             logger.error("[webrtc] Failed to handle offer: %s", e)
@@ -772,6 +782,137 @@ def create_routes(
             return web.json_response({"error": err_str}, status=status)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
+
+    # ── Voice Profiles ──────────────────────────────────────────────────
+
+    def _get_username(request: web.Request) -> str:
+        return request.get("auth_user", "default")
+
+    @routes.get("/api/voice/profiles")
+    async def voice_profiles_list(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        profiles = voice_profiles.list_profiles(username)
+        return web.json_response(profiles)
+
+    @routes.post("/api/voice/profiles")
+    async def voice_profiles_create(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        profile = voice_profiles.create_profile(username, body)
+        return web.json_response(profile, status=201)
+
+    @routes.put("/api/voice/profiles/{id}")
+    async def voice_profiles_update(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        profile_id = request.match_info["id"]
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        profile = voice_profiles.update_profile(username, profile_id, body)
+        if not profile:
+            return web.json_response({"error": "Profile not found"}, status=404)
+        return web.json_response(profile)
+
+    @routes.delete("/api/voice/profiles/{id}")
+    async def voice_profiles_delete(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        profile_id = request.match_info["id"]
+        deleted = voice_profiles.delete_profile(username, profile_id)
+        if not deleted:
+            return web.json_response({"error": "Profile not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    @routes.post("/api/voice/profiles/{id}/activate")
+    async def voice_profiles_activate(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        profile_id = request.match_info["id"]
+        profile = voice_profiles.activate_profile(username, profile_id)
+        if not profile:
+            return web.json_response({"error": "Profile not found"}, status=404)
+        return web.json_response(profile)
+
+    @routes.post("/api/voice/profiles/deactivate")
+    async def voice_profiles_deactivate(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        voice_profiles.deactivate_all(username)
+        return web.json_response({"ok": True})
+
+    @routes.get("/api/voice/profiles/active")
+    async def voice_profiles_active(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        profile = voice_profiles.get_active_profile(username)
+        if not profile:
+            # Return defaults as a virtual profile
+            from server.stt import STTParams
+            defaults = STTParams()
+            return web.json_response({
+                "id": None,
+                "name": "Default",
+                "user": username,
+                "micGain": defaults.mic_gain,
+                "vadThresholdDb": defaults.vad_threshold_db,
+                "sileroVadThreshold": defaults.silero_vad_threshold,
+                "eouThreshold": defaults.eou_threshold,
+                "eouMaxRetries": defaults.eou_max_retries,
+                "minSegmentDuration": defaults.min_segment_duration,
+                "isActive": True,
+            })
+        return web.json_response(profile)
+
+    # ── Voice Logs ───────────────────────────────────────────────────────
+
+    @routes.get("/api/voice/logs")
+    async def voice_logs_list(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        q = request.query.get("q", "")
+        offset = int(request.query.get("offset", "0"))
+        limit = int(request.query.get("limit", "50"))
+        segments = voice_logger.list_segments(username, query=q, offset=offset, limit=limit)
+        return web.json_response(segments)
+
+    @routes.get("/api/voice/logs/{id}/audio")
+    async def voice_logs_audio(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        segment_id = request.match_info["id"]
+        audio_path = voice_logger.get_segment_audio_path(username, segment_id)
+        if not audio_path:
+            return web.json_response({"error": "Segment not found"}, status=404)
+        return web.FileResponse(audio_path, headers={"Content-Type": "audio/wav"})
+
+    @routes.get("/api/voice/recordings")
+    async def voice_recordings_list(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        recordings = voice_logger.list_recordings(username)
+        return web.json_response(recordings)
+
+    @routes.get("/api/voice/recordings/{id}/audio")
+    async def voice_recordings_audio(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        recording_id = request.match_info["id"]
+        audio_path = voice_logger.get_recording_audio_path(username, recording_id)
+        if not audio_path:
+            return web.json_response({"error": "Recording not found"}, status=404)
+        # Support HTTP Range requests for seeking
+        return web.FileResponse(audio_path, headers={"Content-Type": "audio/wav"})
+
+    @routes.delete("/api/voice/logs/{id}")
+    async def voice_logs_delete(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        segment_id = request.match_info["id"]
+        deleted = voice_logger.delete_segment(username, segment_id)
+        if not deleted:
+            return web.json_response({"error": "Segment not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    @routes.delete("/api/voice/logs")
+    async def voice_logs_clear(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        voice_logger.clear_all_logs(username)
+        return web.json_response({"ok": True})
 
     return routes
 
