@@ -179,3 +179,157 @@ export function stopWebRTC(sessionId: string): void {
 export function isWebRTCActive(sessionId: string): boolean {
   return rtcSessions.has(sessionId);
 }
+
+// ── Playground WebRTC ──────────────────────────────────────────────────────
+
+interface PlaygroundSession {
+  pc: RTCPeerConnection;
+  localStream: MediaStream;
+  ws: WebSocket;
+  sessionId: string;
+}
+
+const _pw = window as unknown as Record<string, unknown>;
+let playgroundSession = (_pw.__v8_playground ??= null) as PlaygroundSession | null;
+
+export async function startPlaygroundWebRTC(profileId?: string): Promise<string> {
+  if (playgroundSession) {
+    await stopPlaygroundWebRTC();
+  }
+
+  const store = useStore.getState();
+  const clientId = store.clientId;
+  const sessionId = `playground-${clientId}`;
+
+  store.setPlaygroundActive(true);
+  store.setPlaygroundSessionId(sessionId);
+  store.clearPlaygroundSegments();
+
+  const localStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+
+  let iceServers: RTCIceServer[] = [];
+  try {
+    const config = await api.getIceServers();
+    iceServers = config.iceServers;
+  } catch {
+    // Fall back to empty
+  }
+
+  const pc = new RTCPeerConnection({ iceServers });
+  const audioTrack = localStream.getAudioTracks()[0];
+  pc.addTrack(audioTrack, localStream);
+
+  // We don't need remote audio for playground, but create a dummy handler
+  pc.ontrack = () => {};
+
+  // Connect playground WebSocket
+  const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${wsProto}//${window.location.host}/ws/playground/${clientId}`;
+  const ws = new WebSocket(wsUrl);
+
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      const s = useStore.getState();
+      if (data.type === "voice_level") {
+        s.setPlaygroundLevel(data.rmsDb);
+      } else if (data.type === "voice_activity") {
+        s.setPlaygroundVadActive(data.active);
+      } else if (data.type === "segment") {
+        s.addPlaygroundSegment({
+          transcript: data.transcript,
+          timeBegin: data.timeBegin,
+          timeEnd: data.timeEnd,
+          segmentId: data.segmentId,
+        });
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  ws.onclose = () => {
+    if (playgroundSession?.sessionId === sessionId) {
+      stopPlaygroundWebRTC();
+    }
+  };
+
+  // Wait for WS to open
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve();
+    ws.onerror = () => reject(new Error("Playground WS failed"));
+    setTimeout(() => reject(new Error("Playground WS timeout")), 5000);
+  });
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  // Wait for ICE gathering
+  if (pc.iceGatheringState !== "complete") {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 10_000);
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === "complete") {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+    });
+  }
+
+  const answer = await api.webrtcOffer(
+    sessionId,
+    { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
+    clientId,
+    { playground: true, profileId },
+  );
+
+  await pc.setRemoteDescription(
+    new RTCSessionDescription({ sdp: answer.sdp, type: answer.type as RTCSdpType }),
+  );
+
+  playgroundSession = { pc, localStream, ws, sessionId };
+  (_pw.__v8_playground as unknown) = playgroundSession;
+
+  return sessionId;
+}
+
+export function sendPlaygroundParams(params: Record<string, number | string>) {
+  if (!playgroundSession) return;
+  const msg = JSON.stringify({
+    type: "update_params",
+    sessionId: playgroundSession.sessionId,
+    ...params,
+  });
+  if (playgroundSession.ws.readyState === WebSocket.OPEN) {
+    playgroundSession.ws.send(msg);
+  }
+}
+
+export async function stopPlaygroundWebRTC(): Promise<void> {
+  const session = playgroundSession;
+  if (!session) return;
+
+  playgroundSession = null;
+  (_pw.__v8_playground as unknown) = null;
+
+  for (const track of session.localStream.getTracks()) {
+    track.stop();
+  }
+  session.pc.close();
+  if (session.ws.readyState === WebSocket.OPEN || session.ws.readyState === WebSocket.CONNECTING) {
+    session.ws.close();
+  }
+
+  const store = useStore.getState();
+  store.setPlaygroundActive(false);
+  // Keep playgroundSessionId and playgroundSegments so clips remain visible/playable
+  store.setPlaygroundLevel(-60);
+  store.setPlaygroundVadActive(false);
+}
+
+export function isPlaygroundActive(): boolean {
+  return playgroundSession !== null;
+}

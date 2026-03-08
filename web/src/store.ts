@@ -84,6 +84,13 @@ interface AppState {
   // Command palette
   commandPaletteOpen: boolean;
 
+  // Playground state
+  playgroundActive: boolean;
+  playgroundSessionId: string | null;
+  playgroundSegments: { transcript: string; timeBegin: number; timeEnd: number; timestamp: number; segmentId?: string }[];
+  playgroundRmsDb: number;
+  playgroundVadActive: boolean;
+
   // Actions
   setDarkMode: (v: boolean) => void;
   toggleDarkMode: () => void;
@@ -158,6 +165,14 @@ interface AppState {
   // Guard mode actions (global)
   setGuardEnabled: (enabled: boolean) => void;
 
+  // Playground actions
+  setPlaygroundActive: (active: boolean) => void;
+  setPlaygroundSessionId: (id: string | null) => void;
+  addPlaygroundSegment: (segment: { transcript: string; timeBegin: number; timeEnd: number; segmentId?: string }) => void;
+  clearPlaygroundSegments: () => void;
+  setPlaygroundLevel: (rmsDb: number) => void;
+  setPlaygroundVadActive: (active: boolean) => void;
+
   reset: () => void;
 }
 
@@ -212,6 +227,11 @@ export const useStore = create<AppState>((set) => ({
   guardEnabled: typeof window !== "undefined" ? localStorage.getItem("cc-guard-enabled") !== "false" : true,
   pendingFocus: null,
   commandPaletteOpen: false,
+  playgroundActive: false,
+  playgroundSessionId: null,
+  playgroundSegments: [],
+  playgroundRmsDb: -60,
+  playgroundVadActive: false,
 
   setDarkMode: (v) => {
     localStorage.setItem("cc-dark-mode", String(v));
@@ -582,6 +602,14 @@ export const useStore = create<AppState>((set) => ({
   setPendingFocus: (target) => set({ pendingFocus: target }),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
+  setPlaygroundActive: (active) => set({ playgroundActive: active }),
+  setPlaygroundSessionId: (id) => set({ playgroundSessionId: id }),
+  addPlaygroundSegment: (segment) => set((s) => ({
+    playgroundSegments: [{ ...segment, timestamp: Date.now() }, ...s.playgroundSegments],
+  })),
+  clearPlaygroundSegments: () => set({ playgroundSegments: [] }),
+  setPlaygroundLevel: (rmsDb) => set({ playgroundRmsDb: rmsDb }),
+  setPlaygroundVadActive: (active) => set({ playgroundVadActive: active }),
 
   reset: () =>
     set({
@@ -613,6 +641,11 @@ export const useStore = create<AppState>((set) => ({
       guardEnabled: true,
       pendingFocus: null,
       commandPaletteOpen: false,
+      playgroundActive: false,
+      playgroundSessionId: null,
+      playgroundSegments: [],
+      playgroundRmsDb: -60,
+      playgroundVadActive: false,
     }),
 }));
 

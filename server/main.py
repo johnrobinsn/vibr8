@@ -115,6 +115,49 @@ async def handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def handle_playground_ws(request: web.Request) -> web.WebSocketResponse:
+    """Handle WebSocket connections for voice playground sessions."""
+    ws = web.WebSocketResponse(heartbeat=20)
+    await ws.prepare(request)
+    client_id = request.match_info["client_id"]
+
+    webrtc_mgr: WebRTCManager = request.app["webrtc_manager"]
+    webrtc_mgr.register_playground_ws(client_id, ws)
+
+    logger.info("[playground] Client %s connected", client_id)
+
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                import json as _json2
+                try:
+                    data = _json2.loads(msg.data)
+                    # Handle live param updates from playground sliders
+                    if data.get("type") == "update_params":
+                        from server.stt import STTParams
+                        params = STTParams(
+                            mic_gain=float(data.get("micGain", 1.0)),
+                            vad_threshold_db=float(data.get("vadThresholdDb", -30.0)),
+                            silero_vad_threshold=float(data.get("sileroVadThreshold", 0.4)),
+                            eou_threshold=float(data.get("eouThreshold", 0.15)),
+                            eou_max_retries=int(data.get("eouMaxRetries", 3)),
+                            min_segment_duration=float(data.get("minSegmentDuration", 0.4)),
+                        )
+                        # Find the playground session for this client
+                        session_id = data.get("sessionId")
+                        if session_id:
+                            webrtc_mgr.update_stt_params(session_id, params)
+                except Exception:
+                    pass
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                break
+    finally:
+        webrtc_mgr.unregister_playground_ws(client_id)
+        logger.info("[playground] Client %s disconnected", client_id)
+
+    return ws
+
+
 async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
     """Handle WebSocket connections for terminal (PTY) sessions."""
     import json as _json
@@ -291,6 +334,7 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/cli/{session_id}", handle_cli_ws)
     app.router.add_get("/ws/browser/{session_id}", handle_browser_ws)
     app.router.add_get("/ws/terminal/{session_id}", handle_terminal_ws)
+    app.router.add_get("/ws/playground/{client_id}", handle_playground_ws)
 
     # REST API
     api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager)
