@@ -15,16 +15,12 @@ export function VoiceLogs() {
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const load = useCallback(async (q: string) => {
-    try {
-      const [segs, recs] = await Promise.all([
-        api.listVoiceLogs({ q, limit: 500 }),
-        api.listVoiceRecordings(),
-      ]);
-      setSegments(segs);
-      setRecordings(recs);
-    } catch {
-      // ignore
-    }
+    const [segs, recs] = await Promise.allSettled([
+      api.listVoiceLogs({ q, limit: 500 }),
+      api.listVoiceRecordings(),
+    ]);
+    if (segs.status === "fulfilled") setSegments(segs.value);
+    if (recs.status === "fulfilled") setRecordings(recs.value);
     setLoading(false);
   }, []);
 
