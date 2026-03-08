@@ -34,12 +34,17 @@ logger = logging.getLogger(__name__)
 
 WHISPER_SAMPLE_RATE = 16000
 SILERO_SAMPLE_RATE = WHISPER_SAMPLE_RATE  # Must match whisper
-VAD_THRESHOLD_DB = -30
-SILERO_VAD_THRESHOLD = 0.4
-EOU_THRESHOLD = 0.15
-EOU_MAX_RETRIES = 3
-# Minimum segment duration (seconds) to avoid transcribing brief noise bursts
-MIN_SEGMENT_DURATION = 0.4
+
+
+@dataclass
+class STTParams:
+    """Tunable parameters for the STT pipeline."""
+    mic_gain: float = 1.0
+    vad_threshold_db: float = -30.0
+    silero_vad_threshold: float = 0.4
+    eou_threshold: float = 0.15
+    eou_max_retries: int = 3
+    min_segment_duration: float = 0.4
 
 # Common Whisper hallucination patterns on silence/noise
 _HALLUCINATION_PATTERNS = {
@@ -76,9 +81,10 @@ class STT:
         SILENCE_1 = auto()
         SILENCE_2 = auto()
 
-    def __init__(self, sample_rate: int, num_channels: int = 1) -> None:
+    def __init__(self, sample_rate: int, num_channels: int = 1, params: STTParams | None = None) -> None:
         self._sample_rate = sample_rate
         self._num_channels = num_channels
+        self._params = params or STTParams()
         self._listeners: list[Callable] = []
 
         self._segment: list[np.ndarray] = []
@@ -137,17 +143,27 @@ class STT:
 
     # ── Audio processing ─────────────────────────────────────────────────
 
+    def update_params(self, params: STTParams) -> None:
+        """Update tunable parameters (safe: called from single ThreadWorker)."""
+        self._params = params
+
     def process_buffer(self, buffer: np.ndarray) -> None:
         """Process an audio buffer chunk through the STT pipeline.
 
         *buffer* is a numpy int16 array, shape ``(1, N)`` for mono.
         """
         STT.preload_shared_resources()
+        params = self._params
 
         # Convert to 1-D mono float.
         mono = buffer.mean(axis=0)  # (N,) — implicit float conversion
         if self._num_channels == 2:
             mono = ((mono[::2] + mono[1::2]) / 2).astype(np.int16)
+
+        # Apply mic gain before resampling.
+        if params.mic_gain != 1.0:
+            mono = np.clip(mono.astype(np.float32) * params.mic_gain,
+                           np.iinfo(np.int16).min, np.iinfo(np.int16).max).astype(np.int16)
 
         # Resample to whisper sample rate (e.g. 48kHz → 16kHz = factor 1/3).
         resampled = resample_poly(mono, up=WHISPER_SAMPLE_RATE, down=self._sample_rate).astype(np.int16)
@@ -156,14 +172,18 @@ class STT:
         float_buf = resampled.astype(np.float32) / np.iinfo(np.int16).max
         rms = np.sqrt(np.mean(float_buf**2))
         rms_db = 20 * np.log10(max(rms, 1e-10))
-        is_silent = rms_db < VAD_THRESHOLD_DB
+
+        # Emit voice level for playground mic meter.
+        self._notify_listeners("voice_level", {"rmsDb": float(rms_db)})
+
+        is_silent = rms_db < params.vad_threshold_db
 
         if not is_silent:
             # Silero VAD on 512-sample chunks.
             float_buf_2d = float_buf.reshape(-1, 512)
             vad = STT.shared_resources["vad"]
             p = vad(torch.from_numpy(float_buf_2d), SILERO_SAMPLE_RATE)
-            is_silent = bool(torch.all(p < SILERO_VAD_THRESHOLD))
+            is_silent = bool(torch.all(p < params.silero_vad_threshold))
 
         event = STT.Event.VOICE_NOT_DETECTED if is_silent else STT.Event.VOICE_WAS_DETECTED
         self._state_machine.handle_event(event, self._segment, resampled)
@@ -196,10 +216,11 @@ class STT:
                 def process_segment(s: list, b: np.ndarray) -> None:
                     s.append(b)
                     stt._segment_time_end = stt._capture_time + 160.0 / 1000.0
+                    params = stt._params
 
                     # Skip very short segments (likely noise bursts)
                     duration = stt._segment_time_end - stt._segment_time_begin
-                    if duration < MIN_SEGMENT_DURATION:
+                    if duration < params.min_segment_duration:
                         logger.debug("[stt] Discarding short segment: %.2fs", duration)
                         s.clear()
                         return
@@ -221,7 +242,7 @@ class STT:
                     eou = STT.shared_resources["eou"]
                     eou_prob = eou(text)
 
-                    if eou_prob < EOU_THRESHOLD and self.eou_counter < EOU_MAX_RETRIES:
+                    if eou_prob < params.eou_threshold and self.eou_counter < params.eou_max_retries:
                         self.state = STT.State.SEGMENT_N
                         self.eou_counter += 1
                         return
@@ -231,6 +252,7 @@ class STT:
                         "timeBegin": stt._segment_time_begin,
                         "timeEnd": stt._segment_time_end,
                         "transcript": text,
+                        "audio": combined,
                     })
                     s.clear()
 
@@ -308,8 +330,8 @@ class AsyncSTT(STT):
     the asyncio event loop is never blocked.
     """
 
-    def __init__(self, sample_rate: int = 48000, num_channels: int = 1) -> None:
-        super().__init__(sample_rate, num_channels)
+    def __init__(self, sample_rate: int = 48000, num_channels: int = 1, params: STTParams | None = None) -> None:
+        super().__init__(sample_rate, num_channels, params=params)
         from server.threadworker import ThreadWorker
 
         self._worker = ThreadWorker(support_out_q=False)
@@ -335,6 +357,14 @@ class AsyncSTT(STT):
         )
 
     # Thread-safe wrappers that run on the worker thread.
+
+    def _locked_update_params(self, params: STTParams) -> None:
+        with self._lock:
+            super().update_params(params)
+
+    def update_params(self, params: STTParams) -> None:
+        """Enqueue a params update on the worker thread."""
+        self._worker.add_task(self._locked_update_params, params)
 
     def _locked_process_buffer(self, buffer: np.ndarray) -> None:
         with self._lock:
