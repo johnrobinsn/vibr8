@@ -760,11 +760,16 @@ def create_routes(
         params = body.get("params")
         if not client_id or not method:
             return web.json_response({"error": "clientId and method required"}, status=400)
+        # Longer timeout for methods that may trigger browser permission prompts
+        interactive_methods = {"get_location", "send_notification", "read_clipboard", "write_clipboard"}
+        timeout = 30.0 if method in interactive_methods else 5.0
         try:
-            result = await ws_bridge.rpc_call(client_id, method, params)
+            result = await ws_bridge.rpc_call(client_id, method, params, timeout=timeout)
             return web.json_response({"ok": True, "result": result})
         except RuntimeError as e:
-            return web.json_response({"error": str(e)}, status=400)
+            err_str = str(e)
+            status = 504 if "timed out" in err_str else 400
+            return web.json_response({"error": err_str}, status=status)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 

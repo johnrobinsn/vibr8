@@ -162,6 +162,9 @@ function handleMessage(sessionId: string, event: MessageEvent) {
         model: msg.model,
         stopReason: msg.stop_reason,
       };
+      const existingMsgs = store.messages.get(sessionId) || [];
+      const isDup = existingMsgs.some((m) => m.id === msg.id);
+      console.log(`[ws] assistant msg id=${msg.id} session=${sessionId.slice(0,8)} dup=${isDup} existing=${existingMsgs.length} sockets=${sockets.size}`);
       store.appendMessage(sessionId, chatMsg);
       store.setStreaming(sessionId, null);
       store.setSessionStatus(sessionId, "running");
@@ -361,9 +364,12 @@ function handleMessage(sessionId: string, event: MessageEvent) {
     case "rpc_request": {
       const rpcId = data.id as string;
       const method = data.method as string;
+      console.log(`[ws] RPC request: method=${method} id=${rpcId} session=${sessionId.slice(0,8)} params=`, (data as any).params);
       let response: Record<string, unknown>;
+      try {
 
       if (method === "get_state") {
+        const now = new Date();
         response = {
           type: "rpc_response",
           id: rpcId,
@@ -371,15 +377,134 @@ function handleMessage(sessionId: string, event: MessageEvent) {
             currentSessionId: store.currentSessionId,
             clientId: store.clientId,
             timestamp: Date.now(),
+            dateTime: now.toISOString(),
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            timeZoneOffset: now.getTimezoneOffset(),
+            locale: navigator.language,
             userAgent: navigator.userAgent,
             url: location.href,
           },
         };
+      } else if (method === "get_location") {
+        // Geolocation is async — send response when it resolves
+        if (!navigator.geolocation) {
+          response = { type: "rpc_response", id: rpcId, error: "Geolocation not supported" };
+        } else {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              sendToSession(sessionId, {
+                type: "rpc_response",
+                id: rpcId,
+                result: {
+                  latitude: pos.coords.latitude,
+                  longitude: pos.coords.longitude,
+                  accuracy: pos.coords.accuracy,
+                  altitude: pos.coords.altitude,
+                  timestamp: pos.timestamp,
+                },
+              } as BrowserOutgoingMessage);
+            },
+            (err) => {
+              const reason = err.code === 1 ? "permission_denied"
+                : err.code === 2 ? "position_unavailable"
+                : err.code === 3 ? "timeout"
+                : "unknown";
+              sendToSession(sessionId, {
+                type: "rpc_response",
+                id: rpcId,
+                error: `Geolocation error: ${err.message}`,
+                errorCode: reason,
+              } as BrowserOutgoingMessage);
+            },
+            { enableHighAccuracy: false, timeout: 10000 },
+          );
+          break; // async — skip the synchronous send below
+        }
+      } else if (method === "send_notification") {
+        const params = data.params as Record<string, string> | undefined;
+        const ntitle = params?.title ?? "vibr8";
+        const nbody = params?.body ?? "";
+        if (!("Notification" in window)) {
+          response = { type: "rpc_response", id: rpcId, error: "Notifications not supported", errorCode: "not_supported" };
+        } else if (Notification.permission === "granted") {
+          // Use Service Worker for mobile compatibility
+          const sw = navigator.serviceWorker?.controller;
+          if (sw) {
+            sw.postMessage({ type: "show_notification", title: ntitle, body: nbody });
+          } else {
+            try { new Notification(ntitle, { body: nbody }); } catch { /* fallback failed, still report sent */ }
+          }
+          response = { type: "rpc_response", id: rpcId, result: { sent: true, permission: "granted" } };
+        } else if (Notification.permission === "denied") {
+          response = { type: "rpc_response", id: rpcId, error: "Notification permission denied by user", errorCode: "permission_denied" };
+        } else {
+          // Need to request — async
+          Notification.requestPermission().then((perm) => {
+            if (perm === "granted") {
+              const sw2 = navigator.serviceWorker?.controller;
+              if (sw2) {
+                sw2.postMessage({ type: "show_notification", title: ntitle, body: nbody });
+              } else {
+                try { new Notification(ntitle, { body: nbody }); } catch { /* fallback */ }
+              }
+              sendToSession(sessionId, { type: "rpc_response", id: rpcId, result: { sent: true, permission: "granted" } } as BrowserOutgoingMessage);
+            } else {
+              sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: "Notification permission denied by user", errorCode: "permission_denied" } as BrowserOutgoingMessage);
+            }
+          });
+          break; // async
+        }
+      } else if (method === "get_visibility") {
+        response = {
+          type: "rpc_response",
+          id: rpcId,
+          result: {
+            visible: document.visibilityState === "visible",
+            state: document.visibilityState,
+            hasFocus: document.hasFocus(),
+          },
+        };
+      } else if (method === "read_clipboard") {
+        if (!navigator.clipboard?.readText) {
+          response = { type: "rpc_response", id: rpcId, error: "Clipboard API not supported", errorCode: "not_supported" };
+        } else {
+          navigator.clipboard.readText().then(
+            (text) => {
+              sendToSession(sessionId, { type: "rpc_response", id: rpcId, result: { text } } as BrowserOutgoingMessage);
+            },
+            (err) => {
+              const reason = (err as DOMException).name === "NotAllowedError" ? "permission_denied" : "read_failed";
+              sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: `Clipboard read error: ${(err as Error).message}`, errorCode: reason } as BrowserOutgoingMessage);
+            },
+          );
+          break; // async
+        }
+      } else if (method === "write_clipboard") {
+        const text = (data.params as Record<string, string> | undefined)?.text ?? "";
+        if (!navigator.clipboard?.writeText) {
+          response = { type: "rpc_response", id: rpcId, error: "Clipboard API not supported", errorCode: "not_supported" };
+        } else {
+          navigator.clipboard.writeText(text).then(
+            () => {
+              sendToSession(sessionId, { type: "rpc_response", id: rpcId, result: { written: true } } as BrowserOutgoingMessage);
+            },
+            (err) => {
+              const reason = (err as DOMException).name === "NotAllowedError" ? "permission_denied" : "write_failed";
+              sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: `Clipboard write error: ${(err as Error).message}`, errorCode: reason } as BrowserOutgoingMessage);
+            },
+          );
+          break; // async
+        }
       } else {
         response = { type: "rpc_response", id: rpcId, error: `unknown method: ${method}` };
       }
 
+      console.log(`[ws] RPC response: method=${method} id=${rpcId}`, response!);
       sendToSession(sessionId, response as BrowserOutgoingMessage);
+      } catch (e) {
+        console.error(`[ws] RPC handler error: method=${method} id=${rpcId}`, e);
+        sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: `RPC handler error: ${(e as Error).message}` } as BrowserOutgoingMessage);
+      }
       break;
     }
 
@@ -416,6 +541,7 @@ function handleMessage(sessionId: string, event: MessageEvent) {
     }
 
     case "message_history": {
+      console.log(`[ws] message_history session=${sessionId.slice(0,8)} count=${data.messages?.length} existingCount=${(store.messages.get(sessionId) || []).length}`);
       const chatMessages: ChatMessage[] = [];
       for (const histMsg of data.messages) {
         if (histMsg.type === "user_message") {
@@ -470,7 +596,11 @@ function handleMessage(sessionId: string, event: MessageEvent) {
 }
 
 export function connectSession(sessionId: string) {
-  if (sockets.has(sessionId)) return;
+  if (sockets.has(sessionId)) {
+    console.log(`[ws] connectSession SKIP (already connected) session=${sessionId.slice(0,8)}`);
+    return;
+  }
+  console.log(`[ws] connectSession NEW session=${sessionId.slice(0,8)} totalSockets=${sockets.size}`);
 
   const store = useStore.getState();
   store.setConnectionStatus(sessionId, "connecting");
@@ -565,6 +695,23 @@ export function manualReconnect(sessionId: string) {
   reconnectStartTimes.set(sessionId, Date.now());
   useStore.getState().setReconnecting(sessionId, true);
   connectSession(sessionId);
+}
+
+// Immediately reconnect when returning from background (mobile app switch, screen lock)
+if (!_w.__v8_visibilityHandler) {
+  _w.__v8_visibilityHandler = true;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    const store = useStore.getState();
+    const sid = store.currentSessionId;
+    if (!sid) return;
+    const ws = sockets.get(sid);
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      // Reset give-up state and reconnect immediately
+      clearReconnectState(sid);
+      connectSession(sid);
+    }
+  });
 }
 
 export function disconnectSession(sessionId: string) {

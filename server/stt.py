@@ -34,9 +34,22 @@ logger = logging.getLogger(__name__)
 
 WHISPER_SAMPLE_RATE = 16000
 SILERO_SAMPLE_RATE = WHISPER_SAMPLE_RATE  # Must match whisper
-VAD_THRESHOLD_DB = -34
+VAD_THRESHOLD_DB = -30
+SILERO_VAD_THRESHOLD = 0.4
 EOU_THRESHOLD = 0.15
 EOU_MAX_RETRIES = 3
+# Minimum segment duration (seconds) to avoid transcribing brief noise bursts
+MIN_SEGMENT_DURATION = 0.4
+
+# Common Whisper hallucination patterns on silence/noise
+_HALLUCINATION_PATTERNS = {
+    "thank you", "thanks for watching", "thank you for watching",
+    "thanks for listening", "thank you for listening",
+    "subscribe", "like and subscribe", "please subscribe",
+    "subtitle", "subtitles", "subtitled by",
+    "you", "bye", "the end",
+    "...", "…",
+}
 
 
 # ── Synchronous STT core ──────────────────────────────────────────────────────
@@ -150,7 +163,7 @@ class STT:
             float_buf_2d = float_buf.reshape(-1, 512)
             vad = STT.shared_resources["vad"]
             p = vad(torch.from_numpy(float_buf_2d), SILERO_SAMPLE_RATE)
-            is_silent = bool(torch.all(p < 0.25))
+            is_silent = bool(torch.all(p < SILERO_VAD_THRESHOLD))
 
         event = STT.Event.VOICE_NOT_DETECTED if is_silent else STT.Event.VOICE_WAS_DETECTED
         self._state_machine.handle_event(event, self._segment, resampled)
@@ -183,11 +196,27 @@ class STT:
                 def process_segment(s: list, b: np.ndarray) -> None:
                     s.append(b)
                     stt._segment_time_end = stt._capture_time + 160.0 / 1000.0
+
+                    # Skip very short segments (likely noise bursts)
+                    duration = stt._segment_time_end - stt._segment_time_begin
+                    if duration < MIN_SEGMENT_DURATION:
+                        logger.debug("[stt] Discarding short segment: %.2fs", duration)
+                        s.clear()
+                        return
+
                     combined = np.concatenate(s, axis=0)
                     float_buf = combined.astype(np.float32) / np.iinfo(np.int16).max
 
                     asr = STT.shared_resources["asr"]
                     text = asr(float_buf)["text"]
+
+                    # Filter Whisper hallucinations
+                    text_stripped = text.strip().rstrip(".!?,").strip()
+                    if text_stripped.lower() in _HALLUCINATION_PATTERNS:
+                        logger.info("[stt] Filtered hallucination: %r", text)
+                        s.clear()
+                        stt._notify_listeners("voice_not_detected", None)
+                        return
 
                     eou = STT.shared_resources["eou"]
                     eou_prob = eou(text)

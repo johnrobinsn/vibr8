@@ -350,9 +350,11 @@ export const useStore = create<AppState>((set) => ({
 
   appendMessage: (sessionId, msg) =>
     set((s) => {
+      const existing = s.messages.get(sessionId) || [];
+      // Deduplicate by message ID (assistant messages have stable IDs from CLI)
+      if (msg.id && existing.some((m) => m.id === msg.id)) return {};
       const messages = new Map(s.messages);
-      const list = [...(messages.get(sessionId) || []), msg];
-      messages.set(sessionId, list);
+      messages.set(sessionId, [...existing, msg]);
       return { messages };
     }),
 

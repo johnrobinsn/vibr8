@@ -31,7 +31,11 @@ async def _get(path: str) -> dict[str, Any]:
 async def _post(path: str, body: dict | None = None) -> dict[str, Any]:
     async with httpx.AsyncClient() as client:
         r = await client.post(f"{BASE_URL}{path}", json=body, timeout=30)
-        r.raise_for_status()
+        if r.status_code >= 400:
+            try:
+                return r.json()
+            except Exception:
+                return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
         return r.json()
 
 
@@ -135,14 +139,27 @@ async def get_active_clients() -> str:
 
 
 @mcp.tool()
-async def query_client(client_id: str, method: str) -> str:
+async def query_client(client_id: str, method: str, params: str = "") -> str:
     """Send an RPC query to a specific browser client and get their response.
 
     Args:
         client_id: The client ID to query.
-        method: The RPC method to call (e.g., "get_state" returns currentSessionId, url, timestamp).
+        method: The RPC method to call. Available methods:
+            - "get_state" — returns currentSessionId, dateTime, timeZone, locale, url
+            - "get_location" — returns latitude, longitude, accuracy (may prompt user)
+            - "get_visibility" — returns visible, state, hasFocus
+            - "send_notification" — show browser notification. params: {"title": "...", "body": "..."}
+            - "read_clipboard" — read clipboard text (may prompt user)
+            - "write_clipboard" — write text to clipboard. params: {"text": "..."}
+        params: Optional JSON string of parameters to pass to the method (e.g., '{"title": "Hello", "body": "World"}').
     """
-    result = await _post("/ring0/query-client", {"clientId": client_id, "method": method})
+    body: dict[str, Any] = {"clientId": client_id, "method": method}
+    if params:
+        try:
+            body["params"] = json.loads(params)
+        except json.JSONDecodeError:
+            return f"Error: invalid params JSON: {params}"
+    result = await _post("/ring0/query-client", body)
     if result.get("error"):
         return f"Error: {result['error']}"
     return json.dumps(result.get("result", {}), indent=2)

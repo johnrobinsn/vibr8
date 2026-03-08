@@ -469,12 +469,19 @@ class WsBridge:
         # Handle RPC responses from clients
         if msg.get("type") == "rpc_response":
             rpc_id = msg.get("id", "")
+            logger.info("[ws-bridge] RPC response received: rpc_id=%s pending=%s keys=%s", rpc_id[:8] if rpc_id else "?", rpc_id in self._rpc_pending, list(msg.keys()))
             future = self._rpc_pending.pop(rpc_id, None)
             if future and not future.done():
+                # Always resolve (never reject) so callers get error details
+                # like errorCode instead of a generic RuntimeError.
+                result: dict = {}
                 if "error" in msg:
-                    future.set_exception(RuntimeError(msg["error"]))
-                else:
-                    future.set_result(msg.get("result", {}))
+                    result["error"] = msg["error"]
+                    if "errorCode" in msg:
+                        result["errorCode"] = msg["errorCode"]
+                if "result" in msg:
+                    result.update(msg["result"])
+                future.set_result(result)
             return
 
         await self._route_browser_message(session, msg, ws)
@@ -1013,10 +1020,12 @@ class WsBridge:
         if params:
             msg["params"] = params
         try:
+            logger.info("[ws-bridge] RPC send: client=%s method=%s rpc_id=%s ws_closed=%s", client_id[:8], method, rpc_id[:8], ws.closed)
             await ws.send_str(json.dumps(msg))
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._rpc_pending.pop(rpc_id, None)
+            logger.warning("[ws-bridge] RPC timeout: client=%s method=%s rpc_id=%s after %.0fs", client_id[:8], method, rpc_id[:8], timeout)
             raise RuntimeError(f"RPC call to client {client_id} timed out after {timeout}s")
         except Exception:
             self._rpc_pending.pop(rpc_id, None)
@@ -1097,9 +1106,12 @@ class WsBridge:
         return list(session.message_history)
 
     async def _broadcast_to_browsers(self, session: Session, msg: dict[str, Any]) -> None:
-        if not session.browser_sockets and msg.get("type") in ("assistant", "stream_event", "result"):
-            stored = msg.get("type") in ("assistant", "result")
-            logger.info(f"[ws-bridge] Broadcasting {msg.get('type')} to 0 browsers for session {session.id} (stored in history: {stored})")
+        msg_type = msg.get("type")
+        if msg_type in ("assistant", "result", "user_message"):
+            logger.info(
+                "[ws-bridge] Broadcasting %s to %d browsers for session %s",
+                msg_type, len(session.browser_sockets), session.id[:8],
+            )
         data = json.dumps(msg)
         dead: list[web.WebSocketResponse] = []
         for ws in session.browser_sockets:
