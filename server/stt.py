@@ -9,9 +9,12 @@ Simplified for vibr8: mono input only, no file capture.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import re
 import threading
 import warnings
+from collections import Counter
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Callable, Optional
@@ -35,6 +38,11 @@ logger = logging.getLogger(__name__)
 WHISPER_SAMPLE_RATE = 16000
 SILERO_SAMPLE_RATE = WHISPER_SAMPLE_RATE  # Must match whisper
 
+# Reset Silero VAD hidden state after this many seconds of continuous silence.
+# Prevents RNN state drift from accumulating over long sessions, which can
+# cause false voice detections on ambient noise.
+SILERO_RESET_INTERVAL_S = 30.0
+
 
 @dataclass
 class STTParams:
@@ -45,6 +53,7 @@ class STTParams:
     eou_threshold: float = 0.15
     eou_max_retries: int = 3
     min_segment_duration: float = 0.4
+    verbose: bool = False
 
 # Common Whisper hallucination patterns on silence/noise
 _HALLUCINATION_PATTERNS = {
@@ -91,6 +100,7 @@ class STT:
         self._capture_time: float = 0.0
         self._segment_time_begin: float = 0.0
         self._segment_time_end: float = 0.0
+        self._idle_silence_time: float = 0.0  # seconds of silence in IDLE state
 
         self._state_machine = self._create_state_machine()
 
@@ -116,6 +126,7 @@ class STT:
                 "automatic-speech-recognition",
                 model="openai/whisper-large-v3",
                 device=device,
+                generate_kwargs={"language": "en", "task": "transcribe"},
             )
             STT.shared_resources["asr"] = asr
             logger.info("[stt] Whisper loaded (device=%s)", device)
@@ -178,16 +189,43 @@ class STT:
 
         is_silent = rms_db < params.vad_threshold_db
 
+        silero_prob = None
         if not is_silent:
             # Silero VAD on 512-sample chunks.
             float_buf_2d = float_buf.reshape(-1, 512)
             vad = STT.shared_resources["vad"]
             p = vad(torch.from_numpy(float_buf_2d), SILERO_SAMPLE_RATE)
+            silero_prob = float(torch.max(p))
             is_silent = bool(torch.all(p < params.silero_vad_threshold))
+
+        if params.verbose:
+            state_name = self._state_machine.state.name
+            if silero_prob is not None:
+                logger.info("[stt-verbose] t=%.1fs  rms=%.1fdB (thr=%.1f)  silero=%.3f (thr=%.2f)  silent=%s  state=%s",
+                            self._capture_time, rms_db, params.vad_threshold_db,
+                            silero_prob, params.silero_vad_threshold, is_silent, state_name)
+            else:
+                logger.info("[stt-verbose] t=%.1fs  rms=%.1fdB (thr=%.1f)  below_rms  silent=%s  state=%s",
+                            self._capture_time, rms_db, params.vad_threshold_db, is_silent, state_name)
 
         event = STT.Event.VOICE_NOT_DETECTED if is_silent else STT.Event.VOICE_WAS_DETECTED
         self._state_machine.handle_event(event, self._segment, resampled)
         self._capture_time += 160.0 / 1000.0
+
+        # Periodically reset Silero VAD hidden state during sustained silence
+        # to prevent RNN drift from causing false positives over long sessions.
+        if is_silent and self._state_machine.state == STT.State.IDLE:
+            self._idle_silence_time += 160.0 / 1000.0
+            if self._idle_silence_time >= SILERO_RESET_INTERVAL_S:
+                vad = STT.shared_resources.get("vad")
+                if vad is not None:
+                    vad.reset_states()
+                    if params.verbose:
+                        logger.info("[stt-verbose] Reset Silero VAD state after %.0fs of silence",
+                                    self._idle_silence_time)
+                self._idle_silence_time = 0.0
+        else:
+            self._idle_silence_time = 0.0
 
     def flush(self) -> None:
         """Reset the state machine and emit a 'flushed' event."""
@@ -195,6 +233,7 @@ class STT:
         self._capture_time = 0.0
         self._segment_time_begin = 0.0
         self._segment_time_end = 0.0
+        self._idle_silence_time = 0.0
         self._state_machine.state = STT.State.IDLE
         self._notify_listeners("flushed", None)
 
@@ -221,7 +260,11 @@ class STT:
                     # Skip very short segments (likely noise bursts)
                     duration = stt._segment_time_end - stt._segment_time_begin
                     if duration < params.min_segment_duration:
-                        logger.debug("[stt] Discarding short segment: %.2fs", duration)
+                        if params.verbose:
+                            logger.info("[stt-verbose] Discarding short segment: %.2fs < %.2fs",
+                                        duration, params.min_segment_duration)
+                        else:
+                            logger.debug("[stt] Discarding short segment: %.2fs", duration)
                         s.clear()
                         return
 
@@ -231,21 +274,66 @@ class STT:
                     asr = STT.shared_resources["asr"]
                     text = asr(float_buf)["text"]
 
+                    if params.verbose:
+                        logger.info("[stt-verbose] Whisper raw: %r  duration=%.2fs", text, duration)
+
                     # Filter Whisper hallucinations
                     text_stripped = text.strip().rstrip(".!?,").strip()
                     if text_stripped.lower() in _HALLUCINATION_PATTERNS:
-                        logger.info("[stt] Filtered hallucination: %r", text)
+                        if params.verbose:
+                            logger.info("[stt-verbose] REJECTED hallucination: %r", text)
+                        else:
+                            logger.info("[stt] Filtered hallucination: %r", text)
                         s.clear()
                         stt._notify_listeners("voice_not_detected", None)
                         return
 
+                    # Reject non-Latin script output (e.g. Korean/Chinese/Japanese
+                    # hallucinations) — we only expect English input
+                    latin_chars = sum(1 for c in text_stripped if c.isascii() or c in "''""–—…")
+                    if text_stripped and latin_chars / len(text_stripped) < 0.5:
+                        if params.verbose:
+                            logger.info("[stt-verbose] REJECTED non-Latin hallucination: %r", text)
+                        else:
+                            logger.info("[stt] Filtered non-Latin hallucination: %r", text)
+                        s.clear()
+                        stt._notify_listeners("voice_not_detected", None)
+                        return
+
+                    # Reject repetition-loop hallucinations (e.g. "Oh my God." × 89)
+                    sentences = [s.strip() for s in re.split(r'[.!?]+', text_stripped) if s.strip()]
+                    if len(sentences) >= 4:
+                        counts = Counter(s.lower() for s in sentences)
+                        most_common_count = counts.most_common(1)[0][1]
+                        if most_common_count / len(sentences) > 0.6:
+                            if params.verbose:
+                                logger.info("[stt-verbose] REJECTED repetition-loop hallucination: %r", text)
+                            else:
+                                logger.info("[stt] Filtered repetition-loop hallucination: %r", text)
+                            s.clear()
+                            stt._notify_listeners("voice_not_detected", None)
+                            return
+
                     eou = STT.shared_resources["eou"]
                     eou_prob = eou(text)
 
+                    if params.verbose:
+                        logger.info("[stt-verbose] EOU prob=%.4f  threshold=%.4f  retry=%d/%d",
+                                    eou_prob, params.eou_threshold, self.eou_counter, params.eou_max_retries)
+
                     if eou_prob < params.eou_threshold and self.eou_counter < params.eou_max_retries:
+                        if params.verbose:
+                            logger.info("[stt-verbose] EOU below threshold, continuing (retry %d)", self.eou_counter + 1)
                         self.state = STT.State.SEGMENT_N
                         self.eou_counter += 1
                         return
+
+                    if params.verbose:
+                        logger.info("[stt-verbose] ACCEPTED: %r  eou=%.4f", text, eou_prob)
+
+                    # Build params dict excluding verbose flag
+                    params_dict = dataclasses.asdict(params)
+                    params_dict.pop("verbose", None)
 
                     stt._notify_listeners("voice_not_detected", None)
                     stt._notify_listeners("final_transcript", {
@@ -253,6 +341,8 @@ class STT:
                         "timeEnd": stt._segment_time_end,
                         "transcript": text,
                         "audio": combined,
+                        "params": params_dict,
+                        "eouProb": float(eou_prob),
                     })
                     s.clear()
 

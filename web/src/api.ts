@@ -187,6 +187,23 @@ export interface VoiceSegment {
   timeEnd: number;
   recordingId: string | null;
   profileId: string | null;
+  segParamsId?: string | null;
+  eouProb?: number | null;
+  createdAt: number;
+}
+
+export interface VoiceSegParams {
+  id: string;
+  profileId: string | null;
+  profileName: string | null;
+  params: {
+    mic_gain: number;
+    vad_threshold_db: number;
+    silero_vad_threshold: number;
+    eou_threshold: number;
+    eou_max_retries: number;
+    min_segment_duration: number;
+  };
   createdAt: number;
 }
 
@@ -359,6 +376,9 @@ export const api = {
 
   // Voice Recordings
   listVoiceRecordings: () => get<VoiceRecording[]>("/voice/recordings"),
+
+  // Voice Seg Params
+  getSegParams: (id: string) => get<VoiceSegParams>(`/voice/seg-params/${encodeURIComponent(id)}`),
 
   // Voice Logs
   listVoiceLogs: (opts?: { q?: string; offset?: number; limit?: number }) => {

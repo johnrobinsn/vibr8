@@ -25,6 +25,7 @@ export function TopBar() {
   const webrtcStatus = useStore((s) => s.webrtcStatus);
   const webrtcTransport = useStore((s) => s.webrtcTransport);
   const guardEnabled = useStore((s) => s.guardEnabled);
+  const voiceMode = useStore((s) => s.voiceMode);
   const sdkSessions = useStore((s) => s.sdkSessions);
   const sessionNames = useStore((s) => s.sessionNames);
 
@@ -214,6 +215,14 @@ export function TopBar() {
                 </svg>
               )}
             </button>
+          )}
+
+          {/* Voice mode indicator (e.g. note mode) */}
+          {voiceMode && currentAudioMode !== "off" && (
+            <span className="flex items-center gap-1 px-2 h-7 rounded-lg text-xs font-semibold bg-cc-accent/15 text-cc-accent animate-pulse">
+              <span className="w-1.5 h-1.5 rounded-full bg-cc-accent" />
+              {voiceMode.toUpperCase()}
+            </span>
           )}
 
           {/* Audio cycle: off → connecting → in+out → in-only → off */}

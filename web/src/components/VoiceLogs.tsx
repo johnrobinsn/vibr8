@@ -1,10 +1,81 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { api, type VoiceSegment, type VoiceRecording } from "../api.js";
+import { api, type VoiceSegment, type VoiceRecording, type VoiceSegParams } from "../api.js";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function shortId(uuid: string): string {
+  return uuid.slice(0, 8);
+}
+
+function CopyableText({ text, className }: { text: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <span
+      className={`cursor-pointer hover:text-cc-fg transition-colors ${className ?? ""}`}
+      title="Click to copy"
+      onClick={(e) => {
+        e.stopPropagation();
+        navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        });
+      }}
+    >
+      {copied ? "copied!" : text}
+    </span>
+  );
+}
+
+/** Cache for seg_params — avoids refetching the same ID. */
+const segParamsCache = new Map<string, VoiceSegParams>();
+
+function useSegParams(ids: string[]): Map<string, VoiceSegParams> {
+  const [params, setParams] = useState<Map<string, VoiceSegParams>>(new Map());
+
+  useEffect(() => {
+    const missing = ids.filter((id) => id && !segParamsCache.has(id));
+    if (missing.length === 0) {
+      // All cached — build result from cache
+      const result = new Map<string, VoiceSegParams>();
+      for (const id of ids) {
+        const cached = segParamsCache.get(id);
+        if (cached) result.set(id, cached);
+      }
+      setParams(result);
+      return;
+    }
+
+    // Fetch missing ones
+    Promise.allSettled(
+      missing.map((id) =>
+        api.getSegParams(id).then((sp) => {
+          segParamsCache.set(id, sp);
+          return sp;
+        }),
+      ),
+    ).then(() => {
+      const result = new Map<string, VoiceSegParams>();
+      for (const id of ids) {
+        const cached = segParamsCache.get(id);
+        if (cached) result.set(id, cached);
+      }
+      setParams(result);
+    });
+  }, [ids.join(",")]);
+
+  return params;
 }
 
 export function VoiceLogs() {
@@ -175,10 +246,22 @@ function RecordingGroup({
   const [expanded, setExpanded] = useState(defaultExpanded);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const isComplete = recording.endedAt != null;
-  const date = new Date(recording.startedAt * 1000);
+  const startDate = new Date(recording.startedAt * 1000);
+  const endDate = recording.endedAt ? new Date(recording.endedAt * 1000) : null;
   const sessionLabel = recording.sessionId.startsWith("playground-")
     ? "Playground"
     : recording.sessionId.slice(0, 8);
+
+  // Collect unique segParamsIds for lazy fetching
+  const segParamsIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const seg of segments) {
+      if (seg.segParamsId) ids.add(seg.segParamsId);
+    }
+    return [...ids];
+  }, [segments]);
+
+  const segParamsMap = useSegParams(expanded ? segParamsIds : []);
 
   // Auto-expand when search matches
   useEffect(() => {
@@ -191,6 +274,20 @@ function RecordingGroup({
       audioRef.current.play().catch(() => {});
     }
   }
+
+  // Format header time range
+  const headerTime = (() => {
+    const startStr = `${startDate.toLocaleDateString()} ${startDate.toLocaleTimeString()}`;
+    if (endDate && isComplete) {
+      // Only show end date part if it's a different day
+      const sameDay = startDate.toLocaleDateString() === endDate.toLocaleDateString();
+      const endStr = sameDay
+        ? endDate.toLocaleTimeString()
+        : `${endDate.toLocaleDateString()} ${endDate.toLocaleTimeString()}`;
+      return `${startStr} — ${endStr}`;
+    }
+    return startStr;
+  })();
 
   return (
     <div className="rounded-xl border border-cc-border overflow-hidden">
@@ -207,13 +304,11 @@ function RecordingGroup({
           <path d="M6 3l5 5-5 5z" />
         </svg>
         <div className="flex-1 text-left">
-          <span className="text-sm font-medium">
-            {date.toLocaleDateString()} {date.toLocaleTimeString()}
-          </span>
-          <span className="text-xs text-cc-muted ml-2">{sessionLabel}</span>
+          <span className="text-sm font-medium">{headerTime}</span>
+          <span className="text-xs text-cc-muted ml-2 font-mono">{shortId(recording.id)}</span>
         </div>
         <span className="text-xs text-cc-muted">
-          {isComplete ? formatTime(recording.duration) : "In progress"}
+          {isComplete ? formatDuration(recording.duration) : "In progress"}
         </span>
         <span className="text-xs text-cc-muted">
           {segments.length} segment{segments.length !== 1 ? "s" : ""}
@@ -245,6 +340,11 @@ function RecordingGroup({
                 <span className="italic">Recording in progress...</span>
               </div>
             )}
+            {/* Recording file path */}
+            <div className="mt-1.5 text-[10px] font-mono text-cc-muted/60">
+              <span className="text-cc-muted/40">rec: </span>
+              <CopyableText text={`recordings/${recording.id}.wav`} />
+            </div>
           </div>
 
           {/* Segments */}
@@ -255,6 +355,7 @@ function RecordingGroup({
                   key={seg.id}
                   segment={seg}
                   isRecordingComplete={isComplete}
+                  segParams={seg.segParamsId ? segParamsMap.get(seg.segParamsId) : undefined}
                   onSeek={seekTo}
                   onDelete={onDeleteSegment}
                 />
@@ -267,14 +368,43 @@ function RecordingGroup({
   );
 }
 
+function SegParamsBadge({ segParamsId, segParams, eouProb }: {
+  segParamsId: string;
+  segParams?: VoiceSegParams;
+  eouProb?: number | null;
+}) {
+  if (!segParams) {
+    return (
+      <span className="text-[10px] font-mono text-cc-muted/50">
+        params: {segParamsId}
+      </span>
+    );
+  }
+  const p = segParams.params;
+  return (
+    <span className="text-[10px] font-mono text-cc-muted/60">
+      <span className="text-cc-muted/40">params:</span>{" "}
+      <CopyableText text={segParamsId} className="text-cc-primary/60" />{" "}
+      gain={p.mic_gain}{" "}
+      vad={p.vad_threshold_db}dB{" "}
+      silero={p.silero_vad_threshold}{" "}
+      eou={p.eou_threshold}
+      {eouProb != null && <> (prob={eouProb.toFixed(2)})</>}{" "}
+      min={p.min_segment_duration}s
+    </span>
+  );
+}
+
 function RecordingSegmentRow({
   segment,
   isRecordingComplete,
+  segParams,
   onSeek,
   onDelete,
 }: {
   segment: VoiceSegment;
   isRecordingComplete: boolean;
+  segParams?: VoiceSegParams;
   onSeek: (time: number) => void;
   onDelete: (id: string) => void;
 }) {
@@ -327,8 +457,25 @@ function RecordingSegmentRow({
       </button>
 
       <div className="flex-1 min-w-0">
-        <p className="text-sm leading-snug">{segment.transcript}</p>
-        <span className="text-[11px] text-cc-muted">{formatTime(duration)}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-mono text-cc-muted/50">{shortId(segment.id)}</span>
+          <p className="text-sm leading-snug">"{segment.transcript}"</p>
+          <span className="text-[11px] text-cc-muted">{formatTime(duration)}</span>
+        </div>
+        {/* File path */}
+        <div className="text-[10px] font-mono text-cc-muted/50 mt-0.5">
+          <CopyableText text={`segments/${segment.id}.wav`} />
+        </div>
+        {/* Seg params badge */}
+        {segment.segParamsId && (
+          <div className="mt-0.5">
+            <SegParamsBadge
+              segParamsId={segment.segParamsId}
+              segParams={segParams}
+              eouProb={segment.eouProb}
+            />
+          </div>
+        )}
       </div>
 
       {/* Delete */}

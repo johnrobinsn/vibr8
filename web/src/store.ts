@@ -77,6 +77,7 @@ interface AppState {
   webrtcStatus: string | null;
   webrtcTransport: "direct" | "relay" | null;
   guardEnabled: boolean;
+  voiceMode: string | null;
 
   // Focus management
   pendingFocus: "composer" | "terminal" | "home" | null;
@@ -164,6 +165,7 @@ interface AppState {
 
   // Guard mode actions (global)
   setGuardEnabled: (enabled: boolean) => void;
+  setVoiceMode: (mode: string | null) => void;
 
   // Playground actions
   setPlaygroundActive: (active: boolean) => void;
@@ -225,6 +227,7 @@ export const useStore = create<AppState>((set) => ({
   webrtcStatus: null,
   webrtcTransport: null,
   guardEnabled: typeof window !== "undefined" ? localStorage.getItem("cc-guard-enabled") !== "false" : true,
+  voiceMode: null,
   pendingFocus: null,
   commandPaletteOpen: false,
   playgroundActive: false,
@@ -327,7 +330,7 @@ export const useStore = create<AppState>((set) => ({
       editorLoading.delete(sessionId);
       // Reset global audio state if the removed session owns the audio
       const audioReset = s.audioSessionId === sessionId
-        ? { audioSessionId: null, audioMode: "off" as const, isRecording: false, webrtcStatus: null, webrtcTransport: null, guardEnabled: true }
+        ? { audioSessionId: null, audioMode: "off" as const, isRecording: false, webrtcStatus: null, webrtcTransport: null, guardEnabled: true, voiceMode: null }
         : {};
       return {
         sessions,
@@ -598,6 +601,7 @@ export const useStore = create<AppState>((set) => ({
     localStorage.setItem("cc-guard-enabled", String(enabled));
     set({ guardEnabled: enabled });
   },
+  setVoiceMode: (mode) => set({ voiceMode: mode }),
 
   setPendingFocus: (target) => set({ pendingFocus: target }),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
@@ -639,6 +643,7 @@ export const useStore = create<AppState>((set) => ({
       webrtcStatus: null,
       webrtcTransport: null,
       guardEnabled: true,
+      voiceMode: null,
       pendingFocus: null,
       commandPaletteOpen: false,
       playgroundActive: false,

@@ -151,6 +151,7 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
             - "send_notification" — show browser notification. params: {"title": "...", "body": "..."}
             - "read_clipboard" — read clipboard text (may prompt user)
             - "write_clipboard" — write text to clipboard. params: {"text": "..."}
+            - "open_url" — open a URL in a new tab/window. params: {"url": "..."}
         params: Optional JSON string of parameters to pass to the method (e.g., '{"title": "Hello", "body": "World"}').
     """
     body: dict[str, Any] = {"clientId": client_id, "method": method}

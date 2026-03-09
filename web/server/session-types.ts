@@ -189,6 +189,7 @@ export type BrowserIncomingMessage =
   | { type: "guard_state"; enabled: boolean }
   | { type: "audio_off" }
   | { type: "tts_muted"; muted: boolean }
+  | { type: "voice_mode"; mode: string | null }
   | { type: "ring0_switch_ui"; sessionId: string }
   | { type: "rpc_request"; id: string; method: string; params?: Record<string, unknown> };
 

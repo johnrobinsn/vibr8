@@ -341,6 +341,11 @@ function handleMessage(sessionId: string, event: MessageEvent) {
       break;
     }
 
+    case "voice_mode": {
+      store.setVoiceMode((data as any).mode ?? null);
+      break;
+    }
+
     case "ring0_switch_ui": {
       // Ring0 requests switching to a specific session
       const targetId = data.sessionId;
@@ -494,6 +499,14 @@ function handleMessage(sessionId: string, event: MessageEvent) {
             },
           );
           break; // async
+        }
+      } else if (method === "open_url") {
+        const url = (data.params as Record<string, string> | undefined)?.url;
+        if (!url) {
+          response = { type: "rpc_response", id: rpcId, error: "No url param provided", errorCode: "missing_param" };
+        } else {
+          window.open(url, "_blank");
+          response = { type: "rpc_response", id: rpcId, result: { opened: true, url } };
         }
       } else {
         response = { type: "rpc_response", id: rpcId, error: `unknown method: ${method}` };

@@ -899,6 +899,15 @@ def create_routes(
         # Support HTTP Range requests for seeking
         return web.FileResponse(audio_path, headers={"Content-Type": "audio/wav"})
 
+    @routes.get("/api/voice/seg-params/{id}")
+    async def voice_seg_params_get(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        seg_params_id = request.match_info["id"]
+        result = voice_logger.get_seg_params(username, seg_params_id)
+        if not result:
+            return web.json_response({"error": "Seg params not found"}, status=404)
+        return web.json_response(result)
+
     @routes.delete("/api/voice/logs/{id}")
     async def voice_logs_delete(request: web.Request) -> web.Response:
         username = _get_username(request)

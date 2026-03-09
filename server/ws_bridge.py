@@ -233,6 +233,14 @@ class WsBridge:
                 session, {"type": "tts_muted", "muted": muted}
             )
 
+    async def broadcast_voice_mode(self, session_id: str, mode: str | None) -> None:
+        """Broadcast voice mode change to browser clients."""
+        session = self._sessions.get(session_id)
+        if session:
+            await self._broadcast_to_browsers(
+                session, {"type": "voice_mode", "mode": mode}
+            )
+
     def get_all_sessions(self) -> list[dict[str, Any]]:
         return [s.state for s in self._sessions.values()]
 
@@ -660,6 +668,9 @@ class WsBridge:
                 logger.info("[ws-bridge] TTS skipped: empty after markdown strip for session %s", session_id)
                 return
 
+            # Pronunciation fixes: replace brand names with phonetic equivalents.
+            text = re.sub(r'(?i)\bvibr8\b', 'vibrate', text)
+
             frame_count = 0
             def on_frame(frame):
                 nonlocal frame_count
@@ -1058,6 +1069,9 @@ class WsBridge:
         if not session.cli_socket:
             logger.info(f"[ws-bridge] CLI not yet connected for session {session.id}, queuing message")
             session.pending_messages.append(ndjson)
+            # Auto-relaunch CLI so queued messages get processed
+            if self._on_cli_relaunch_needed:
+                self._on_cli_relaunch_needed(session.id)
             return
         import asyncio
         asyncio.ensure_future(session.cli_socket.send_str(ndjson + "\n"))

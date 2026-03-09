@@ -24,6 +24,50 @@ from server import voice_profiles
 logger = logging.getLogger(__name__)
 
 
+# ── Voice Modes ──────────────────────────────────────────────────────────────
+
+class VoiceMode:
+    """Base class for voice modes that intercept transcripts."""
+
+    name: str = "unknown"
+
+    def on_transcript(self, text: str) -> str | None:
+        """Process a transcript. Return text to submit, or None to suppress."""
+        return text
+
+    def on_done(self) -> str | None:
+        """Called when the user says 'done'. Return accumulated text or None."""
+        return None
+
+    def on_disconnect(self) -> str | None:
+        """Called when audio disconnects. Return accumulated text or None."""
+        return None
+
+
+class NoteMode(VoiceMode):
+    """Accumulates transcript fragments into a voice note."""
+
+    name = "note"
+
+    def __init__(self) -> None:
+        self._fragments: list[str] = []
+
+    def on_transcript(self, text: str) -> str | None:
+        self._fragments.append(text)
+        logger.info("[note-mode] fragment %d: %s", len(self._fragments), text)
+        return None  # suppress submission
+
+    def on_done(self) -> str | None:
+        if not self._fragments:
+            return None
+        return "[voice note]\n" + "\n".join(self._fragments)
+
+    def on_disconnect(self) -> str | None:
+        if not self._fragments:
+            return None
+        return "[voice note interrupted]\n" + "\n".join(self._fragments)
+
+
 class AudioStatsLogger:
     """Periodically logs frame count and peak RMS level for an audio stream."""
 
@@ -83,6 +127,7 @@ class WebRTCManager:
         self._tts_muted: Dict[str, bool] = {}
         self._client_ids: Dict[str, str] = {}  # session_id → client_id
         self._voice_loggers: Dict[str, VoiceLogger] = {}
+        self._voice_modes: Dict[str, VoiceMode] = {}
         self._playground_ws: Dict[str, object] = {}  # client_id → WS
         self._playground_sessions: set[str] = set()  # session_ids that are playground
         self._ws_bridge = None
@@ -162,6 +207,24 @@ class WebRTCManager:
         if self._ws_bridge:
             asyncio.ensure_future(
                 self._ws_bridge.broadcast_tts_muted(session_id, muted)
+            )
+
+    def get_voice_mode(self, session_id: str) -> VoiceMode | None:
+        """Return the active voice mode for *session_id*, or None."""
+        return self._voice_modes.get(session_id)
+
+    def set_voice_mode(self, session_id: str, mode: VoiceMode | None) -> None:
+        """Set or clear the voice mode for *session_id*."""
+        if mode is None:
+            self._voice_modes.pop(session_id, None)
+            logger.info("[voice-mode] session %s: mode cleared", session_id)
+        else:
+            self._voice_modes[session_id] = mode
+            logger.info("[voice-mode] session %s: entered %s mode", session_id, mode.name)
+        # Broadcast to browser
+        if self._ws_bridge:
+            asyncio.ensure_future(
+                self._ws_bridge.broadcast_voice_mode(session_id, mode.name if mode else None)
             )
 
     async def handle_offer(
@@ -312,7 +375,7 @@ class WebRTCManager:
                 # Check for "vibr8/vibrate <command>" regardless of guard state
                 match = self._find_guard_word(transcript_lower)
                 if match:
-                    after_word = transcript_lower[match[1]:].strip()
+                    after_word = transcript_lower[match[1]:].strip().lstrip(".,;:!?- ").strip()
                     if after_word.startswith("off"):
                         # Disconnect audio entirely
                         if self._ws_bridge:
@@ -346,17 +409,70 @@ class WebRTCManager:
                             self._ring0_manager.disable()
                             asyncio.ensure_future(self._speak_short(session_id, "Ring zero off"))
                         return
+                    if after_word.startswith("note"):
+                        # Enter note mode
+                        existing = self.get_voice_mode(session_id)
+                        if existing and existing.name == "note":
+                            asyncio.ensure_future(self._speak_short(session_id, "Already in note mode"))
+                        else:
+                            self.set_voice_mode(session_id, NoteMode())
+                            asyncio.ensure_future(self._speak_short(session_id, "Note mode"))
+                        return
+                    if after_word.startswith("done"):
+                        # Exit current mode and deliver accumulated content
+                        mode = self.get_voice_mode(session_id)
+                        if not mode:
+                            asyncio.ensure_future(self._speak_short(session_id, "No active mode"))
+                            return
+                        result = mode.on_done()
+                        self.set_voice_mode(session_id, None)
+                        if not result:
+                            asyncio.ensure_future(self._speak_short(session_id, "Empty note"))
+                            return
+                        asyncio.ensure_future(self._speak_short(session_id, "Done"))
+                        # Deliver via ring0 if enabled, otherwise to active session
+                        if self._ring0_manager and self._ring0_manager.is_enabled:
+                            ring0_sid = self._ring0_manager.session_id
+                            if ring0_sid:
+                                await self._ws_bridge.submit_user_message(ring0_sid, result, source_client_id=client_id)
+                                return
+                        await self._ws_bridge.submit_user_message(session_id, result, source_client_id=client_id)
+                        return
+                    # "vibr8 vibrate" → literal "vibrate" (fall through)
+                    if after_word.startswith("vibrate"):
+                        transcript = "vibrate" + transcript[match[1]:][len("vibrate"):].strip()
+                        if after_word == "vibrate":
+                            transcript = "vibrate"
+                        match = None  # already handled, skip guard stripping
+                        # Fall through to normal processing
+                    # "vibr8 app" → literal "vibr8" (fall through)
+                    elif after_word.startswith("app"):
+                        remaining = transcript[match[1]:].strip()
+                        remaining = remaining[3:].strip() if remaining.lower().startswith("app") else remaining
+                        transcript = "vibr8" + (" " + remaining if remaining else "")
+                        match = None  # already handled, skip guard stripping
+                        # Fall through to normal processing
+
+                # If guard word was found but no command matched, strip it.
+                if match:
+                    after = transcript[match[1]:].strip().lstrip(".,;:!?-")
+                    if not after:
+                        return  # guard word alone, nothing to submit
+                    transcript = after
+
+                # Voice mode interception: route to active mode instead of submitting.
+                # Must happen before guard check so note mode captures all speech,
+                # not just guard-prefixed utterances.
+                mode = self.get_voice_mode(session_id)
+                if mode:
+                    mode.on_transcript(transcript)
+                    return
 
                 # If guard is enabled, require guard word
                 if self.is_guard_enabled(session_id):
                     if not match:
                         logger.info("[guard] session %s: no guard word, discarding", session_id)
                         return
-                    # Strip guard word + everything before it
-                    after = transcript[match[1]:].strip()
-                    if not after:
-                        return  # guard word alone, nothing to submit
-                    transcript = after
 
                 # Ring0 routing: if enabled, route to Ring0 session
                 if self._ring0_manager and self._ring0_manager.is_enabled:
@@ -520,6 +636,18 @@ class WebRTCManager:
 
     async def close_connection(self, session_id: str) -> None:
         """Close and remove the peer connection for *session_id*."""
+        # Flush active voice mode (deliver interrupted note)
+        mode = self._voice_modes.pop(session_id, None)
+        if mode and self._ws_bridge:
+            result = mode.on_disconnect()
+            if result:
+                client_id_for_mode = self._client_ids.get(session_id, "")
+                logger.info("[voice-mode] session %s: flushing on disconnect", session_id)
+                if self._ring0_manager and self._ring0_manager.is_enabled and self._ring0_manager.session_id:
+                    await self._ws_bridge.submit_user_message(self._ring0_manager.session_id, result, source_client_id=client_id_for_mode)
+                else:
+                    await self._ws_bridge.submit_user_message(session_id, result, source_client_id=client_id_for_mode)
+
         pc = self._connections.pop(session_id, None)
         self._stats.pop(session_id, None)
         self._outgoing_tracks.pop(session_id, None)

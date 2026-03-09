@@ -174,6 +174,7 @@ export function stopWebRTC(sessionId: string): void {
   store.setIsRecording(false);
   store.setWebRTCStatus(null);
   store.setWebRTCTransport(null);
+  store.setVoiceMode(null);
 }
 
 export function isWebRTCActive(sessionId: string): boolean {
@@ -293,6 +294,13 @@ export async function startPlaygroundWebRTC(profileId?: string): Promise<string>
   playgroundSession = { pc, localStream, ws, sessionId };
   (_pw.__v8_playground as unknown) = playgroundSession;
 
+  // Mute main session(s) so playground testing doesn't reach the agent
+  for (const [, session] of rtcSessions) {
+    for (const track of session.localStream.getAudioTracks()) {
+      track.enabled = false;
+    }
+  }
+
   return sessionId;
 }
 
@@ -321,6 +329,13 @@ export async function stopPlaygroundWebRTC(): Promise<void> {
   session.pc.close();
   if (session.ws.readyState === WebSocket.OPEN || session.ws.readyState === WebSocket.CONNECTING) {
     session.ws.close();
+  }
+
+  // Unmute main session(s)
+  for (const [, session] of rtcSessions) {
+    for (const track of session.localStream.getAudioTracks()) {
+      track.enabled = true;
+    }
   }
 
   const store = useStore.getState();

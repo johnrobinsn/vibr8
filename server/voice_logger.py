@@ -7,6 +7,7 @@ or the STT ThreadWorker.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ class VoiceLogger:
         self._base = DATA_DIR / "voice" / "logs" / user
         self._segments_dir = self._base / "segments"
         self._recordings_dir = self._base / "recordings"
+        self._seg_params_dir = self._base / "seg_params"
         self._index_path = self._base / "index.jsonl"
 
         # Recording state
@@ -100,6 +102,26 @@ class VoiceLogger:
 
         await asyncio.to_thread(_write)
 
+    def _ensure_seg_params(self, params_dict: dict, profile_id: str | None, profile_name: str | None) -> str:
+        """Compute content-addressed ID for params and write file if new. Returns ID."""
+        # Hash only the param values (sorted, deterministic)
+        canonical = json.dumps(params_dict, sort_keys=True, separators=(",", ":"))
+        hash_id = hashlib.sha256(canonical.encode()).hexdigest()[:12]
+
+        self._seg_params_dir.mkdir(parents=True, exist_ok=True)
+        path = self._seg_params_dir / f"{hash_id}.json"
+        if not path.exists():
+            record = {
+                "id": hash_id,
+                "profileId": profile_id,
+                "profileName": profile_name,
+                "params": params_dict,
+                "createdAt": time.time(),
+            }
+            path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+            logger.debug("[voice-log] New seg_params %s", hash_id)
+        return hash_id
+
     async def log_segment(self, audio_16k: np.ndarray, transcript_data: dict) -> str:
         """Write segment WAV and append to JSONL index. Returns segment_id."""
         segment_id = str(uuid.uuid4())
@@ -114,6 +136,20 @@ class VoiceLogger:
             "profileId": transcript_data.get("profileId"),
             "createdAt": time.time(),
         }
+
+        # Content-addressed seg_params if params are present
+        params_dict = transcript_data.get("params")
+        if params_dict:
+            seg_params_id = self._ensure_seg_params(
+                params_dict,
+                transcript_data.get("profileId"),
+                transcript_data.get("profileName"),
+            )
+            entry["segParamsId"] = seg_params_id
+
+        eou_prob = transcript_data.get("eouProb")
+        if eou_prob is not None:
+            entry["eouProb"] = eou_prob
 
         def _write_segment():
             self._segments_dir.mkdir(parents=True, exist_ok=True)
@@ -252,6 +288,33 @@ def list_recordings(username: str) -> list[dict]:
                 continue
     recordings.sort(key=lambda r: r.get("startedAt", 0), reverse=True)
     return recordings
+
+
+def get_seg_params(username: str, seg_params_id: str) -> dict | None:
+    """Read a single seg_params record by ID."""
+    p = DATA_DIR / "voice" / "logs" / username / "seg_params" / f"{seg_params_id}.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def list_seg_params(username: str) -> list[dict]:
+    """List all seg_params records for a user."""
+    d = DATA_DIR / "voice" / "logs" / username / "seg_params"
+    if not d.exists():
+        return []
+    results: list[dict] = []
+    for f in d.iterdir():
+        if f.suffix == ".json":
+            try:
+                results.append(json.loads(f.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+    results.sort(key=lambda r: r.get("createdAt", 0), reverse=True)
+    return results
 
 
 def clear_all_logs(username: str) -> bool:
