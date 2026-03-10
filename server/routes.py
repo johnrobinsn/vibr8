@@ -684,6 +684,7 @@ def create_routes(
                 "cwd": info.cwd,
                 "backendType": info.backendType,
                 "archived": info.archived,
+                "pendingPermissions": ws_bridge.get_pending_permission_count(sid),
             })
         return web.json_response(sessions)
 
@@ -752,7 +753,8 @@ def create_routes(
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         messages = ws_bridge.get_message_history(resolved)
-        return web.json_response({"messages": messages})
+        pending = ws_bridge.get_pending_permissions(resolved)
+        return web.json_response({"messages": messages, "pendingPermissions": pending})
 
     @routes.get("/api/ring0/clients")
     async def ring0_clients(request: web.Request) -> web.Response:
@@ -782,6 +784,29 @@ def create_routes(
             return web.json_response({"error": err_str}, status=status)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
+
+    @routes.post("/api/ring0/respond-permission")
+    async def ring0_respond_permission(request: web.Request) -> web.Response:
+        """Allow or deny a pending permission request (used by Ring0 MCP)."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        session_id = body.get("sessionId", "")
+        request_id = body.get("requestId", "")
+        behavior = body.get("behavior", "")
+        message = body.get("message", "")
+        if not session_id or not request_id or behavior not in ("allow", "deny"):
+            return web.json_response(
+                {"error": "sessionId, requestId, and behavior (allow/deny) required"}, status=400
+            )
+        resolved = _resolve_session_id(session_id, launcher)
+        if not resolved:
+            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+        ok = await ws_bridge.respond_to_permission(resolved, request_id, behavior, message)
+        if not ok:
+            return web.json_response({"error": f"Permission {request_id} not found"}, status=404)
+        return web.json_response({"ok": True})
 
     # ── Voice Profiles ──────────────────────────────────────────────────
 

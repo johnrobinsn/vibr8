@@ -56,7 +56,9 @@ async def list_sessions() -> str:
         archived = s.get("archived", False)
         if archived:
             continue
-        lines.append(f"- {name} (id={sid[:8]}, state={state}, type={backend}, cwd={cwd})")
+        pending = s.get("pendingPermissions", 0)
+        perm_info = f", BLOCKED: {pending} pending permission(s)" if pending else ""
+        lines.append(f"- {name} (id={sid[:8]}, state={state}, type={backend}, cwd={cwd}{perm_info})")
     return "\n".join(lines) if lines else "No active sessions."
 
 
@@ -98,7 +100,9 @@ async def get_session_output(session_id: str) -> str:
     """
     result = await _get(f"/ring0/session-output/{session_id}")
     messages = result.get("messages", [])
-    if not messages:
+    permissions = result.get("pendingPermissions", [])
+
+    if not messages and not permissions:
         return "No messages in this session yet."
 
     lines = []
@@ -120,6 +124,17 @@ async def get_session_output(session_id: str) -> str:
             data = msg.get("data", {})
             if data.get("is_error"):
                 lines.append(f"Error: {', '.join(data.get('errors', []))}")
+
+    if permissions:
+        lines.append("")
+        lines.append("--- PENDING PERMISSIONS (session is blocked, waiting for response) ---")
+        for perm in permissions:
+            rid = perm.get("request_id", "?")[:8]
+            tool = perm.get("tool_name", "?")
+            desc = perm.get("description", "")
+            inp = json.dumps(perm.get("input", {}))[:300]
+            lines.append(f"  [{rid}] {tool}: {desc or inp}")
+
     return "\n".join(lines) if lines else "No readable messages."
 
 
@@ -139,6 +154,31 @@ async def get_active_clients() -> str:
 
 
 @mcp.tool()
+async def respond_to_permission(session_id: str, request_id: str, behavior: str, message: str = "") -> str:
+    """Respond to a pending permission request in a session.
+
+    Use get_session_output to see pending permissions and their request IDs.
+
+    Args:
+        session_id: The session ID containing the permission.
+        request_id: The permission request ID (shown in brackets in get_session_output).
+        behavior: "allow" or "deny".
+        message: Optional reason message (used when denying).
+    """
+    if behavior not in ("allow", "deny"):
+        return "Error: behavior must be 'allow' or 'deny'."
+    result = await _post("/ring0/respond-permission", {
+        "sessionId": session_id,
+        "requestId": request_id,
+        "behavior": behavior,
+        "message": message,
+    })
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    return f"Permission {request_id[:8]} {behavior}ed."
+
+
+@mcp.tool()
 async def query_client(client_id: str, method: str, params: str = "") -> str:
     """Send an RPC query to a specific browser client and get their response.
 
@@ -152,6 +192,8 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
             - "read_clipboard" — read clipboard text (may prompt user)
             - "write_clipboard" — write text to clipboard. params: {"text": "..."}
             - "open_url" — open a URL in a new tab/window. params: {"url": "..."}
+            - "list_audio_devices" — list available audio output devices. No params.
+            - "set_audio_output" — set the audio output device. params: {"deviceId": "..."}
         params: Optional JSON string of parameters to pass to the method (e.g., '{"title": "Hello", "body": "World"}').
     """
     body: dict[str, Any] = {"clientId": client_id, "method": method}

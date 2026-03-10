@@ -13,7 +13,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from server.cli_launcher import CliLauncher
@@ -88,6 +88,7 @@ class Ring0Manager:
         self._port = port
         self._enabled: bool = False
         self._session_id: Optional[str] = None
+        self._model: Optional[str] = None
         self._temp_dir: Optional[str] = None
         self._load_state()
 
@@ -156,6 +157,7 @@ class Ring0Manager:
         # Launch CLI session
         from server.cli_launcher import LaunchOptions
         options = LaunchOptions(
+            model=self._model,
             permissionMode="bypassPermissions",
             cwd=self._temp_dir,
             mcpConfig=str(mcp_config_path),
@@ -178,6 +180,7 @@ class Ring0Manager:
                 data = json.loads(RING0_CONFIG_PATH.read_text())
                 self._enabled = data.get("enabled", False)
                 self._session_id = data.get("sessionId")
+                self._model = data.get("model")
                 if self._session_id:
                     session_names.set_name(self._session_id, "Ring0", unique=False)
             except Exception:
@@ -185,5 +188,7 @@ class Ring0Manager:
 
     def _save_state(self) -> None:
         RING0_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        data = {"enabled": self._enabled, "sessionId": self._session_id}
+        data: dict[str, Any] = {"enabled": self._enabled, "sessionId": self._session_id}
+        if self._model:
+            data["model"] = self._model
         RING0_CONFIG_PATH.write_text(json.dumps(data))

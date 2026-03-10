@@ -941,6 +941,12 @@ class WsBridge:
                 },
             })
         self._send_to_cli(session, ndjson)
+        self._persist_session(session)
+        # Notify all browsers so other devices dismiss the banner.
+        await self._broadcast_to_browsers(session, {
+            "type": "permission_cancelled",
+            "request_id": request_id,
+        })
 
     def _handle_interrupt(self, session: Session) -> None:
         ndjson = json.dumps({
@@ -1118,6 +1124,67 @@ class WsBridge:
         if not session:
             return []
         return list(session.message_history)
+
+    def get_pending_permissions(self, session_id: str) -> list[dict[str, Any]]:
+        """Get pending permission requests for a session."""
+        session = self._sessions.get(session_id)
+        if not session:
+            return []
+        return list(session.pending_permissions.values())
+
+    def get_pending_permission_count(self, session_id: str) -> int:
+        """Get the number of pending permission requests for a session."""
+        session = self._sessions.get(session_id)
+        if not session:
+            return 0
+        return len(session.pending_permissions)
+
+    async def respond_to_permission(
+        self, session_id: str, request_id: str, behavior: str, message: str = ""
+    ) -> bool:
+        """Respond to a pending permission request (used by Ring0 MCP).
+
+        Returns True if the permission was found and responded to.
+        """
+        session = self._sessions.get(session_id)
+        if not session:
+            return False
+        pending = session.pending_permissions.pop(request_id, None)
+        if not pending:
+            return False
+
+        if behavior == "allow":
+            response: dict[str, Any] = {
+                "behavior": "allow",
+                "updatedInput": pending.get("input", {}),
+            }
+            ndjson = json.dumps({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": response,
+                },
+            })
+        else:
+            ndjson = json.dumps({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {
+                        "behavior": "deny",
+                        "message": message or "Denied by ring0",
+                    },
+                },
+            })
+        self._send_to_cli(session, ndjson)
+        self._persist_session(session)
+        await self._broadcast_to_browsers(session, {
+            "type": "permission_cancelled",
+            "request_id": request_id,
+        })
+        return True
 
     async def _broadcast_to_browsers(self, session: Session, msg: dict[str, Any]) -> None:
         msg_type = msg.get("type")

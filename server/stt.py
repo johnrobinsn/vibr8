@@ -57,12 +57,19 @@ class STTParams:
 
 # Common Whisper hallucination patterns on silence/noise
 _HALLUCINATION_PATTERNS = {
+    # YouTube-style hallucinations
     "thank you", "thanks for watching", "thank you for watching",
     "thanks for listening", "thank you for listening",
     "subscribe", "like and subscribe", "please subscribe",
     "subtitle", "subtitles", "subtitled by",
     "you", "bye", "the end",
     "...", "…",
+    # Short utterance hallucinations (common on breath/noise)
+    "oh", "hmm", "um", "uh", "yeah", "ha", "whoa", "and", "the", "what",
+    "okay", "ok", "so", "well", "right", "hey", "ah", "huh",
+    # Transcription service hallucinations
+    "transcription by castingwords", "amara org",
+    "satsang with mooji",
 }
 
 

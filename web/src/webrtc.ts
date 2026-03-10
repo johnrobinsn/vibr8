@@ -14,6 +14,11 @@ const rtcSessions = (_w.__v8_rtcSessions ??= new Map<string, WebRTCSession>()) a
 export async function startWebRTC(sessionId: string): Promise<void> {
   if (rtcSessions.has(sessionId)) return;
 
+  // Only one WebRTC session at a time — close any existing one first.
+  for (const [existingId] of rtcSessions) {
+    stopWebRTC(existingId);
+  }
+
   // Show blinking "connecting" state immediately
   const store0 = useStore.getState();
   store0.setAudioSessionId(sessionId);
@@ -179,6 +184,14 @@ export function stopWebRTC(sessionId: string): void {
 
 export function isWebRTCActive(sessionId: string): boolean {
   return rtcSessions.has(sessionId);
+}
+
+/** Return the active remote audio element (for setSinkId, etc.), or null. */
+export function getRemoteAudio(): HTMLAudioElement | null {
+  for (const [, session] of rtcSessions) {
+    return session.remoteAudio;
+  }
+  return null;
 }
 
 // ── Playground WebRTC ──────────────────────────────────────────────────────

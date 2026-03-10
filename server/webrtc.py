@@ -221,11 +221,20 @@ class WebRTCManager:
         else:
             self._voice_modes[session_id] = mode
             logger.info("[voice-mode] session %s: entered %s mode", session_id, mode.name)
-        # Broadcast to browser
+        # Broadcast to browser — send to both the WebRTC session and the
+        # ring0 session (if active), since the browser may only have a WS
+        # connected to whichever session it's currently viewing.
         if self._ws_bridge:
+            mode_name = mode.name if mode else None
             asyncio.ensure_future(
-                self._ws_bridge.broadcast_voice_mode(session_id, mode.name if mode else None)
+                self._ws_bridge.broadcast_voice_mode(session_id, mode_name)
             )
+            if self._ring0_manager and self._ring0_manager.is_enabled:
+                ring0_sid = self._ring0_manager.session_id
+                if ring0_sid and ring0_sid != session_id:
+                    asyncio.ensure_future(
+                        self._ws_bridge.broadcast_voice_mode(ring0_sid, mode_name)
+                    )
 
     async def handle_offer(
         self, session_id: str, sdp: str, sdp_type: str, client_id: str = "",
@@ -376,50 +385,8 @@ class WebRTCManager:
                 match = self._find_guard_word(transcript_lower)
                 if match:
                     after_word = transcript_lower[match[1]:].strip().lstrip(".,;:!?- ").strip()
-                    if after_word.startswith("off"):
-                        # Disconnect audio entirely
-                        if self._ws_bridge:
-                            asyncio.ensure_future(
-                                self._ws_bridge.broadcast_audio_off(session_id)
-                            )
-                        return
-                    if after_word.startswith("guard"):
-                        self.set_guard_enabled(session_id, True)
-                        asyncio.ensure_future(self._speak_short(session_id, "Guard on"))
-                        return
-                    if after_word.startswith("listen"):
-                        self.set_guard_enabled(session_id, False)
-                        asyncio.ensure_future(self._speak_short(session_id, "Listening"))
-                        return
-                    if after_word.startswith("quiet"):
-                        self.set_tts_muted(session_id, True)
-                        asyncio.ensure_future(self._speak_short(session_id, "Quiet mode"))
-                        return
-                    if after_word.startswith("speak"):
-                        self.set_tts_muted(session_id, False)
-                        asyncio.ensure_future(self._speak_short(session_id, "Speaking"))
-                        return
-                    if after_word.startswith("ring zero on") or after_word.startswith("ring 0 on"):
-                        if self._ring0_manager:
-                            self._ring0_manager.enable()
-                            asyncio.ensure_future(self._speak_short(session_id, "Ring zero on"))
-                        return
-                    if after_word.startswith("ring zero off") or after_word.startswith("ring 0 off"):
-                        if self._ring0_manager:
-                            self._ring0_manager.disable()
-                            asyncio.ensure_future(self._speak_short(session_id, "Ring zero off"))
-                        return
-                    if after_word.startswith("note"):
-                        # Enter note mode
-                        existing = self.get_voice_mode(session_id)
-                        if existing and existing.name == "note":
-                            asyncio.ensure_future(self._speak_short(session_id, "Already in note mode"))
-                        else:
-                            self.set_voice_mode(session_id, NoteMode())
-                            asyncio.ensure_future(self._speak_short(session_id, "Note mode"))
-                        return
+                    # "done" is always honored — even inside voice modes (e.g. note mode).
                     if after_word.startswith("done"):
-                        # Exit current mode and deliver accumulated content
                         mode = self.get_voice_mode(session_id)
                         if not mode:
                             asyncio.ensure_future(self._speak_short(session_id, "No active mode"))
@@ -438,20 +405,65 @@ class WebRTCManager:
                                 return
                         await self._ws_bridge.submit_user_message(session_id, result, source_client_id=client_id)
                         return
-                    # "vibr8 vibrate" → literal "vibrate" (fall through)
-                    if after_word.startswith("vibrate"):
-                        transcript = "vibrate" + transcript[match[1]:][len("vibrate"):].strip()
-                        if after_word == "vibrate":
-                            transcript = "vibrate"
-                        match = None  # already handled, skip guard stripping
-                        # Fall through to normal processing
-                    # "vibr8 app" → literal "vibr8" (fall through)
-                    elif after_word.startswith("app"):
-                        remaining = transcript[match[1]:].strip()
-                        remaining = remaining[3:].strip() if remaining.lower().startswith("app") else remaining
-                        transcript = "vibr8" + (" " + remaining if remaining else "")
-                        match = None  # already handled, skip guard stripping
-                        # Fall through to normal processing
+                    # In voice mode (e.g. note mode), only "done" is recognized.
+                    # All other guard-prefixed speech falls through to fragment capture.
+                    if not self.get_voice_mode(session_id):
+                        if after_word.startswith("off"):
+                            # Disconnect audio entirely
+                            if self._ws_bridge:
+                                asyncio.ensure_future(
+                                    self._ws_bridge.broadcast_audio_off(session_id)
+                                )
+                            return
+                        if after_word.startswith("guard"):
+                            self.set_guard_enabled(session_id, True)
+                            asyncio.ensure_future(self._speak_short(session_id, "Guard on"))
+                            return
+                        if after_word.startswith("listen"):
+                            self.set_guard_enabled(session_id, False)
+                            asyncio.ensure_future(self._speak_short(session_id, "Listening"))
+                            return
+                        if after_word.startswith("quiet"):
+                            self.set_tts_muted(session_id, True)
+                            asyncio.ensure_future(self._speak_short(session_id, "Quiet mode"))
+                            return
+                        if after_word.startswith("speak"):
+                            self.set_tts_muted(session_id, False)
+                            asyncio.ensure_future(self._speak_short(session_id, "Speaking"))
+                            return
+                        if after_word.startswith("ring zero on") or after_word.startswith("ring 0 on"):
+                            if self._ring0_manager:
+                                self._ring0_manager.enable()
+                                asyncio.ensure_future(self._speak_short(session_id, "Ring zero on"))
+                            return
+                        if after_word.startswith("ring zero off") or after_word.startswith("ring 0 off"):
+                            if self._ring0_manager:
+                                self._ring0_manager.disable()
+                                asyncio.ensure_future(self._speak_short(session_id, "Ring zero off"))
+                            return
+                        if after_word.startswith("note"):
+                            existing = self.get_voice_mode(session_id)
+                            if existing and existing.name == "note":
+                                asyncio.ensure_future(self._speak_short(session_id, "Already in note mode"))
+                            else:
+                                self.set_voice_mode(session_id, NoteMode())
+                                asyncio.ensure_future(self._speak_short(session_id, "Note mode"))
+                            return
+                        # Escape sequences: replace guard word with literal word,
+                        # propagate remaining text.
+                        # "vibr8 vibrate ..." → "vibrate ..."
+                        if after_word.startswith("vibrate"):
+                            remaining = transcript[match[1]:].strip().lstrip(".,;:!?- ")
+                            # Strip the "vibrate" keyword, keep the rest
+                            remaining = remaining[7:].strip() if remaining.lower().startswith("vibrate") else remaining
+                            transcript = "vibrate" + (" " + remaining if remaining else "")
+                            match = None
+                        # "vibr8 app ..." → "vibr8 ..."
+                        elif after_word.startswith("app"):
+                            remaining = transcript[match[1]:].strip()
+                            remaining = remaining[3:].strip() if remaining.lower().startswith("app") else remaining
+                            transcript = "vibr8" + (" " + remaining if remaining else "")
+                            match = None
 
                 # If guard word was found but no command matched, strip it.
                 if match:
@@ -560,9 +572,13 @@ class WebRTCManager:
             stt.update_params(params)
 
     async def _speak_short(self, session_id: str, phrase: str) -> None:
-        """Speak a short acknowledgment phrase via TTS (e.g. 'Guard on')."""
+        """Speak a short acknowledgment phrase via TTS (e.g. 'Guard on').
+
+        Respects the TTS mute setting — if the user has switched to
+        mic-only mode, acknowledgments are also silenced.
+        """
         track = self.get_outgoing_track(session_id)
-        if not track:
+        if not track or self.is_tts_muted(session_id):
             return
         try:
             from server.tts import TTS_OpenAI

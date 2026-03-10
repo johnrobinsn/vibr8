@@ -1,5 +1,5 @@
 import { useStore } from "./store.js";
-import { stopWebRTC } from "./webrtc.js";
+import { stopWebRTC, getRemoteAudio } from "./webrtc.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem } from "./types.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
 
@@ -507,6 +507,45 @@ function handleMessage(sessionId: string, event: MessageEvent) {
         } else {
           window.open(url, "_blank");
           response = { type: "rpc_response", id: rpcId, result: { opened: true, url } };
+        }
+      } else if (method === "list_audio_devices") {
+        if (!navigator.mediaDevices?.enumerateDevices) {
+          response = { type: "rpc_response", id: rpcId, error: "enumerateDevices not supported", errorCode: "not_supported" };
+        } else {
+          navigator.mediaDevices.enumerateDevices().then(
+            (devices) => {
+              const outputs = devices
+                .filter((d) => d.kind === "audiooutput")
+                .map((d) => ({ deviceId: d.deviceId, label: d.label || d.deviceId }));
+              sendToSession(sessionId, { type: "rpc_response", id: rpcId, result: { devices: outputs } } as BrowserOutgoingMessage);
+            },
+            (err) => {
+              sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: `enumerateDevices error: ${(err as Error).message}` } as BrowserOutgoingMessage);
+            },
+          );
+          break; // async
+        }
+      } else if (method === "set_audio_output") {
+        const deviceId = (data.params as Record<string, string> | undefined)?.deviceId;
+        if (!deviceId) {
+          response = { type: "rpc_response", id: rpcId, error: "No deviceId param provided", errorCode: "missing_param" };
+        } else {
+          const audio = getRemoteAudio();
+          if (!audio) {
+            response = { type: "rpc_response", id: rpcId, error: "No active WebRTC audio", errorCode: "no_audio" };
+          } else if (!(audio as any).setSinkId) {
+            response = { type: "rpc_response", id: rpcId, error: "setSinkId not supported in this browser", errorCode: "not_supported" };
+          } else {
+            (audio as any).setSinkId(deviceId).then(
+              () => {
+                sendToSession(sessionId, { type: "rpc_response", id: rpcId, result: { set: true, deviceId } } as BrowserOutgoingMessage);
+              },
+              (err: Error) => {
+                sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: `setSinkId error: ${err.message}` } as BrowserOutgoingMessage);
+              },
+            );
+            break; // async
+          }
         }
       } else {
         response = { type: "rpc_response", id: rpcId, error: `unknown method: ${method}` };
