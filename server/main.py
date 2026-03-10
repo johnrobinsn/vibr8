@@ -415,6 +415,11 @@ def create_app() -> web.Application:
 
             spawn(_watchdog())
 
+        # Auto-launch ring0 session if it was previously enabled
+        if ring0_manager.is_enabled:
+            logger.info("[server] Ring0 was enabled — auto-launching session")
+            spawn(ring0_manager.ensure_session(launcher, ws_bridge))
+
     app.on_startup.append(on_startup)
 
     async def on_shutdown(app: web.Application) -> None:

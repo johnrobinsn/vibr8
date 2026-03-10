@@ -35,6 +35,8 @@ export function Sidebar() {
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const sidebarListRef = useRef<HTMLDivElement>(null);
   const newSessionRef = useRef<HTMLButtonElement>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressTriggered = useRef(false);
 
   // Focus the current session (or first session, or New Session button) when sidebar opens
   // Skip on initial mount — only focus when user actively toggles the sidebar open
@@ -318,6 +320,11 @@ export function Sidebar() {
   const currentSession = currentSessionId ? allSessionList.find((s) => s.id === currentSessionId) : null;
   const logoSrc = currentSession?.backendType === "codex" ? "/logo-codex.svg" : "/logo.svg";
 
+  function startRename(id: string, currentLabel: string) {
+    setEditingSessionId(id);
+    setEditingName(currentLabel);
+  }
+
   function renderSessionItem(s: typeof allSessionList[number], options?: { isArchived?: boolean }) {
     const isActive = currentSessionId === s.id;
     const name = sessionNames.get(s.id);
@@ -343,10 +350,43 @@ export function Sidebar() {
           }}
           onDoubleClick={(e) => {
             e.preventDefault();
-            setEditingSessionId(s.id);
-            setEditingName(label);
+            startRename(s.id, label);
           }}
+          onTouchStart={(e) => {
+            // preventDefault on touchstart suppresses ALL native long-press behavior
+            // (text selection, context menu, magnifier). This also kills the
+            // synthesized click, so we handle tap manually in onTouchEnd.
+            e.preventDefault();
+            longPressTriggered.current = false;
+            longPressTimer.current = setTimeout(() => {
+              longPressTriggered.current = true;
+              startRename(s.id, label);
+            }, 500);
+          }}
+          onTouchEnd={() => {
+            if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+            // Short tap → navigate (since preventDefault on touchstart killed native click)
+            if (!longPressTriggered.current) {
+              if (!isEditing) handleSelectSession(s.id);
+            }
+            longPressTriggered.current = false;
+          }}
+          onTouchCancel={() => {
+            if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+            longPressTriggered.current = false;
+          }}
+          onTouchMove={() => {
+            // Cancel long press if finger moves (scroll gesture)
+            if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+          }}
+          onContextMenu={(e) => e.preventDefault()}
           onKeyDown={(e) => {
+            // F2 or Ctrl+E to rename
+            if (e.key === "F2" || (e.ctrlKey && e.key === "e")) {
+              e.preventDefault();
+              startRename(s.id, label);
+              return;
+            }
             if (e.key === "ArrowDown" || e.key === "ArrowUp") {
               e.preventDefault();
               const items = Array.from(
@@ -358,6 +398,7 @@ export function Sidebar() {
             }
           }}
           data-session-btn
+          style={{ WebkitUserSelect: "none", userSelect: "none" } as React.CSSProperties}
           className={`w-full px-3 py-2.5 ${archived ? "pr-14" : "pr-8"} text-left rounded-[10px] transition-all duration-100 cursor-pointer ${
             isActive
               ? "bg-cc-active"
