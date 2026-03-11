@@ -20,6 +20,7 @@ interface AppState {
   sessions: Map<string, SessionState>;
   sdkSessions: SdkSessionInfo[];
   currentSessionId: string | null;
+  sessionsLoaded: boolean;
 
   // Messages per session
   messages: Map<string, ChatMessage[]>;
@@ -196,7 +197,8 @@ export const useStore = create<AppState>((set) => ({
   clientId: getClientId(),
   sessions: new Map(),
   sdkSessions: [],
-  currentSessionId: null,
+  currentSessionId: typeof window !== "undefined" ? localStorage.getItem("cc-last-session") : null,
+  sessionsLoaded: false,
   messages: new Map(),
   streaming: new Map(),
   streamingStartedAt: new Map(),
@@ -367,7 +369,9 @@ export const useStore = create<AppState>((set) => ({
           changed = true;
         }
       }
-      return changed ? { sdkSessions: sessions, sessionNames: names } : { sdkSessions: sessions };
+      return changed
+        ? { sdkSessions: sessions, sessionNames: names, sessionsLoaded: true }
+        : { sdkSessions: sessions, sessionsLoaded: true };
     });
   },
 

@@ -153,6 +153,8 @@ export default function App() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [sidebarOpen, taskPanelOpen, ring0SessionId]);
 
+  const sessionsLoaded = useStore((s) => s.sessionsLoaded);
+
   if (authState === "loading") return null;
   if (authState === "login") return <LoginPage onLogin={() => setAuthState("authenticated")} />;
 

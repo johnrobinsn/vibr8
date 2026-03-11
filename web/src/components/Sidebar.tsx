@@ -94,24 +94,35 @@ export function Sidebar() {
             }
           }
 
-          // On first load, restore last session (or pick the most recent active one)
-          if (isFirstPoll && !store.currentSessionId && list.length > 0) {
-            isFirstPoll = false;
+          // On first load, validate/restore the current session
+          if (isFirstPoll) {
             const activeSessions = list.filter((s) => !s.archived);
-            if (activeSessions.length > 0) {
-              const lastId = localStorage.getItem("cc-last-session");
-              const lastSession = lastId ? activeSessions.find((s) => s.sessionId === lastId) : null;
-              const target = lastSession || activeSessions.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0];
+            const currentId = store.currentSessionId;
+            // Check if the eagerly-restored session still exists and is active
+            const currentValid = currentId && activeSessions.some((s) => s.sessionId === currentId);
+
+            if (currentValid) {
+              // Session exists — just connect it
+              const target = activeSessions.find((s) => s.sessionId === currentId)!;
+              const isTerminal = target.backendType === "terminal";
+              store.setPendingFocus(isTerminal ? "terminal" : "composer");
+              store.setSidebarOpen(false);
+              if (!isTerminal) {
+                connectSession(currentId);
+              }
+            } else if (activeSessions.length > 0) {
+              // Saved session gone — pick most recent
+              const target = activeSessions.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0];
               const isTerminal = target.backendType === "terminal";
               store.setCurrentSession(target.sessionId);
               store.setPendingFocus(isTerminal ? "terminal" : "composer");
-              // Close sidebar so it doesn't compete for focus
               store.setSidebarOpen(false);
               if (!isTerminal) {
                 connectSession(target.sessionId);
               }
             } else {
-              // No active sessions — show sidebar so user sees "New Session"
+              // No active sessions — clear any stale session ID, show sidebar
+              if (currentId) store.setCurrentSession(null);
               store.setSidebarOpen(true);
             }
           }
@@ -181,7 +192,7 @@ export function Sidebar() {
     if (editingSessionId && editingName.trim()) {
       const sid = editingSessionId;
       const newName = editingName.trim();
-      const oldName = useStore.getState().sessions.get(sid)?.name;
+      const oldName = useStore.getState().sessionNames.get(sid);
       useStore.getState().setSessionName(sid, newName);
       api.renameSession(sid, newName).catch(() => {
         // Revert on failure (e.g. Ring0 cannot be renamed)
