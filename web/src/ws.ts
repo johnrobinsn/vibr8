@@ -100,10 +100,12 @@ function nextId(): string {
   return `msg-${Date.now()}-${++idCounter}`;
 }
 
-function getWsUrl(sessionId: string): string {
+export function getWsUrl(sessionId: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const clientId = useStore.getState().clientId;
-  return `${proto}//${location.host}/ws/browser/${sessionId}?clientId=${encodeURIComponent(clientId)}`;
+  const { clientId, clientRole } = useStore.getState();
+  let url = `${proto}//${location.host}/ws/browser/${sessionId}?clientId=${encodeURIComponent(clientId)}`;
+  if (clientRole !== "primary") url += `&role=${encodeURIComponent(clientRole)}`;
+  return url;
 }
 
 function extractTextFromBlocks(blocks: ContentBlock[]): string {
@@ -117,7 +119,7 @@ function extractTextFromBlocks(blocks: ContentBlock[]): string {
     .join("\n");
 }
 
-function handleMessage(sessionId: string, event: MessageEvent) {
+export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?: WebSocket) {
   const store = useStore.getState();
   let data: BrowserIncomingMessage;
   try {
@@ -370,6 +372,14 @@ function handleMessage(sessionId: string, event: MessageEvent) {
       const rpcId = data.id as string;
       const method = data.method as string;
       console.log(`[ws] RPC request: method=${method} id=${rpcId} session=${sessionId.slice(0,8)} params=`, (data as any).params);
+      // Helper to send RPC responses via the source WS (for second screen) or global sockets
+      const rpcSend = (msg: Record<string, unknown>) => {
+        if (sourceWs?.readyState === WebSocket.OPEN) {
+          sourceWs.send(JSON.stringify(msg));
+        } else {
+          sendToSession(sessionId, msg as BrowserOutgoingMessage);
+        }
+      };
       let response: Record<string, unknown>;
       try {
 
@@ -397,7 +407,7 @@ function handleMessage(sessionId: string, event: MessageEvent) {
         } else {
           navigator.geolocation.getCurrentPosition(
             (pos) => {
-              sendToSession(sessionId, {
+              rpcSend({
                 type: "rpc_response",
                 id: rpcId,
                 result: {
@@ -407,19 +417,19 @@ function handleMessage(sessionId: string, event: MessageEvent) {
                   altitude: pos.coords.altitude,
                   timestamp: pos.timestamp,
                 },
-              } as BrowserOutgoingMessage);
+              });
             },
             (err) => {
               const reason = err.code === 1 ? "permission_denied"
                 : err.code === 2 ? "position_unavailable"
                 : err.code === 3 ? "timeout"
                 : "unknown";
-              sendToSession(sessionId, {
+              rpcSend({
                 type: "rpc_response",
                 id: rpcId,
                 error: `Geolocation error: ${err.message}`,
                 errorCode: reason,
-              } as BrowserOutgoingMessage);
+              });
             },
             { enableHighAccuracy: false, timeout: 10000 },
           );
@@ -452,9 +462,9 @@ function handleMessage(sessionId: string, event: MessageEvent) {
               } else {
                 try { new Notification(ntitle, { body: nbody }); } catch { /* fallback */ }
               }
-              sendToSession(sessionId, { type: "rpc_response", id: rpcId, result: { sent: true, permission: "granted" } } as BrowserOutgoingMessage);
+              rpcSend({ type: "rpc_response", id: rpcId, result: { sent: true, permission: "granted" } });
             } else {
-              sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: "Notification permission denied by user", errorCode: "permission_denied" } as BrowserOutgoingMessage);
+              rpcSend({ type: "rpc_response", id: rpcId, error: "Notification permission denied by user", errorCode: "permission_denied" });
             }
           });
           break; // async
@@ -475,11 +485,11 @@ function handleMessage(sessionId: string, event: MessageEvent) {
         } else {
           navigator.clipboard.readText().then(
             (text) => {
-              sendToSession(sessionId, { type: "rpc_response", id: rpcId, result: { text } } as BrowserOutgoingMessage);
+              rpcSend({ type: "rpc_response", id: rpcId, result: { text } });
             },
             (err) => {
               const reason = (err as DOMException).name === "NotAllowedError" ? "permission_denied" : "read_failed";
-              sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: `Clipboard read error: ${(err as Error).message}`, errorCode: reason } as BrowserOutgoingMessage);
+              rpcSend({ type: "rpc_response", id: rpcId, error: `Clipboard read error: ${(err as Error).message}`, errorCode: reason });
             },
           );
           break; // async
@@ -491,11 +501,11 @@ function handleMessage(sessionId: string, event: MessageEvent) {
         } else {
           navigator.clipboard.writeText(text).then(
             () => {
-              sendToSession(sessionId, { type: "rpc_response", id: rpcId, result: { written: true } } as BrowserOutgoingMessage);
+              rpcSend({ type: "rpc_response", id: rpcId, result: { written: true } });
             },
             (err) => {
               const reason = (err as DOMException).name === "NotAllowedError" ? "permission_denied" : "write_failed";
-              sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: `Clipboard write error: ${(err as Error).message}`, errorCode: reason } as BrowserOutgoingMessage);
+              rpcSend({ type: "rpc_response", id: rpcId, error: `Clipboard write error: ${(err as Error).message}`, errorCode: reason });
             },
           );
           break; // async
@@ -517,10 +527,10 @@ function handleMessage(sessionId: string, event: MessageEvent) {
               const outputs = devices
                 .filter((d) => d.kind === "audiooutput")
                 .map((d) => ({ deviceId: d.deviceId, label: d.label || d.deviceId }));
-              sendToSession(sessionId, { type: "rpc_response", id: rpcId, result: { devices: outputs } } as BrowserOutgoingMessage);
+              rpcSend({ type: "rpc_response", id: rpcId, result: { devices: outputs } });
             },
             (err) => {
-              sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: `enumerateDevices error: ${(err as Error).message}` } as BrowserOutgoingMessage);
+              rpcSend({ type: "rpc_response", id: rpcId, error: `enumerateDevices error: ${(err as Error).message}` });
             },
           );
           break; // async
@@ -538,24 +548,38 @@ function handleMessage(sessionId: string, event: MessageEvent) {
           } else {
             (audio as any).setSinkId(deviceId).then(
               () => {
-                sendToSession(sessionId, { type: "rpc_response", id: rpcId, result: { set: true, deviceId } } as BrowserOutgoingMessage);
+                rpcSend({ type: "rpc_response", id: rpcId, result: { set: true, deviceId } });
               },
               (err: Error) => {
-                sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: `setSinkId error: ${err.message}` } as BrowserOutgoingMessage);
+                rpcSend({ type: "rpc_response", id: rpcId, error: `setSinkId error: ${err.message}` });
               },
             );
             break; // async
           }
         }
+      } else if (method === "show_content") {
+        const params = data.params as Record<string, string> | undefined;
+        const contentType = params?.type ?? "markdown";
+        const content = params?.content ?? "";
+        store.setSecondScreenContent({ type: contentType, content });
+        response = { type: "rpc_response", id: rpcId, result: { shown: true, type: contentType } };
+      } else if (method === "clear_content") {
+        store.setSecondScreenContent(null);
+        response = { type: "rpc_response", id: rpcId, result: { cleared: true } };
       } else {
         response = { type: "rpc_response", id: rpcId, error: `unknown method: ${method}` };
       }
 
       console.log(`[ws] RPC response: method=${method} id=${rpcId}`, response!);
-      sendToSession(sessionId, response as BrowserOutgoingMessage);
+      // Use the source WebSocket if provided (e.g., second screen's dedicated WS)
+      if (sourceWs?.readyState === WebSocket.OPEN) {
+        sourceWs.send(JSON.stringify(response));
+      } else {
+        sendToSession(sessionId, response as BrowserOutgoingMessage);
+      }
       } catch (e) {
         console.error(`[ws] RPC handler error: method=${method} id=${rpcId}`, e);
-        sendToSession(sessionId, { type: "rpc_response", id: rpcId, error: `RPC handler error: ${(e as Error).message}` } as BrowserOutgoingMessage);
+        rpcSend({ type: "rpc_response", id: rpcId, error: `RPC handler error: ${(e as Error).message}` });
       }
       break;
     }

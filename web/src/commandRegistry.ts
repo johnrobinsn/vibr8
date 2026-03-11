@@ -107,4 +107,23 @@ export const commands: Command[] = [
       s.setTaskPanelOpen(!s.taskPanelOpen);
     },
   },
+  {
+    id: "secondscreen.pair",
+    label: "Pair Second Screen",
+    description: "Enter a pairing code from a second screen",
+    icon: "ui",
+    execute: async (ctx) => {
+      if (!ctx.param) {
+        return { needsInput: "Enter pairing code from second screen" };
+      }
+      const code = ctx.param.trim();
+      if (!code) return;
+      const clientId = useStore.getState().clientId;
+      try {
+        await api.secondScreenPair(code, clientId);
+      } catch (err) {
+        console.error("[second-screen] Pairing failed:", err);
+      }
+    },
+  },
 ];

@@ -148,8 +148,13 @@ async def get_active_clients() -> str:
     if not clients:
         return "No clients connected."
     lines = []
-    for client_id, session_id in clients.items():
-        lines.append(f"- client={client_id[:8]}... → session={session_id[:8]}...")
+    for client_id, info in clients.items():
+        if isinstance(info, dict):
+            sid = info.get("sessionId", "?")
+            role = info.get("role", "primary")
+            lines.append(f"- client={client_id[:8]}... → session={sid[:8]}... role={role}")
+        else:
+            lines.append(f"- client={client_id[:8]}... → session={info[:8]}...")
     return "\n".join(lines)
 
 
@@ -206,6 +211,84 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
     if result.get("error"):
         return f"Error: {result['error']}"
     return json.dumps(result.get("result", {}), indent=2)
+
+
+@mcp.tool()
+async def list_second_screens() -> str:
+    """List all paired second screen displays and their online/offline status.
+
+    Returns information about each paired second screen including which primary
+    client it's paired to and whether it's currently online.
+    """
+    screens = await _get("/second-screen/list")
+    if not screens:
+        return "No second screens paired."
+    lines = []
+    for s in screens:
+        status = "online" if s.get("online") else "offline"
+        lines.append(
+            f"- Screen {s['clientId'][:8]}... (status={status}, "
+            f"paired_to={s['pairedClientId'][:8]}...)"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def show_on_second_screen(
+    content: str,
+    content_type: str = "markdown",
+    client_id: str = "",
+    image_data: str = "",
+    image_mime: str = "image/png",
+) -> str:
+    """Push content to one or all connected second screen displays.
+
+    Args:
+        content: The content to display. For markdown, the markdown text.
+                 For images, a URL or empty string if using image_data.
+                 For sessions, the session ID.
+        content_type: Type of content: "markdown", "image", or "session".
+        client_id: Optional specific second screen client ID. If omitted,
+                   sends to all connected second screens.
+        image_data: Base64-encoded image bytes. Use this instead of content
+                    when you have raw image data (e.g., from PIL/matplotlib).
+                    Only used when content_type is "image".
+        image_mime: MIME type for image_data (default "image/png").
+                    Common values: "image/png", "image/jpeg", "image/webp".
+    """
+    # Build the actual content to send
+    display_content = content
+    if content_type == "image" and image_data:
+        # Construct a data URL from base64 image bytes
+        display_content = f"data:{image_mime};base64,{image_data}"
+
+    # Get all second screen clients
+    screens = await _get("/second-screen/list")
+    online_screens = [s for s in screens if s.get("online")]
+
+    if not online_screens:
+        return "No second screens are online."
+
+    targets = online_screens
+    if client_id:
+        targets = [s for s in online_screens if s["clientId"].startswith(client_id)]
+        if not targets:
+            return f"No online second screen matching '{client_id}'."
+
+    results = []
+    for screen in targets:
+        body: dict[str, Any] = {
+            "clientId": screen["clientId"],
+            "method": "show_content",
+            "params": {"type": content_type, "content": display_content},
+        }
+        result = await _post("/ring0/query-client", body)
+        if result.get("error"):
+            results.append(f"Error sending to {screen['clientId'][:8]}: {result['error']}")
+        else:
+            results.append(f"Sent to {screen['clientId'][:8]}")
+
+    return "\n".join(results)
 
 
 if __name__ == "__main__":

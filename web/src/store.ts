@@ -15,6 +15,7 @@ function getClientId(): string {
 interface AppState {
   // Per-app client identity
   clientId: string;
+  clientRole: "primary" | "secondscreen";
 
   // Sessions
   sessions: Map<string, SessionState>;
@@ -86,6 +87,9 @@ interface AppState {
   // Command palette
   commandPaletteOpen: boolean;
 
+  // Second screen pushed content
+  secondScreenContent: { type: string; content: string } | null;
+
   // Playground state
   playgroundActive: boolean;
   playgroundSessionId: string | null;
@@ -94,6 +98,8 @@ interface AppState {
   playgroundVadActive: boolean;
 
   // Actions
+  setClientRole: (role: "primary" | "secondscreen") => void;
+  setSecondScreenContent: (content: { type: string; content: string } | null) => void;
   setDarkMode: (v: boolean) => void;
   toggleDarkMode: () => void;
   setNotificationSound: (v: boolean) => void;
@@ -195,6 +201,7 @@ function getInitialNotificationSound(): boolean {
 
 export const useStore = create<AppState>((set) => ({
   clientId: getClientId(),
+  clientRole: "primary",
   sessions: new Map(),
   sdkSessions: [],
   currentSessionId: typeof window !== "undefined" ? localStorage.getItem("cc-last-session") : null,
@@ -232,12 +239,15 @@ export const useStore = create<AppState>((set) => ({
   voiceMode: null,
   pendingFocus: null,
   commandPaletteOpen: false,
+  secondScreenContent: null,
   playgroundActive: false,
   playgroundSessionId: null,
   playgroundSegments: [],
   playgroundRmsDb: -60,
   playgroundVadActive: false,
 
+  setClientRole: (role) => set({ clientRole: role }),
+  setSecondScreenContent: (content) => set({ secondScreenContent: content }),
   setDarkMode: (v) => {
     localStorage.setItem("cc-dark-mode", String(v));
     set({ darkMode: v });
@@ -650,6 +660,7 @@ export const useStore = create<AppState>((set) => ({
       voiceMode: null,
       pendingFocus: null,
       commandPaletteOpen: false,
+      secondScreenContent: null,
       playgroundActive: false,
       playgroundSessionId: null,
       playgroundSegments: [],

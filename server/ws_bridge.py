@@ -82,6 +82,7 @@ class WsBridge:
         # Client identity tracking
         self._client_sessions: dict[str, str] = {}  # clientId → sessionId
         self._ws_by_client: dict[str, web.WebSocketResponse] = {}  # clientId → ws
+        self._client_roles: dict[str, str] = {}  # clientId → role ("primary" | "secondscreen")
         self._rpc_pending: dict[str, asyncio.Future] = {}  # rpc_id → Future
 
     # ── WebRTC manager ─────────────────────────────────────────────────
@@ -425,13 +426,23 @@ class WsBridge:
 
     # ── Browser WebSocket handlers ───────────────────────────────────────
 
-    async def handle_browser_open(self, ws: web.WebSocketResponse, session_id: str, client_id: str = "") -> None:
+    async def handle_browser_open(self, ws: web.WebSocketResponse, session_id: str, client_id: str = "", role: str = "primary") -> None:
         session = self.get_or_create_session(session_id)
         session.browser_sockets[ws] = client_id
         if client_id:
             self._client_sessions[client_id] = session_id
             self._ws_by_client[client_id] = ws
-        logger.info(f"[ws-bridge] Browser connected for session {session_id} client={client_id or '(none)'} ({len(session.browser_sockets)} browsers)")
+            self._client_roles[client_id] = role
+        logger.info(f"[ws-bridge] Browser connected for session {session_id} client={client_id or '(none)'} role={role} ({len(session.browser_sockets)} browsers)")
+
+        # Notify Ring0 when a paired second screen connects
+        if client_id and role == "secondscreen" and self._ring0_manager:
+            ring0 = self._ring0_manager
+            if ring0.is_enabled:
+                await self.submit_user_message(
+                    ring0.session_id,
+                    f"[event second_screen_connected] clientId={client_id[:8]}"
+                )
 
         # Send current session state
         await self._send_to_browser(ws, {"type": "session_init", "session": session.state})
@@ -498,10 +509,22 @@ class WsBridge:
         for sid, s in self._sessions.items():
             if ws in s.browser_sockets:
                 client_id = s.browser_sockets.pop(ws, "")
+                was_second_screen = False
                 if client_id:
+                    was_second_screen = self._client_roles.get(client_id) == "secondscreen"
                     self._client_sessions.pop(client_id, None)
                     self._ws_by_client.pop(client_id, None)
+                    self._client_roles.pop(client_id, None)
                 logger.info(f"[ws-bridge] Browser disconnected for session {sid} client={client_id or '(none)'} ({len(s.browser_sockets)} browsers)")
+
+                # Notify Ring0 when a paired second screen disconnects
+                if was_second_screen and client_id and self._ring0_manager:
+                    ring0 = self._ring0_manager
+                    if ring0.is_enabled:
+                        await self.submit_user_message(
+                            ring0.session_id,
+                            f"[event second_screen_disconnected] clientId={client_id[:8]}"
+                        )
                 break
 
     # ── CLI message routing ──────────────────────────────────────────────
@@ -1021,9 +1044,20 @@ class WsBridge:
 
     # ── Client RPC ────────────────────────────────────────────────────────
 
-    def get_all_clients(self) -> dict[str, str]:
-        """Return {clientId: sessionId} for all connected browser clients."""
-        return dict(self._client_sessions)
+    def get_all_clients(self) -> dict[str, dict[str, str]]:
+        """Return {clientId: {sessionId, role}} for all connected browser clients."""
+        return {
+            cid: {"sessionId": sid, "role": self._client_roles.get(cid, "primary")}
+            for cid, sid in self._client_sessions.items()
+        }
+
+    def get_second_screen_clients(self) -> dict[str, str]:
+        """Return {clientId: sessionId} for connected second screen clients."""
+        return {
+            cid: sid
+            for cid, sid in self._client_sessions.items()
+            if self._client_roles.get(cid) == "secondscreen"
+        }
 
     async def rpc_call(self, client_id: str, method: str, params: dict | None = None, timeout: float = 5.0) -> dict:
         """Send an RPC request to a specific browser client and await the response."""

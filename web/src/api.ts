@@ -391,4 +391,11 @@ export const api = {
   },
   deleteVoiceLog: (id: string) => del(`/voice/logs/${encodeURIComponent(id)}`),
   clearVoiceLogs: () => del("/voice/logs"),
+
+  // Second Screen
+  secondScreenPairCode: (clientId: string) => post<{ code: string }>("/second-screen/pair-code", { clientId }),
+  secondScreenPair: (code: string, clientId: string) => post<{ ok: boolean; secondScreenClientId: string }>("/second-screen/pair", { code, clientId }),
+  secondScreenStatus: (clientId: string) => get<{ paired: boolean; role?: string; pairedClientId?: string; pairedAt?: number; screens?: Array<{ clientId: string; pairedClientId: string; pairedAt: number }> }>(`/second-screen/status?clientId=${encodeURIComponent(clientId)}`),
+  secondScreenUnpair: (clientId: string) => post<{ ok: boolean }>("/second-screen/unpair", { clientId }),
+  secondScreenList: () => get<Array<{ clientId: string; pairedClientId: string; pairedAt: number; online: boolean }>>("/second-screen/list"),
 };

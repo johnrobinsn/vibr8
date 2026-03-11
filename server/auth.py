@@ -34,6 +34,7 @@ PUBLIC_PREFIXES = (
     "/api/auth/login",
     "/api/auth/me",
     "/api/ring0/",
+    "/api/second-screen/",
     "/assets/",
     "/sw.js",
     "/manifest.json",

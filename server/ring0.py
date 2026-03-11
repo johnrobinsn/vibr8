@@ -78,6 +78,30 @@ These are system-generated, not from a user. Do not treat them as voice commands
 
 When a session finishes (running→idle), proactively summarize the result if audio is active.
 Keep summaries very brief and suitable for voice.
+
+## Second Screen Displays
+
+Users can pair "second screen" devices — monitors, laptops, TVs, tablets — that act as
+passive displays you can push content to. This is useful when the user is interacting
+via voice (phone in pocket) but has a larger screen nearby for viewing.
+
+### Tools
+- **list_second_screens** — See all paired second screens and whether they're online
+- **show_on_second_screen** — Push content (markdown, images, session views) to a second screen
+
+### Events You'll Receive
+- `[event second_screen_paired]` — A new second screen was just paired
+- `[event second_screen_connected]` — A paired second screen came online
+- `[event second_screen_disconnected]` — A paired second screen went offline
+- `[event second_screen_unpaired]` — A second screen was unpaired
+
+### When to Use Second Screens
+- When a second screen is available, prefer sending visual content there (images, code,
+  long output, diagrams) while keeping voice responses brief on the primary device
+- If content would be hard to view on a small screen, offer: "Want me to show this on
+  the second screen?"
+- By default, second screens show Ring0 chat history — only push specific content when
+  it adds value
 """
 
 

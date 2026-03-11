@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import subprocess
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -949,6 +951,152 @@ def create_routes(
         username = _get_username(request)
         voice_logger.clear_all_logs(username)
         return web.json_response({"ok": True})
+
+    # ── Second Screen pairing ───────────────────────────────────────────
+
+    # Ephemeral pairing codes: {code → {secondScreenClientId, expiresAt}}
+    _pairing_codes: dict[str, dict[str, Any]] = {}
+    # Durable pairings: {secondScreenClientId → {pairedClientId, pairedAt}}
+    _second_screen_pairings: dict[str, dict[str, Any]] = {}
+    _PAIRINGS_PATH = Path.home() / ".vibr8" / "second-screens.json"
+
+    def _load_pairings() -> None:
+        nonlocal _second_screen_pairings
+        if _PAIRINGS_PATH.exists():
+            try:
+                _second_screen_pairings = json.loads(_PAIRINGS_PATH.read_text())
+            except Exception:
+                pass
+
+    def _save_pairings() -> None:
+        _PAIRINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PAIRINGS_PATH.write_text(json.dumps(_second_screen_pairings))
+
+    _load_pairings()
+
+    @routes.post("/api/second-screen/pair-code")
+    async def second_screen_pair_code(request: web.Request) -> web.Response:
+        """Second screen requests a pairing code to display."""
+        body = await request.json()
+        client_id = body.get("clientId", "")
+        if not client_id:
+            return web.json_response({"error": "clientId required"}, status=400)
+
+        # Generate a short alphanumeric code
+        code = secrets.token_hex(3).upper()  # 6 hex chars
+        _pairing_codes[code] = {
+            "secondScreenClientId": client_id,
+            "expiresAt": time.time() + 300,  # 5 min
+        }
+        logger.info(f"[second-screen] Generated pairing code {code} for client {client_id[:8]}")
+        return web.json_response({"code": code})
+
+    @routes.post("/api/second-screen/pair")
+    async def second_screen_pair(request: web.Request) -> web.Response:
+        """Primary device submits a pairing code to complete pairing."""
+        body = await request.json()
+        code = body.get("code", "").upper().strip()
+        primary_client_id = body.get("clientId", "")
+        if not code or not primary_client_id:
+            return web.json_response({"error": "code and clientId required"}, status=400)
+
+        # Validate code
+        entry = _pairing_codes.get(code)
+        if not entry or time.time() > entry["expiresAt"]:
+            _pairing_codes.pop(code, None)
+            return web.json_response({"error": "Invalid or expired code"}, status=400)
+
+        second_screen_client_id = entry["secondScreenClientId"]
+        _pairing_codes.pop(code)
+
+        # Store durable pairing
+        _second_screen_pairings[second_screen_client_id] = {
+            "pairedClientId": primary_client_id,
+            "pairedAt": time.time(),
+        }
+        _save_pairings()
+
+        # Push notification to the second screen via WebSocket
+        ws = ws_bridge._ws_by_client.get(second_screen_client_id)
+        if ws and not ws.closed:
+            await ws.send_str(json.dumps({
+                "type": "second_screen_paired",
+                "pairedClientId": primary_client_id,
+            }))
+
+        # Notify Ring0
+        if ring0_manager and ring0_manager.is_enabled:
+            await ws_bridge.submit_user_message(
+                ring0_manager.session_id,
+                f"[event second_screen_paired] clientId={second_screen_client_id[:8]}"
+            )
+
+        logger.info(f"[second-screen] Paired {second_screen_client_id[:8]} → {primary_client_id[:8]}")
+        return web.json_response({"ok": True, "secondScreenClientId": second_screen_client_id})
+
+    @routes.get("/api/second-screen/status")
+    async def second_screen_status(request: web.Request) -> web.Response:
+        """Check pairing status for a client."""
+        client_id = request.rel_url.query.get("clientId", "")
+        if not client_id:
+            return web.json_response({"error": "clientId required"}, status=400)
+
+        # Check if this client is a paired second screen
+        pairing = _second_screen_pairings.get(client_id)
+        if pairing:
+            return web.json_response({
+                "paired": True,
+                "role": "secondscreen",
+                "pairedClientId": pairing["pairedClientId"],
+                "pairedAt": pairing["pairedAt"],
+            })
+
+        # Check if this client has any second screens paired to it
+        screens = [
+            {"clientId": scid, **info}
+            for scid, info in _second_screen_pairings.items()
+            if info["pairedClientId"] == client_id
+        ]
+        if screens:
+            return web.json_response({"paired": True, "role": "primary", "screens": screens})
+
+        return web.json_response({"paired": False})
+
+    @routes.post("/api/second-screen/unpair")
+    async def second_screen_unpair(request: web.Request) -> web.Response:
+        """Unpair a second screen."""
+        body = await request.json()
+        client_id = body.get("clientId", "")
+        if not client_id:
+            return web.json_response({"error": "clientId required"}, status=400)
+
+        removed = _second_screen_pairings.pop(client_id, None)
+        if removed:
+            _save_pairings()
+
+            # Notify Ring0
+            if ring0_manager and ring0_manager.is_enabled:
+                await ws_bridge.submit_user_message(
+                    ring0_manager.session_id,
+                    f"[event second_screen_unpaired] clientId={client_id[:8]}"
+                )
+
+            logger.info(f"[second-screen] Unpaired {client_id[:8]}")
+        return web.json_response({"ok": True})
+
+    @routes.get("/api/second-screen/list")
+    async def second_screen_list(request: web.Request) -> web.Response:
+        """List all paired second screens with online status."""
+        screens = []
+        for scid, info in _second_screen_pairings.items():
+            online = scid in ws_bridge._ws_by_client and not ws_bridge._ws_by_client[scid].closed
+            screens.append({
+                "clientId": scid,
+                "pairedClientId": info["pairedClientId"],
+                "pairedAt": info["pairedAt"],
+                "online": online,
+            })
+        return web.json_response(screens)
 
     return routes
 

@@ -8,6 +8,7 @@ import { HomePage } from "./components/HomePage.js";
 import { TaskPanel } from "./components/TaskPanel.js";
 import { EditorPanel } from "./components/EditorPanel.js";
 import { Playground } from "./components/Playground.js";
+import { SecondScreen } from "./components/SecondScreen.js";
 import { TerminalView } from "./components/TerminalView.js";
 import { LoginPage } from "./components/LoginPage.js";
 import { CommandPalette } from "./components/CommandPalette.js";
@@ -160,6 +161,10 @@ export default function App() {
 
   if (hash === "#/playground") {
     return <Playground />;
+  }
+
+  if (hash === "#/second-screen") {
+    return <SecondScreen />;
   }
 
   if (hash === "#/settings") {

@@ -100,8 +100,9 @@ async def handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
 
     bridge: WsBridge = request.app["bridge"]
     client_id = request.rel_url.query.get("clientId", "")
+    role = request.rel_url.query.get("role", "primary")
 
-    await bridge.handle_browser_open(ws, session_id, client_id)
+    await bridge.handle_browser_open(ws, session_id, client_id, role=role)
 
     try:
         async for msg in ws:
