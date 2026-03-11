@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -24,6 +22,8 @@ from server import session_names
 logger = logging.getLogger(__name__)
 
 RING0_CONFIG_PATH = Path.home() / ".vibr8" / "ring0.json"
+RING0_WORK_DIR = Path.home() / ".vibr8" / "ring0"
+RING0_SESSION_ID = "ring0"
 
 RING0_SYSTEM_PROMPT = """\
 # Ring0 — Voice-Controlled Meta-Agent
@@ -87,9 +87,9 @@ class Ring0Manager:
     def __init__(self, port: int) -> None:
         self._port = port
         self._enabled: bool = False
-        self._session_id: Optional[str] = None
+        self._session_id: str = RING0_SESSION_ID
+        self._cli_session_id: Optional[str] = None
         self._model: Optional[str] = None
-        self._temp_dir: Optional[str] = None
         self._load_state()
 
     # ── Properties ────────────────────────────────────────────────────────
@@ -99,7 +99,7 @@ class Ring0Manager:
         return self._enabled
 
     @property
-    def session_id(self) -> Optional[str]:
+    def session_id(self) -> str:
         return self._session_id
 
     # ── Enable / Disable ──────────────────────────────────────────────────
@@ -122,29 +122,62 @@ class Ring0Manager:
 
     # ── Session management ────────────────────────────────────────────────
 
-    async def ensure_session(self, launcher: CliLauncher, ws_bridge: WsBridge) -> str:
-        """Lazily create the Ring0 session if it doesn't exist yet.
+    def on_cli_session_id(self, cli_session_id: str) -> None:
+        """Called when the CLI reports its internal session ID (for --resume)."""
+        self._cli_session_id = cli_session_id
+        self._save_state()
+        logger.info("[ring0] Saved CLI session ID %s", cli_session_id)
 
+    async def ensure_session(self, launcher: CliLauncher, ws_bridge: WsBridge) -> str:
+        """Ensure the Ring0 session is running. Always uses the fixed session ID.
+
+        On restart, reuses the persisted session and resumes the CLI conversation.
         Returns the session_id.
         """
-        if self._session_id:
-            info = launcher.get_session(self._session_id)
-            if info and info.state not in ("exited",):
-                session_names.set_name(self._session_id, "Ring0", unique=False)
-                return self._session_id
-            # Old session exists but is dead — relaunch it to preserve context
-            if info:
-                session_names.set_name(self._session_id, "Ring0", unique=False)
-                await launcher.relaunch(self._session_id)
-                logger.info("[ring0] Relaunched existing session %s", self._session_id)
-                return self._session_id
+        session_id = self._session_id
+        work_dir = RING0_WORK_DIR
+        work_dir.mkdir(parents=True, exist_ok=True)
+        mcp_config_path = self._write_config_files(work_dir)
 
-        # Create temp dir with CLAUDE.md
-        self._temp_dir = tempfile.mkdtemp(prefix="ring0_")
-        claude_md = Path(self._temp_dir) / "CLAUDE.md"
+        session_names.set_name(session_id, "Ring0", unique=False)
+
+        info = launcher.get_session(session_id)
+
+        if info and info.state not in ("exited",):
+            # Session is alive — nothing to do
+            logger.info("[ring0] Session %s already running", session_id)
+            return session_id
+
+        if info:
+            # Session exists but is exited — update cwd and relaunch
+            info.cwd = str(work_dir)
+            info.mcpConfig = str(mcp_config_path)
+            await launcher.relaunch(session_id)
+            logger.info("[ring0] Relaunched session %s", session_id)
+            return session_id
+
+        # No session in launcher — fresh launch with fixed ID (+ resume if we have a CLI session)
+        from server.cli_launcher import LaunchOptions
+        options = LaunchOptions(
+            sessionId=session_id,
+            model=self._model,
+            permissionMode="bypassPermissions",
+            cwd=str(work_dir),
+            mcpConfig=str(mcp_config_path),
+            resumeSessionId=self._cli_session_id,
+        )
+
+        launcher.launch(options)
+        self._save_state()
+
+        logger.info("[ring0] Created session %s in %s", session_id, work_dir)
+        return session_id
+
+    def _write_config_files(self, work_dir: Path) -> Path:
+        """Write CLAUDE.md and MCP config to the Ring0 working directory."""
+        claude_md = work_dir / "CLAUDE.md"
         claude_md.write_text(RING0_SYSTEM_PROMPT)
 
-        # Build MCP config — must use absolute paths (no cwd support)
         server_dir = Path(__file__).parent.parent.resolve()
         mcp_script = str(server_dir / "server" / "ring0_mcp.py")
         uv_bin = shutil.which("uv") or "uv"
@@ -158,26 +191,9 @@ class Ring0Manager:
                 }
             }
         }
-        mcp_config_path = Path(self._temp_dir) / "mcp.json"
+        mcp_config_path = work_dir / "mcp.json"
         mcp_config_path.write_text(json.dumps(mcp_config))
-
-        # Launch CLI session
-        from server.cli_launcher import LaunchOptions
-        options = LaunchOptions(
-            model=self._model,
-            permissionMode="bypassPermissions",
-            cwd=self._temp_dir,
-            mcpConfig=str(mcp_config_path),
-        )
-
-        info = launcher.launch(options)
-        session_id = info.sessionId
-        self._session_id = session_id
-        session_names.set_name(session_id, "Ring0", unique=False)
-        self._save_state()
-
-        logger.info("[ring0] Created session %s in %s", session_id, self._temp_dir)
-        return session_id
+        return mcp_config_path
 
     # ── Persistence ───────────────────────────────────────────────────────
 
@@ -186,14 +202,18 @@ class Ring0Manager:
             try:
                 data = json.loads(RING0_CONFIG_PATH.read_text())
                 self._enabled = data.get("enabled", False)
-                self._session_id = data.get("sessionId")
+                self._cli_session_id = data.get("cliSessionId")
                 self._model = data.get("model")
             except Exception:
                 logger.warning("[ring0] Failed to load state from %s", RING0_CONFIG_PATH)
 
     def _save_state(self) -> None:
         RING0_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {"enabled": self._enabled, "sessionId": self._session_id}
+        data: dict[str, Any] = {
+            "enabled": self._enabled,
+            "sessionId": self._session_id,
+            "cliSessionId": self._cli_session_id,
+        }
         if self._model:
             data["model"] = self._model
         RING0_CONFIG_PATH.write_text(json.dumps(data))

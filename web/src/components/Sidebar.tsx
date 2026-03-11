@@ -13,9 +13,6 @@ export function Sidebar() {
   const [authEnabled, setAuthEnabled] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [ring0SessionId, setRing0SessionId] = useState<string | null>(null);
-  useEffect(() => {
-    api.getRing0Status().then((s) => setRing0SessionId(s.sessionId ?? null)).catch(() => {});
-  }, []);
   const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
   const sessions = useStore((s) => s.sessions);
@@ -76,8 +73,12 @@ export function Sidebar() {
     let isFirstPoll = true;
     async function poll() {
       try {
-        const list = await api.listSessions();
+        const [list, ring0Status] = await Promise.all([
+          api.listSessions(),
+          api.getRing0Status().catch(() => ({ enabled: false, sessionId: null })),
+        ]);
         if (active) {
+          setRing0SessionId(ring0Status.sessionId ?? null);
           useStore.getState().setSdkSessions(list);
           // Hydrate session names from server (server is source of truth for auto-generated names)
           const store = useStore.getState();

@@ -83,6 +83,8 @@ class LaunchOptions:
     backendType: Optional[BackendType] = None
     worktreeInfo: Optional[WorktreeInfo] = None
     mcpConfig: Optional[str] = None
+    sessionId: Optional[str] = None
+    resumeSessionId: Optional[str] = None
 
 
 @dataclass
@@ -193,7 +195,7 @@ class CliLauncher:
         if options is None:
             options = LaunchOptions()
 
-        session_id = str(uuid.uuid4())
+        session_id = options.sessionId or str(uuid.uuid4())
         cwd = options.cwd or os.getcwd()
         backend_type: BackendType = options.backendType or "claude"
 
@@ -234,6 +236,7 @@ class CliLauncher:
                 backendType=options.backendType,
                 worktreeInfo=options.worktreeInfo,
                 mcpConfig=options.mcpConfig,
+                resumeSessionId=options.resumeSessionId,
             )
             asyncio.ensure_future(self._spawn_cli(session_id, info, relaunch_opts))
 

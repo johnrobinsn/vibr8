@@ -269,6 +269,9 @@ def create_app() -> web.Application:
     # When the CLI reports its internal session_id, store it for --resume
     def on_cli_session_id(session_id: str, cli_session_id: str) -> None:
         launcher.set_cli_session_id(session_id, cli_session_id)
+        # Persist Ring0's CLI session ID for --resume across restarts
+        if ring0_manager and session_id == ring0_manager.session_id:
+            ring0_manager.on_cli_session_id(cli_session_id)
 
     ws_bridge.on_cli_session_id_received(on_cli_session_id)
 
