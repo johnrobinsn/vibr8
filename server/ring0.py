@@ -130,6 +130,13 @@ class Ring0Manager:
         if self._session_id:
             info = launcher.get_session(self._session_id)
             if info and info.state not in ("exited",):
+                session_names.set_name(self._session_id, "Ring0", unique=False)
+                return self._session_id
+            # Old session exists but is dead — relaunch it to preserve context
+            if info:
+                session_names.set_name(self._session_id, "Ring0", unique=False)
+                await launcher.relaunch(self._session_id)
+                logger.info("[ring0] Relaunched existing session %s", self._session_id)
                 return self._session_id
 
         # Create temp dir with CLAUDE.md
@@ -181,8 +188,6 @@ class Ring0Manager:
                 self._enabled = data.get("enabled", False)
                 self._session_id = data.get("sessionId")
                 self._model = data.get("model")
-                if self._session_id:
-                    session_names.set_name(self._session_id, "Ring0", unique=False)
             except Exception:
                 logger.warning("[ring0] Failed to load state from %s", RING0_CONFIG_PATH)
 

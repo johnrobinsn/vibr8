@@ -179,8 +179,14 @@ export function Sidebar() {
 
   function confirmRename() {
     if (editingSessionId && editingName.trim()) {
-      useStore.getState().setSessionName(editingSessionId, editingName.trim());
-      api.renameSession(editingSessionId, editingName.trim()).catch(() => {});
+      const sid = editingSessionId;
+      const newName = editingName.trim();
+      const oldName = useStore.getState().sessions.get(sid)?.name;
+      useStore.getState().setSessionName(sid, newName);
+      api.renameSession(sid, newName).catch(() => {
+        // Revert on failure (e.g. Ring0 cannot be renamed)
+        if (oldName != null) useStore.getState().setSessionName(sid, oldName);
+      });
     }
     setEditingSessionId(null);
     setEditingName("");
@@ -321,6 +327,7 @@ export function Sidebar() {
   const logoSrc = currentSession?.backendType === "codex" ? "/logo-codex.svg" : "/logo.svg";
 
   function startRename(id: string, currentLabel: string) {
+    if (id === ring0SessionId) return; // Ring0 cannot be renamed
     setEditingSessionId(id);
     setEditingName(currentLabel);
   }

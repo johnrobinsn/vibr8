@@ -256,7 +256,9 @@ def create_routes(
         session = launcher.get_session(sid)
         if not session:
             return web.json_response({"error": "Session not found"}, status=404)
-        session_names.set_name(sid, name)
+        if ring0.session_id == sid:
+            return web.json_response({"error": "Ring0 session cannot be renamed"}, status=403)
+        session_names.set_name(sid, name, unique=False)
         return web.json_response({"ok": True, "name": name})
 
     @routes.post("/api/sessions/{id}/kill")
