@@ -87,6 +87,8 @@ async def switch_ui(session_id: str, client_id: str = "") -> str:
     if client_id:
         body["clientId"] = client_id
     result = await _post("/ring0/switch-ui", body)
+    if result.get("error"):
+        return f"Error: {result['error']}"
     target = f"client {client_id[:8]}" if client_id else "all clients"
     return f"Switched {target} to session {session_id[:8]}."
 
@@ -197,8 +199,9 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
             - "read_clipboard" — read clipboard text (may prompt user)
             - "write_clipboard" — write text to clipboard. params: {"text": "..."}
             - "open_url" — open a URL in a new tab/window. params: {"url": "..."}
-            - "list_audio_devices" — list available audio output devices. No params.
+            - "list_audio_devices" — list available audio input/output devices. No params.
             - "set_audio_output" — set the audio output device. params: {"deviceId": "..."}
+            - "set_audio_input" — switch microphone input device. params: {"deviceId": "..."}
         params: Optional JSON string of parameters to pass to the method (e.g., '{"title": "Hello", "body": "World"}').
     """
     body: dict[str, Any] = {"clientId": client_id, "method": method}
@@ -226,8 +229,9 @@ async def list_second_screens() -> str:
     lines = []
     for s in screens:
         status = "online" if s.get("online") else "offline"
+        enabled = "enabled" if s.get("enabled", True) else "disabled"
         lines.append(
-            f"- Screen {s['clientId'][:8]}... (status={status}, "
+            f"- Screen {s['clientId'][:8]}... ({status}, {enabled}, "
             f"paired_to={s['pairedClientId'][:8]}...)"
         )
     return "\n".join(lines)
@@ -235,34 +239,95 @@ async def list_second_screens() -> str:
 
 @mcp.tool()
 async def show_on_second_screen(
-    content: str,
+    content: str = "",
     content_type: str = "markdown",
     client_id: str = "",
     image_data: str = "",
     image_mime: str = "image/png",
+    filename: str = "",
+    pdf_data: str = "",
 ) -> str:
     """Push content to one or all connected second screen displays.
 
     Args:
-        content: The content to display. For markdown, the markdown text.
-                 For images, a URL or empty string if using image_data.
-                 For sessions, the session ID.
-        content_type: Type of content: "markdown", "image", or "session".
+        content: The content to display. Depends on content_type:
+                 - markdown: the markdown text
+                 - image: a URL, or empty if using image_data
+                 - file: the file text content
+                 - pdf: a URL, or empty if using pdf_data
+                 - html: the HTML string to render
+                 - session: the session ID to mirror
+                 - home: ignored (returns second screen to default view)
+        content_type: Type of content. One of:
+                 "markdown", "image", "file", "pdf", "html", "session", "home".
         client_id: Optional specific second screen client ID. If omitted,
                    sends to all connected second screens.
-        image_data: Base64-encoded image bytes. Use this instead of content
-                    when you have raw image data (e.g., from PIL/matplotlib).
-                    Only used when content_type is "image".
+        image_data: Base64-encoded image bytes. Only used when content_type is "image".
         image_mime: MIME type for image_data (default "image/png").
-                    Common values: "image/png", "image/jpeg", "image/webp".
+        filename: Display filename for content_type "file".
+        pdf_data: Base64-encoded PDF bytes. Only used when content_type is "pdf".
     """
     # Build the actual content to send
     display_content = content
     if content_type == "image" and image_data:
-        # Construct a data URL from base64 image bytes
         display_content = f"data:{image_mime};base64,{image_data}"
+    elif content_type == "pdf" and pdf_data:
+        display_content = f"data:application/pdf;base64,{pdf_data}"
 
-    # Get all second screen clients
+    # Get all second screen clients (online and enabled)
+    screens = await _get("/second-screen/list")
+    online_screens = [s for s in screens if s.get("online") and s.get("enabled", True)]
+
+    if not online_screens:
+        return "No second screens are online and enabled."
+
+    targets = online_screens
+    if client_id:
+        targets = [s for s in online_screens if s["clientId"].startswith(client_id)]
+        if not targets:
+            return f"No online second screen matching '{client_id}'."
+
+    results = []
+    for screen in targets:
+        # Session mirroring and home use a different RPC method
+        if content_type == "session":
+            body: dict[str, Any] = {
+                "clientId": screen["clientId"],
+                "method": "mirror_session",
+                "params": {"sessionId": content},
+            }
+        elif content_type == "home":
+            body = {
+                "clientId": screen["clientId"],
+                "method": "mirror_session",
+                "params": {"sessionId": None},
+            }
+        else:
+            params: dict[str, str] = {"type": content_type, "content": display_content}
+            if filename:
+                params["filename"] = filename
+            body = {
+                "clientId": screen["clientId"],
+                "method": "show_content",
+                "params": params,
+            }
+        result = await _post("/ring0/query-client", body)
+        if result.get("error"):
+            results.append(f"Error sending to {screen['clientId'][:8]}: {result['error']}")
+        else:
+            results.append(f"Sent to {screen['clientId'][:8]}")
+
+    return "\n".join(results)
+
+
+@mcp.tool()
+async def query_second_screen(client_id: str = "") -> str:
+    """Query second screen(s) for device info — screen dimensions, pixel ratio, user agent, etc.
+
+    Args:
+        client_id: Optional specific second screen client ID. If omitted,
+                   queries all connected second screens.
+    """
     screens = await _get("/second-screen/list")
     online_screens = [s for s in screens if s.get("online")]
 
@@ -279,16 +344,43 @@ async def show_on_second_screen(
     for screen in targets:
         body: dict[str, Any] = {
             "clientId": screen["clientId"],
-            "method": "show_content",
-            "params": {"type": content_type, "content": display_content},
+            "method": "get_device_info",
         }
         result = await _post("/ring0/query-client", body)
         if result.get("error"):
-            results.append(f"Error sending to {screen['clientId'][:8]}: {result['error']}")
+            results.append(f"Screen {screen['clientId'][:8]}: error — {result['error']}")
         else:
-            results.append(f"Sent to {screen['clientId'][:8]}")
+            info = result.get("result", result)
+            lines = [f"Screen {screen['clientId'][:8]}:"]
+            for key, val in info.items():
+                lines.append(f"  {key}: {val}")
+            results.append("\n".join(lines))
 
-    return "\n".join(results)
+    return "\n\n".join(results)
+
+
+@mcp.tool()
+async def toggle_second_screen(client_id: str, enabled: bool = True) -> str:
+    """Enable or disable a second screen. Disabled screens won't receive pushed content.
+
+    Args:
+        client_id: The second screen client ID (or prefix).
+        enabled: True to enable, False to disable.
+    """
+    # Resolve prefix to full client ID
+    screens = await _get("/second-screen/list")
+    matches = [s for s in screens if s["clientId"].startswith(client_id)]
+    if not matches:
+        return f"No second screen matching '{client_id}'."
+    if len(matches) > 1:
+        return f"Ambiguous prefix '{client_id}' matches {len(matches)} screens."
+
+    full_id = matches[0]["clientId"]
+    result = await _post("/second-screen/toggle", {"clientId": full_id, "enabled": enabled})
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    state = "enabled" if result.get("enabled") else "disabled"
+    return f"Screen {full_id[:8]} is now {state}."
 
 
 if __name__ == "__main__":

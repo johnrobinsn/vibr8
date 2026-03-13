@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -102,6 +103,20 @@ def create_routes(
             "authenticated": username is not None,
             "username": username,
         })
+
+    # ── Admin ─────────────────────────────────────────────────────────────
+
+    @routes.post("/api/admin/restart")
+    async def admin_restart(request: web.Request) -> web.Response:
+        if os.environ.get("NODE_ENV") == "production":
+            return web.json_response({"error": "Not available in production"}, status=403)
+        logger.info("[routes] Server restart requested via API")
+        # Access restart function from app — avoids __main__ vs server.main dual-import issue
+        do_restart = request.app.get("request_restart")
+        if not do_restart:
+            return web.json_response({"error": "Restart not available"}, status=500)
+        asyncio.get_event_loop().call_later(0.2, do_restart)
+        return web.json_response({"ok": True, "message": "Restarting..."})
 
     # ── SDK Sessions ─────────────────────────────────────────────────────
 
@@ -255,12 +270,11 @@ def create_routes(
         name = body.get("name", "").strip()
         if not name:
             return web.json_response({"error": "name is required"}, status=400)
-        session = launcher.get_session(sid)
-        if not session:
-            return web.json_response({"error": "Session not found"}, status=404)
-        if ring0.session_id == sid:
+        if ring0_manager and ring0_manager.session_id == sid:
             return web.json_response({"error": "Ring0 session cannot be renamed"}, status=403)
         session_names.set_name(sid, name, unique=False)
+        # Broadcast to all browsers so other tabs/devices see the rename
+        await ws_bridge.broadcast_name_update(sid, name, user_renamed=True)
         return web.json_response({"ok": True, "name": name})
 
     @routes.post("/api/sessions/{id}/kill")
@@ -747,7 +761,9 @@ def create_routes(
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         client_id = body.get("clientId", "")
-        await ws_bridge.broadcast_ring0_switch_ui(resolved, client_id=client_id)
+        sent = await ws_bridge.broadcast_ring0_switch_ui(resolved, client_id=client_id)
+        if client_id and not sent:
+            return web.json_response({"error": f"Client {client_id} not connected"}, status=400)
         return web.json_response({"ok": True, "sessionId": resolved})
 
     @routes.get("/api/ring0/session-output/{id}")
@@ -1013,6 +1029,7 @@ def create_routes(
         _second_screen_pairings[second_screen_client_id] = {
             "pairedClientId": primary_client_id,
             "pairedAt": time.time(),
+            "enabled": True,
         }
         _save_pairings()
 
@@ -1094,9 +1111,37 @@ def create_routes(
                 "clientId": scid,
                 "pairedClientId": info["pairedClientId"],
                 "pairedAt": info["pairedAt"],
+                "enabled": info.get("enabled", True),
                 "online": online,
             })
         return web.json_response(screens)
+
+    @routes.post("/api/second-screen/toggle")
+    async def second_screen_toggle(request: web.Request) -> web.Response:
+        """Enable or disable a second screen."""
+        body = await request.json()
+        client_id = body.get("clientId", "")
+        enabled = body.get("enabled", True)
+        if not client_id:
+            return web.json_response({"error": "clientId required"}, status=400)
+
+        pairing = _second_screen_pairings.get(client_id)
+        if not pairing:
+            return web.json_response({"error": "Unknown second screen"}, status=404)
+
+        pairing["enabled"] = bool(enabled)
+        _save_pairings()
+
+        # Notify Ring0
+        if ring0_manager and ring0_manager.is_enabled:
+            action = "enabled" if enabled else "disabled"
+            await ws_bridge.submit_user_message(
+                ring0_manager.session_id,
+                f"[event second_screen_{action}] clientId={client_id[:8]}"
+            )
+
+        logger.info(f"[second-screen] {'Enabled' if enabled else 'Disabled'} {client_id[:8]}")
+        return web.json_response({"ok": True, "enabled": bool(enabled)})
 
     return routes
 

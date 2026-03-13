@@ -129,7 +129,7 @@ function AssistantAvatar() {
   );
 }
 
-function MarkdownContent({ text }: { text: string }) {
+export function MarkdownContent({ text }: { text: string }) {
   return (
     <div className="markdown-body text-[14px] sm:text-[15px] text-cc-fg leading-relaxed overflow-hidden">
       <Markdown

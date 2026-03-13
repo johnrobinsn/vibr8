@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 
 import aiohttp
@@ -48,11 +49,13 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("/mntc/code/vibr8/server.log", mode="w"),
+        logging.FileHandler("/mntc/code/vibr8/server.log", mode="a"),
     ],
 )
-logging.getLogger("asyncio").addFilter(_AioIceFilter())
 logger = logging.getLogger(__name__)
+logger.info("=" * 60)
+logger.info("[server] Process starting (PID %d)", os.getpid())
+logging.getLogger("asyncio").addFilter(_AioIceFilter())
 
 # Enable experimental agent teams (matches TS version)
 os.environ["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
@@ -102,7 +105,8 @@ async def handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
     client_id = request.rel_url.query.get("clientId", "")
     role = request.rel_url.query.get("role", "primary")
 
-    await bridge.handle_browser_open(ws, session_id, client_id, role=role)
+    mirror = request.rel_url.query.get("mirror", "") == "true"
+    await bridge.handle_browser_open(ws, session_id, client_id, role=role, mirror=mirror)
 
     try:
         async for msg in ws:
@@ -365,6 +369,7 @@ def create_app() -> web.Application:
     app["terminal_manager"] = terminal_manager
     app["auth_manager"] = auth_manager
     app["ring0_manager"] = ring0_manager
+    app["request_restart"] = request_restart
 
     # ── Startup / Shutdown hooks ──────────────────────────────────────────
 
@@ -427,7 +432,7 @@ def create_app() -> web.Application:
     app.on_startup.append(on_startup)
 
     async def on_shutdown(app: web.Application) -> None:
-        logger.info("[server] Shutting down...")
+        logger.info("[server] Shutting down (restart=%s)...", _restart["requested"])
 
         # Cancel all tracked background tasks first.
         for task in list(background_tasks):
@@ -435,10 +440,15 @@ def create_app() -> web.Application:
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
 
-        await terminal_manager.close_all()
-        await webrtc_manager.close_all()
-        await ws_bridge.close_all()
-        await launcher.kill_all()
+        if _restart["requested"]:
+            # Fast path: skip graceful WebSocket close (10s timeout per socket).
+            # Connections break naturally when the process exits; clients reconnect.
+            logger.info("[server] Restart — skipping graceful close for speed")
+        else:
+            await terminal_manager.close_all()
+            await webrtc_manager.close_all()
+            await ws_bridge.close_all()
+            await launcher.kill_all()
         logger.info("[server] Shutdown complete")
 
     app.on_shutdown.append(on_shutdown)
@@ -446,16 +456,43 @@ def create_app() -> web.Application:
     return app
 
 
+# ── Restart support ───────────────────────────────────────────────────────────
+
+_RESTART_EXIT_CODE = 75
+
+# Mutable container so the flag is shared even when this module is imported
+# under two names (__main__ vs server.main — a Python -m gotcha).
+_restart = {"requested": False}
+
+
+def request_restart() -> None:
+    """Request a server restart (used by the admin/restart endpoint).
+
+    Sends SIGTERM to trigger aiohttp's graceful shutdown. The Makefile restart
+    loop detects exit code 75 and relaunches the process.
+    """
+    import signal
+    _restart["requested"] = True
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    app = create_app()
-    logger.info(f"Server running on http://localhost:{PORT}")
-    logger.info(f"  CLI WebSocket:     ws://localhost:{PORT}/ws/cli/:sessionId")
-    logger.info(f"  Browser WebSocket: ws://localhost:{PORT}/ws/browser/:sessionId")
-    if os.environ.get("NODE_ENV") != "production":
-        logger.info("Dev mode: frontend at http://localhost:5174")
-    web.run_app(app, host="0.0.0.0", port=PORT, print=None, shutdown_timeout=2.0)
+    try:
+        app = create_app()
+        logger.info(f"Server running on http://localhost:{PORT}")
+        logger.info(f"  CLI WebSocket:     ws://localhost:{PORT}/ws/cli/:sessionId")
+        logger.info(f"  Browser WebSocket: ws://localhost:{PORT}/ws/browser/:sessionId")
+        if os.environ.get("NODE_ENV") != "production":
+            logger.info("Dev mode: frontend at http://localhost:5174")
+        web.run_app(app, host="0.0.0.0", port=PORT, print=None, shutdown_timeout=2.0, reuse_address=True)
+    except Exception:
+        logger.exception("[server] Fatal error during startup/run")
+        sys.exit(1)
+    if _restart["requested"]:
+        logger.info("[server] Exiting with code %d for restart", _RESTART_EXIT_CODE)
+        sys.exit(_RESTART_EXIT_CODE)
 
 
 if __name__ == "__main__":

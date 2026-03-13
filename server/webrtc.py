@@ -158,9 +158,33 @@ class WebRTCManager:
         """Return the outgoing audio track for *session_id*, or None."""
         return self._outgoing_tracks.get(session_id)
 
+    def get_any_outgoing_track(self) -> tuple[str, QueuedAudioTrack] | None:
+        """Return (session_id, track) for any active outgoing track, or None.
+
+        Only one WebRTC session is active at a time, so this is used as a
+        fallback when the responding session (e.g. Ring0) doesn't own the
+        audio connection directly.
+        """
+        for sid, track in self._outgoing_tracks.items():
+            return (sid, track)
+        return None
+
+    def _resolve_track(self, session_id: str) -> QueuedAudioTrack | None:
+        """Look up the outgoing track for *session_id*, falling back to any active track.
+
+        Only one WebRTC audio session is active at a time. When Ring0
+        responds, the track may be registered under a different session.
+        """
+        track = self._outgoing_tracks.get(session_id)
+        if not track:
+            fallback = self.get_any_outgoing_track()
+            if fallback:
+                track = fallback[1]
+        return track
+
     def barge_in(self, session_id: str) -> None:
         """Handle barge-in: clear queued TTS audio and cancel the TTS stream."""
-        track = self._outgoing_tracks.get(session_id)
+        track = self._resolve_track(session_id)
         if track:
             track.clear_audio()
             track.set_thinking(False)
@@ -170,7 +194,7 @@ class WebRTCManager:
 
     def set_thinking(self, session_id: str, thinking: bool) -> None:
         """Enable or disable the thinking-tone for *session_id*."""
-        track = self._outgoing_tracks.get(session_id)
+        track = self._resolve_track(session_id)
         if track:
             track.set_thinking(thinking)
 

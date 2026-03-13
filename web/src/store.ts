@@ -88,7 +88,8 @@ interface AppState {
   commandPaletteOpen: boolean;
 
   // Second screen pushed content
-  secondScreenContent: { type: string; content: string } | null;
+  secondScreenContent: { type: string; content: string; filename?: string } | null;
+  mirroredSessionId: string | null;
 
   // Playground state
   playgroundActive: boolean;
@@ -99,7 +100,8 @@ interface AppState {
 
   // Actions
   setClientRole: (role: "primary" | "secondscreen") => void;
-  setSecondScreenContent: (content: { type: string; content: string } | null) => void;
+  setSecondScreenContent: (content: { type: string; content: string; filename?: string } | null) => void;
+  setMirroredSessionId: (id: string | null) => void;
   setDarkMode: (v: boolean) => void;
   toggleDarkMode: () => void;
   setNotificationSound: (v: boolean) => void;
@@ -240,6 +242,7 @@ export const useStore = create<AppState>((set) => ({
   pendingFocus: null,
   commandPaletteOpen: false,
   secondScreenContent: null,
+  mirroredSessionId: null,
   playgroundActive: false,
   playgroundSessionId: null,
   playgroundSegments: [],
@@ -248,6 +251,7 @@ export const useStore = create<AppState>((set) => ({
 
   setClientRole: (role) => set({ clientRole: role }),
   setSecondScreenContent: (content) => set({ secondScreenContent: content }),
+  setMirroredSessionId: (id) => set({ mirroredSessionId: id }),
   setDarkMode: (v) => {
     localStorage.setItem("cc-dark-mode", String(v));
     set({ darkMode: v });

@@ -3,13 +3,25 @@
 # Run both Python backend and Vite frontend
 dev:
 	@trap 'kill 0' EXIT; \
-	uv run python -m server.main & \
+	( while true; do \
+		uv run python -m server.main; \
+		rc=$$?; \
+		if [ $$rc -ne 75 ]; then break; fi; \
+		echo "[dev] Server restart requested, relaunching..."; \
+		sleep 1; \
+	done ) & \
 	cd web && bun run dev & \
 	wait
 
 # Run just the Python backend
 dev-api:
-	uv run python -m server.main
+	@while true; do \
+		uv run python -m server.main; \
+		rc=$$?; \
+		if [ $$rc -ne 75 ]; then break; fi; \
+		echo "[dev] Server restart requested, relaunching..."; \
+		sleep 1; \
+	done
 
 # Run just the Vite frontend
 dev-frontend:

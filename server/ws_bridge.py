@@ -49,6 +49,7 @@ def _make_default_state(session_id: str, backend_type: str = "claude") -> dict[s
         "git_behind": 0,
         "total_lines_added": 0,
         "total_lines_removed": 0,
+        "is_waiting_for_permission": False,
     }
 
 
@@ -84,6 +85,7 @@ class WsBridge:
         self._ws_by_client: dict[str, web.WebSocketResponse] = {}  # clientId → ws
         self._client_roles: dict[str, str] = {}  # clientId → role ("primary" | "secondscreen")
         self._rpc_pending: dict[str, asyncio.Future] = {}  # rpc_id → Future
+        self._mirror_sockets: set[web.WebSocketResponse] = set()  # passive mirror connections
 
     # ── WebRTC manager ─────────────────────────────────────────────────
 
@@ -340,6 +342,15 @@ class WsBridge:
             for req_id in list(session.pending_permissions):
                 await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
             session.pending_permissions.clear()
+            # Clear running/permission state and notify Ring0
+            was_waiting = session.state.get("is_waiting_for_permission")
+            was_running = session.state.get("is_running")
+            session.state["is_running"] = False
+            session.state["is_waiting_for_permission"] = False
+            if was_waiting:
+                asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→idle"))
+            elif was_running:
+                asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
             session.codex_adapter = None
             self._persist_session(session)
             logger.info(f"[ws-bridge] Codex adapter disconnected for session {session_id}")
@@ -423,26 +434,42 @@ class WsBridge:
         for req_id in list(session.pending_permissions):
             await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
         session.pending_permissions.clear()
+        # Clear running/permission state and notify Ring0
+        was_waiting = session.state.get("is_waiting_for_permission")
+        was_running = session.state.get("is_running")
+        session.state["is_running"] = False
+        session.state["is_waiting_for_permission"] = False
+        if was_waiting:
+            asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→idle"))
+        elif was_running:
+            asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
 
     # ── Browser WebSocket handlers ───────────────────────────────────────
 
-    async def handle_browser_open(self, ws: web.WebSocketResponse, session_id: str, client_id: str = "", role: str = "primary") -> None:
+    async def handle_browser_open(self, ws: web.WebSocketResponse, session_id: str, client_id: str = "", role: str = "primary", mirror: bool = False) -> None:
         session = self.get_or_create_session(session_id)
         session.browser_sockets[ws] = client_id
-        if client_id:
-            self._client_sessions[client_id] = session_id
-            self._ws_by_client[client_id] = ws
-            self._client_roles[client_id] = role
-        logger.info(f"[ws-bridge] Browser connected for session {session_id} client={client_id or '(none)'} role={role} ({len(session.browser_sockets)} browsers)")
 
-        # Notify Ring0 when a paired second screen connects
-        if client_id and role == "secondscreen" and self._ring0_manager:
-            ring0 = self._ring0_manager
-            if ring0.is_enabled:
-                await self.submit_user_message(
-                    ring0.session_id,
-                    f"[event second_screen_connected] clientId={client_id[:8]}"
-                )
+        if mirror:
+            # Mirror connections are passive — they receive broadcasts but don't
+            # register as the canonical WS for this client (control channel does that).
+            self._mirror_sockets.add(ws)
+            logger.info(f"[ws-bridge] Mirror WS connected for session {session_id} client={client_id or '(none)'} ({len(session.browser_sockets)} browsers)")
+        else:
+            if client_id:
+                self._client_sessions[client_id] = session_id
+                self._ws_by_client[client_id] = ws
+                self._client_roles[client_id] = role
+            logger.info(f"[ws-bridge] Browser connected for session {session_id} client={client_id or '(none)'} role={role} ({len(session.browser_sockets)} browsers)")
+
+            # Notify Ring0 when a paired second screen connects (not for mirror)
+            if client_id and role == "secondscreen" and self._ring0_manager:
+                ring0 = self._ring0_manager
+                if ring0.is_enabled:
+                    await self.submit_user_message(
+                        ring0.session_id,
+                        f"[event second_screen_connected] clientId={client_id[:8]}"
+                    )
 
         # Send current session state
         await self._send_to_browser(ws, {"type": "session_init", "session": session.state})
@@ -506,25 +533,34 @@ class WsBridge:
         await self._route_browser_message(session, msg, ws)
 
     async def handle_browser_close(self, ws: web.WebSocketResponse) -> None:
+        is_mirror = ws in self._mirror_sockets
+        if is_mirror:
+            self._mirror_sockets.discard(ws)
+
         for sid, s in self._sessions.items():
             if ws in s.browser_sockets:
                 client_id = s.browser_sockets.pop(ws, "")
-                was_second_screen = False
-                if client_id:
-                    was_second_screen = self._client_roles.get(client_id) == "secondscreen"
-                    self._client_sessions.pop(client_id, None)
-                    self._ws_by_client.pop(client_id, None)
-                    self._client_roles.pop(client_id, None)
-                logger.info(f"[ws-bridge] Browser disconnected for session {sid} client={client_id or '(none)'} ({len(s.browser_sockets)} browsers)")
 
-                # Notify Ring0 when a paired second screen disconnects
-                if was_second_screen and client_id and self._ring0_manager:
-                    ring0 = self._ring0_manager
-                    if ring0.is_enabled:
-                        await self.submit_user_message(
-                            ring0.session_id,
-                            f"[event second_screen_disconnected] clientId={client_id[:8]}"
-                        )
+                if is_mirror:
+                    # Mirror connections don't own the client identity — just log and exit
+                    logger.info(f"[ws-bridge] Mirror WS disconnected for session {sid} client={client_id or '(none)'} ({len(s.browser_sockets)} browsers)")
+                else:
+                    was_second_screen = False
+                    if client_id:
+                        was_second_screen = self._client_roles.get(client_id) == "secondscreen"
+                        self._client_sessions.pop(client_id, None)
+                        self._ws_by_client.pop(client_id, None)
+                        self._client_roles.pop(client_id, None)
+                    logger.info(f"[ws-bridge] Browser disconnected for session {sid} client={client_id or '(none)'} ({len(s.browser_sockets)} browsers)")
+
+                    # Notify Ring0 when a paired second screen disconnects
+                    if was_second_screen and client_id and self._ring0_manager:
+                        ring0 = self._ring0_manager
+                        if ring0.is_enabled:
+                            await self.submit_user_message(
+                                ring0.session_id,
+                                f"[event second_screen_disconnected] clientId={client_id[:8]}"
+                            )
                 break
 
     # ── CLI message routing ──────────────────────────────────────────────
@@ -634,12 +670,20 @@ class WsBridge:
             ring0 = self._ring0_manager
             is_ring0_session = ring0 and ring0.is_enabled and session.id == ring0.session_id
             tts_allowed = not ring0 or not ring0.is_enabled or is_ring0_session
+            # Look up outgoing track — the audio connection may be on a
+            # different session than the one producing the response (e.g.
+            # Ring0 responds but audio is connected via another session).
+            audio_session_id = session.id
             track = self._webrtc_manager.get_outgoing_track(session.id)
-            tts_muted = self._webrtc_manager.is_tts_muted(session.id)
+            if not track:
+                fallback = self._webrtc_manager.get_any_outgoing_track()
+                if fallback:
+                    audio_session_id, track = fallback
+            tts_muted = self._webrtc_manager.is_tts_muted(audio_session_id)
             text_preview = repr(text)[:200] if not isinstance(text, str) else f"{len(text)} chars"
             logger.info(
-                "[ws-bridge] TTS check: session=%s, text_type=%s, preview=%s, track=%s, tts_muted=%s, tts_allowed=%s",
-                session.id, type(text).__name__, text_preview, track is not None, tts_muted, tts_allowed,
+                "[ws-bridge] TTS check: session=%s, audio_session=%s, text_type=%s, preview=%s, track=%s, tts_muted=%s, tts_allowed=%s",
+                session.id, audio_session_id, type(text).__name__, text_preview, track is not None, tts_muted, tts_allowed,
             )
             if track and not tts_muted and tts_allowed:
                 import asyncio
@@ -729,6 +773,7 @@ class WsBridge:
             session.state["is_running"] = False
             import asyncio
             asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
+        session.state["is_waiting_for_permission"] = False
 
         # Turn finished — stop thinking tone and re-enable STT.
         self._stop_thinking(session.id)
@@ -821,6 +866,10 @@ class WsBridge:
             session.pending_permissions[msg.get("request_id", "")] = perm
             await self._broadcast_to_browsers(session, {"type": "permission_request", "request": perm})
             self._persist_session(session)
+            # Fire state transition: running → waiting_for_permission
+            if session.state.get("is_running") and not session.state.get("is_waiting_for_permission"):
+                session.state["is_waiting_for_permission"] = True
+                asyncio.ensure_future(self._notify_ring0_state_change(session, "running→waiting_for_permission"))
 
     async def _handle_tool_progress(self, session: Session, msg: dict[str, Any]) -> None:
         # Agent is executing a tool — play thinking tone.
@@ -964,6 +1013,14 @@ class WsBridge:
                 },
             })
         self._send_to_cli(session, ndjson)
+        # Fire state transition based on permission response
+        if session.state.get("is_waiting_for_permission"):
+            session.state["is_waiting_for_permission"] = False
+            if msg.get("behavior") == "allow":
+                asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→running"))
+            else:
+                session.state["is_running"] = False
+                asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→idle"))
         self._persist_session(session)
         # Notify all browsers so other devices dismiss the banner.
         await self._broadcast_to_browsers(session, {
@@ -1062,6 +1119,12 @@ class WsBridge:
     async def rpc_call(self, client_id: str, method: str, params: dict | None = None, timeout: float = 5.0) -> dict:
         """Send an RPC request to a specific browser client and await the response."""
         ws = self._ws_by_client.get(client_id)
+        if not ws:
+            # Prefix match fallback (Ring0 often passes short ID prefixes)
+            for cid, w in self._ws_by_client.items():
+                if cid.startswith(client_id):
+                    ws = w
+                    break
         if not ws or ws.closed:
             raise RuntimeError(f"Client {client_id} not connected")
         rpc_id = str(uuid.uuid4())
@@ -1116,27 +1179,40 @@ class WsBridge:
         import asyncio
         asyncio.ensure_future(session.cli_socket.send_str(ndjson + "\n"))
 
-    async def broadcast_name_update(self, session_id: str, name: str) -> None:
+    async def broadcast_name_update(self, session_id: str, name: str, user_renamed: bool = False) -> None:
         session = self._sessions.get(session_id)
         if not session:
             return
-        await self._broadcast_to_browsers(session, {"type": "session_name_update", "name": name})
+        msg: dict[str, Any] = {"type": "session_name_update", "name": name}
+        if user_renamed:
+            msg["userRenamed"] = True
+        await self._broadcast_to_browsers(session, msg)
         self._persist_session(session)
 
-    async def broadcast_ring0_switch_ui(self, target_session_id: str, *, client_id: str = "") -> None:
-        """Send ring0_switch_ui to a specific client or broadcast to all browsers."""
+    async def broadcast_ring0_switch_ui(self, target_session_id: str, *, client_id: str = "") -> bool:
+        """Send ring0_switch_ui to a specific client or broadcast to all browsers.
+
+        Returns True if the message was sent successfully, False if the target client was not found.
+        """
         msg = {"type": "ring0_switch_ui", "sessionId": target_session_id}
         data = json.dumps(msg)
 
         # Target a specific client if provided
         if client_id:
             ws = self._ws_by_client.get(client_id)
-            if ws:
+            if not ws:
+                # Prefix match fallback
+                for cid, w in self._ws_by_client.items():
+                    if cid.startswith(client_id):
+                        ws = w
+                        break
+            if ws and not ws.closed:
                 try:
                     await ws.send_str(data)
+                    return True
                 except Exception:
                     pass
-            return
+            return False
 
         # Broadcast to all browsers
         for session in self._sessions.values():
@@ -1151,6 +1227,7 @@ class WsBridge:
                 if cid:
                     self._client_sessions.pop(cid, None)
                     self._ws_by_client.pop(cid, None)
+        return True
 
     def get_message_history(self, session_id: str) -> list[dict[str, Any]]:
         """Get message history for a session (used by Ring0 MCP)."""
@@ -1213,6 +1290,14 @@ class WsBridge:
                 },
             })
         self._send_to_cli(session, ndjson)
+        # Fire state transition based on permission response
+        if session.state.get("is_waiting_for_permission"):
+            session.state["is_waiting_for_permission"] = False
+            if behavior == "allow":
+                asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→running"))
+            else:
+                session.state["is_running"] = False
+                asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→idle"))
         self._persist_session(session)
         await self._broadcast_to_browsers(session, {
             "type": "permission_cancelled",

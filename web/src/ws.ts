@@ -518,16 +518,49 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
           window.open(url, "_blank");
           response = { type: "rpc_response", id: rpcId, result: { opened: true, url } };
         }
-      } else if (method === "list_audio_devices") {
+      } else if (method === "list_audio_devices" || method === "get_audio_devices") {
         if (!navigator.mediaDevices?.enumerateDevices) {
           response = { type: "rpc_response", id: rpcId, error: "enumerateDevices not supported", errorCode: "not_supported" };
         } else {
           navigator.mediaDevices.enumerateDevices().then(
             (devices) => {
+              const inputs = devices
+                .filter((d) => d.kind === "audioinput")
+                .map((d) => ({ deviceId: d.deviceId, label: d.label || d.deviceId, groupId: d.groupId }));
               const outputs = devices
                 .filter((d) => d.kind === "audiooutput")
-                .map((d) => ({ deviceId: d.deviceId, label: d.label || d.deviceId }));
-              rpcSend({ type: "rpc_response", id: rpcId, result: { devices: outputs } });
+                .map((d) => ({ deviceId: d.deviceId, label: d.label || d.deviceId, groupId: d.groupId }));
+
+              // Active input: check WebRTC local stream audio track
+              let activeInput: { deviceId: string; label: string } | null = null;
+              const audio = getRemoteAudio();
+              // Find active local stream from any WebRTC session
+              const rtcSessions = (window as unknown as Record<string, unknown>).__v8_rtcSessions as Map<string, { localStream: MediaStream }> | undefined;
+              if (rtcSessions) {
+                for (const [, sess] of rtcSessions) {
+                  const track = sess.localStream?.getAudioTracks()[0];
+                  if (track) {
+                    const settings = track.getSettings();
+                    activeInput = { deviceId: settings.deviceId || "", label: track.label || settings.deviceId || "" };
+                    break;
+                  }
+                }
+              }
+
+              // Active output: check setSinkId on remote audio element
+              const activeOutputId = audio && (audio as unknown as Record<string, string>).sinkId;
+
+              rpcSend({
+                type: "rpc_response", id: rpcId,
+                result: {
+                  inputs,
+                  outputs,
+                  // Legacy compat: "devices" = outputs only
+                  devices: outputs,
+                  activeInput,
+                  activeOutputDeviceId: activeOutputId || null,
+                },
+              });
             },
             (err) => {
               rpcSend({ type: "rpc_response", id: rpcId, error: `enumerateDevices error: ${(err as Error).message}` });
@@ -557,14 +590,75 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
             break; // async
           }
         }
+      } else if (method === "set_audio_input") {
+        const deviceId = (data.params as Record<string, string> | undefined)?.deviceId;
+        if (!deviceId) {
+          response = { type: "rpc_response", id: rpcId, error: "No deviceId param provided", errorCode: "missing_param" };
+        } else {
+          const rtcSessions = (window as unknown as Record<string, unknown>).__v8_rtcSessions as Map<string, { pc: RTCPeerConnection; localStream: MediaStream }> | undefined;
+          let found = false;
+          if (rtcSessions) {
+            for (const [, sess] of rtcSessions) {
+              found = true;
+              navigator.mediaDevices.getUserMedia({
+                audio: { deviceId: { exact: deviceId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+              }).then(
+                async (newStream) => {
+                  const newTrack = newStream.getAudioTracks()[0];
+                  // Replace track on RTCPeerConnection sender (no renegotiation needed)
+                  const sender = sess.pc.getSenders().find((s) => s.track?.kind === "audio");
+                  if (sender) await sender.replaceTrack(newTrack);
+                  // Stop old tracks and update localStream
+                  sess.localStream.getAudioTracks().forEach((t) => t.stop());
+                  sess.localStream.getAudioTracks().forEach((t) => sess.localStream.removeTrack(t));
+                  sess.localStream.addTrack(newTrack);
+                  const settings = newTrack.getSettings();
+                  rpcSend({ type: "rpc_response", id: rpcId, result: { set: true, deviceId, label: newTrack.label || settings.deviceId || "" } });
+                },
+                (err: Error) => {
+                  rpcSend({ type: "rpc_response", id: rpcId, error: `getUserMedia error: ${err.message}` });
+                },
+              );
+              break; // only one session
+            }
+          }
+          if (!found) {
+            response = { type: "rpc_response", id: rpcId, error: "No active WebRTC session", errorCode: "no_session" };
+          } else {
+            break; // async
+          }
+        }
       } else if (method === "show_content") {
         const params = data.params as Record<string, string> | undefined;
         const contentType = params?.type ?? "markdown";
         const content = params?.content ?? "";
-        store.setSecondScreenContent({ type: contentType, content });
+        const filename = params?.filename;
+        store.setSecondScreenContent({ type: contentType, content, ...(filename && { filename }) });
         response = { type: "rpc_response", id: rpcId, result: { shown: true, type: contentType } };
+      } else if (method === "mirror_session") {
+        const params = data.params as Record<string, string> | undefined;
+        const sid = params?.sessionId ?? null;
+        store.setMirroredSessionId(sid);
+        store.setSecondScreenContent(null);
+        response = { type: "rpc_response", id: rpcId, result: { mirroring: true, sessionId: sid } };
+      } else if (method === "get_device_info") {
+        response = {
+          type: "rpc_response", id: rpcId,
+          result: {
+            screenWidth: window.innerWidth,
+            screenHeight: window.innerHeight,
+            devicePixelRatio: window.devicePixelRatio,
+            userAgent: navigator.userAgent,
+            platform: navigator.platform,
+            language: navigator.language,
+            colorScheme: window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
+            online: navigator.onLine,
+            touchSupport: navigator.maxTouchPoints > 0,
+          },
+        };
       } else if (method === "clear_content") {
         store.setSecondScreenContent(null);
+        store.setMirroredSessionId(null);
         response = { type: "rpc_response", id: rpcId, result: { cleared: true } };
       } else {
         response = { type: "rpc_response", id: rpcId, error: `unknown method: ${method}` };
@@ -606,12 +700,12 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
     }
 
     case "session_name_update": {
-      // Only apply auto-name if user hasn't manually renamed (still has random Adj+Noun name)
+      // User renames always apply; auto-names only overwrite random "Adj Noun" names
       const currentName = store.sessionNames.get(sessionId);
       const isRandomName = currentName && /^[A-Z][a-z]+ [A-Z][a-z]+$/.test(currentName);
-      if (!currentName || isRandomName) {
+      if (data.userRenamed || !currentName || isRandomName) {
         store.setSessionName(sessionId, data.name);
-        store.markRecentlyRenamed(sessionId);
+        if (!data.userRenamed) store.markRecentlyRenamed(sessionId);
       }
       break;
     }

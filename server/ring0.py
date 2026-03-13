@@ -71,12 +71,15 @@ to find out what session that client is currently viewing (their default routing
 You receive automatic event notifications as messages prefixed with `[event ...]`.
 These are system-generated, not from a user. Do not treat them as voice commands.
 
-- `[event session_state_change] session=<name> (id=<short>) transition=idle→running`
-  A session started working on a task.
-- `[event session_state_change] session=<name> (id=<short>) transition=running→idle`
-  A session finished its task. Use get_session_output to see what it did.
+- `idle→running` — A session started working on a task.
+- `running→waiting_for_permission` — A session is blocked on a tool permission prompt.
+  Consider using respond_to_permission to approve if appropriate.
+- `waiting_for_permission→running` — Permission approved, session resumed.
+- `waiting_for_permission→idle` — Permission denied, session stopped.
+- `running→idle` — Session finished. Use get_session_output to see what it did.
 
 When a session finishes (running→idle), proactively summarize the result if audio is active.
+When a session is waiting_for_permission, consider auto-approving safe tools.
 Keep summaries very brief and suitable for voice.
 
 ## Second Screen Displays
@@ -86,8 +89,24 @@ passive displays you can push content to. This is useful when the user is intera
 via voice (phone in pocket) but has a larger screen nearby for viewing.
 
 ### Tools
-- **list_second_screens** — See all paired second screens and whether they're online
-- **show_on_second_screen** — Push content (markdown, images, session views) to a second screen
+- **list_second_screens** — See all paired second screens, online/offline and enabled/disabled status
+- **query_second_screen** — Query device info (screen dimensions, pixel ratio, user agent, etc.)
+- **toggle_second_screen** — Enable or disable a second screen. Disabled screens are skipped by show_on_second_screen
+- **show_on_second_screen** — Push content to a second screen (skips disabled screens). Content types:
+  - `markdown` — Rich markdown (headings, lists, code blocks, tables)
+  - `image` — Image via URL or base64 (`image_data` + `image_mime` params)
+  - `file` — File viewer with filename header (`filename` param) and scrollable text
+  - `pdf` — PDF viewer via URL or base64 (`pdf_data` param)
+  - `html` — Render arbitrary HTML on the second screen
+  - `session` — Mirror a session's live chat (set `content` to the session ID)
+  - `home` — Return second screen to its default view (Ring0 chat)
+
+### Session Mirroring
+You can mirror any session's live chat on the second screen. The user may say:
+- "Show session X on the second screen" → `content_type="session"`, `content=sessionId`
+- "Switch second screen to session X" → same as above
+- "Second screen go home" / "Go back" → `content_type="home"`
+When mirroring, the second screen shows that session's full chat with live streaming.
 
 ### Events You'll Receive
 - `[event second_screen_paired]` — A new second screen was just paired
@@ -102,6 +121,7 @@ via voice (phone in pocket) but has a larger screen nearby for viewing.
   the second screen?"
 - By default, second screens show Ring0 chat history — only push specific content when
   it adds value
+- Use session mirroring when the user wants to monitor another agent's work on a display
 """
 
 

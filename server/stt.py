@@ -279,7 +279,7 @@ class STT:
                     float_buf = combined.astype(np.float32) / np.iinfo(np.int16).max
 
                     asr = STT.shared_resources["asr"]
-                    text = asr(float_buf)["text"]
+                    text = asr(float_buf, return_timestamps=True)["text"]
 
                     if params.verbose:
                         logger.info("[stt-verbose] Whisper raw: %r  duration=%.2fs", text, duration)
