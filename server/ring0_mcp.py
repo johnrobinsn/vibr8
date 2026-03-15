@@ -299,6 +299,8 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
             - "list_audio_devices" — list available audio input/output devices. No params.
             - "set_audio_output" — set the audio output device. params: {"deviceId": "..."}
             - "set_audio_input" — switch microphone input device. params: {"deviceId": "..."}
+            - "bring_to_foreground" — bring the vibr8 app to front (Android native). No params.
+            - "launch_app" — launch an app on Android. params: {"package": "com.example.app"} or {"url": "https://..."} or {"url": "tel:+1234567890"}
         params: Optional JSON string of parameters to pass to the method (e.g., '{"title": "Hello", "body": "World"}').
     """
     body: dict[str, Any] = {"clientId": client_id, "method": method}
@@ -311,6 +313,53 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
     if result.get("error"):
         return f"Error: {result['error']}"
     return json.dumps(result.get("result", {}), indent=2)
+
+
+@mcp.tool()
+async def launch_app(package: str = "", url: str = "") -> str:
+    """Launch an app on the user's Android device.
+
+    Uses the native WebSocket connection to send a launch_app command.
+    Requires an Android device with the vibr8 native layer connected.
+
+    Args:
+        package: Android package name (e.g., "com.google.android.gm" for Gmail,
+                 "com.android.chrome" for Chrome, "com.google.android.apps.maps" for Maps).
+        url: URL or intent URI to open (e.g., "https://gmail.com", "tel:+1234567890",
+             "mailto:user@example.com"). Can be used instead of or together with package.
+    """
+    if not package and not url:
+        return "Error: provide either 'package' or 'url' (or both)."
+
+    # Find a connected client to send the command to
+    clients = await _get("/ring0/clients")
+    if not clients:
+        return "Error: no clients connected."
+
+    # Pick the first primary client
+    target_id = None
+    for cid, info in clients.items():
+        role = info.get("role", "primary") if isinstance(info, dict) else "primary"
+        if role == "primary":
+            target_id = cid
+            break
+    if not target_id:
+        target_id = next(iter(clients))
+
+    params: dict[str, str] = {}
+    if package:
+        params["package"] = package
+    if url:
+        params["url"] = url
+
+    result = await _post("/ring0/query-client", {
+        "clientId": target_id,
+        "method": "launch_app",
+        "params": params,
+    })
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    return f"Launched {'package ' + package if package else url}."
 
 
 @mcp.tool()
