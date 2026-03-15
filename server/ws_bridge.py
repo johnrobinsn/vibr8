@@ -64,6 +64,7 @@ class Session:
     pending_permissions: dict[str, dict[str, Any]] = field(default_factory=dict)
     message_history: list[dict[str, Any]] = field(default_factory=list)
     pending_messages: list[str] = field(default_factory=list)
+    replaying: bool = False  # True while CLI is replaying history after resume
 
 
 # ── Bridge ───────────────────────────────────────────────────────────────────
@@ -633,6 +634,13 @@ class WsBridge:
     async def _handle_system_message(self, session: Session, msg: dict[str, Any]) -> None:
         subtype = msg.get("subtype")
         if subtype == "init":
+            # CLI is (re)connecting — it will replay its conversation history.
+            # Mark as replaying so we ignore replayed messages (the persisted
+            # message_history is already authoritative). Reset running state.
+            session.replaying = True
+            session.state["is_running"] = False
+            session.state["is_waiting_for_permission"] = False
+
             if msg.get("session_id") and self._on_cli_session_id:
                 self._on_cli_session_id(session.id, msg["session_id"])
 
@@ -700,6 +708,10 @@ class WsBridge:
             })
 
     async def _handle_assistant_message(self, session: Session, msg: dict[str, Any]) -> None:
+        # During CLI replay after resume, ignore — persisted history is authoritative.
+        if session.replaying:
+            return
+
         # Detect idle → running transition
         if not session.state.get("is_running"):
             session.state["is_running"] = True
@@ -812,6 +824,10 @@ class WsBridge:
             self._stop_thinking(session_id)
 
     async def _handle_result_message(self, session: Session, msg: dict[str, Any]) -> None:
+        # During CLI replay after resume, ignore — persisted history is authoritative.
+        if session.replaying:
+            return
+
         # Detect running → idle transition
         if session.state.get("is_running"):
             session.state["is_running"] = False
@@ -883,6 +899,8 @@ class WsBridge:
             pass
 
     async def _handle_stream_event(self, session: Session, msg: dict[str, Any]) -> None:
+        if session.replaying:
+            return
         # Agent is streaming a response — stop thinking tone.
         self._stop_thinking(session.id)
         await self._broadcast_to_browsers(session, {
@@ -892,6 +910,8 @@ class WsBridge:
         })
 
     async def _handle_control_request(self, session: Session, msg: dict[str, Any]) -> None:
+        if session.replaying:
+            return
         # Tool permission request — agent is working, play thinking tone.
         self._start_thinking_now(session.id)
         request = msg.get("request", {})
@@ -916,6 +936,8 @@ class WsBridge:
                 asyncio.ensure_future(self._notify_ring0_state_change(session, "running→waiting_for_permission"))
 
     async def _handle_tool_progress(self, session: Session, msg: dict[str, Any]) -> None:
+        if session.replaying:
+            return
         # Agent is executing a tool — play thinking tone.
         self._start_thinking_now(session.id)
         await self._broadcast_to_browsers(session, {
@@ -926,6 +948,8 @@ class WsBridge:
         })
 
     async def _handle_tool_use_summary(self, session: Session, msg: dict[str, Any]) -> None:
+        if session.replaying:
+            return
         await self._broadcast_to_browsers(session, {
             "type": "tool_use_summary",
             "summary": msg.get("summary"),
@@ -983,6 +1007,8 @@ class WsBridge:
             self._handle_set_permission_mode(session, msg.get("mode", ""))
 
     async def _handle_user_message(self, session: Session, msg: dict[str, Any], source_client_id: str = "") -> None:
+        # New user message means CLI replay is over — resume live operation.
+        session.replaying = False
         import time
         history_entry: dict[str, Any] = {
             "type": "user_message",
