@@ -215,6 +215,29 @@ class WsBridge:
             name=session_names.get_name(session.id),
         ))
 
+    def flush_to_disk(self) -> None:
+        """Immediately persist all sessions that have pending debounced saves."""
+        if not self._store:
+            return
+        pending = self._store.has_pending_saves()
+        if not pending:
+            return
+        from server.session_store import PersistedSession
+        from server import session_names
+        for session_id in pending:
+            session = self._sessions.get(session_id)
+            if session:
+                self._store.save_sync(PersistedSession(
+                    id=session.id,
+                    state=session.state,
+                    messageHistory=session.message_history,
+                    pendingMessages=session.pending_messages,
+                    pendingPermissions=list(session.pending_permissions.items()),
+                    name=session_names.get_name(session.id),
+                ))
+        self._store.cancel_pending()
+        logger.info("[ws-bridge] Flushed %d session(s) to disk", len(pending))
+
     # ── Session management ───────────────────────────────────────────────
 
     def get_or_create_session(self, session_id: str, backend_type: str = "claude") -> Session:

@@ -94,6 +94,16 @@ class SessionStore:
         handle = loop.call_later(0.15, self.save_sync, session)
         self._debounce_timers[session.id] = handle
 
+    def has_pending_saves(self) -> set[str]:
+        """Return session IDs with pending debounced saves."""
+        return set(self._debounce_timers.keys())
+
+    def cancel_pending(self) -> None:
+        """Cancel all pending debounce timers (call after flushing externally)."""
+        for handle in self._debounce_timers.values():
+            handle.cancel()
+        self._debounce_timers.clear()
+
     def save_sync(self, session: PersistedSession) -> None:
         """Immediate write -- use for critical state changes.
 

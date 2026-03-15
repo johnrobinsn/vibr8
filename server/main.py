@@ -464,6 +464,9 @@ def create_app() -> web.Application:
     async def on_shutdown(app: web.Application) -> None:
         logger.info("[server] Shutting down (restart=%s)...", _restart["requested"])
 
+        # Flush any pending debounced session saves to disk before anything else.
+        ws_bridge.flush_to_disk()
+
         # Cancel all tracked background tasks first.
         for task in list(background_tasks):
             task.cancel()
