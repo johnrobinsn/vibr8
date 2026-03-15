@@ -94,6 +94,67 @@ vibr8 stores configuration in `~/.vibr8/`:
 
 For HTTPS (required for WebRTC on non-localhost), place `key.pem` and `cert.pem` in `certs/`.
 
+## Voice Commands
+
+vibr8 supports voice input via WebRTC. Speech is transcribed by Whisper + Silero VAD and routed to the active session (or Ring0 if enabled).
+
+### Guard Word
+
+The guard word is **"vibr8"** (also recognized as **"vibrate"**). It serves two purposes:
+
+1. **Command prefix** — When followed by a known command, the guard word and command are stripped and the command is executed.
+2. **Guard mode gate** — When guard mode is enabled, only transcripts containing the guard word are accepted (others are silently discarded).
+
+If the guard word appears but is **not** followed by a known command, the entire transcript passes through **unmodified**. This allows natural speech like "check the vibr8 session" to arrive intact.
+
+When a command **is** matched, any text spoken *before* the guard word is submitted as separate input first, then the command executes. For example, "finish this up vibr8 guard" submits "finish this up" then enables guard mode.
+
+### Commands
+
+All commands are prefixed with the guard word (e.g., "vibr8 guard").
+
+| Command | Effect |
+|---------|--------|
+| `done` | End the active voice mode (e.g., note mode). Always recognized, even inside voice modes. |
+| `off` | Disconnect audio entirely. |
+| `guard` | Enable guard mode — only guard-prefixed speech is accepted. |
+| `listen` | Disable guard mode — all speech is accepted. |
+| `quiet` | Mute TTS — the agent stops speaking responses aloud. |
+| `speak` | Unmute TTS — resume spoken responses. |
+| `ring zero on` | Enable Ring0 meta-agent. All voice routes to Ring0. |
+| `ring zero off` | Disable Ring0. Voice routes to the active session. |
+| `note` | Enter note mode — speech is accumulated silently until "vibr8 done". |
+
+### Escape Sequences
+
+These are treated as commands (guard word is stripped) but produce transformed output:
+
+| Escape | Result | Use case |
+|--------|--------|----------|
+| `vibr8 vibrate ...` | `vibrate ...` | Say the literal word "vibrate" |
+| `vibr8 app ...` | `vibr8 ...` | Say "vibr8" literally when a command would otherwise intercept |
+
+### Note Mode
+
+Say **"vibr8 note"** to enter note mode:
+
+- All speech is silently accumulated (not submitted to any session).
+- Ring0's TTS is muted so it doesn't talk over dictation.
+- Only **"vibr8 done"** exits — all other speech is captured as fragments.
+- Text before "vibr8 done" in the final transcript is added as a last fragment.
+
+On exit, the accumulated note is submitted as a `[voice note]` message. If Ring0 is enabled, a `[note_mode ended]` review message follows so Ring0 can summarize anything that happened during dictation. If audio disconnects during note mode, a `[voice note interrupted]` message is submitted instead.
+
+### Guard Mode
+
+When guard mode is **enabled** (default), transcripts without the guard word are discarded. When **disabled** ("vibr8 listen"), all speech is submitted.
+
+The guard word check is independent of command matching — "check the vibr8 session" passes the guard check (word is present) even though no command matches (text passes through unmodified).
+
+### Ring0 Meta-Agent
+
+When Ring0 is enabled, all voice routes to Ring0 instead of the active session. Ring0 can list/create/interrupt sessions, send messages, switch the UI, manage permissions, and control second screen displays. Ring0's TTS is automatically muted during note mode.
+
 ## Architecture
 
 ```

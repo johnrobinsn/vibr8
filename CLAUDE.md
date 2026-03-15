@@ -55,6 +55,21 @@ Browser ↔ (WebSocket NDJSON) ↔ `WsBridge` ↔ (WebSocket NDJSON) ↔ Claude 
 
 The WebSocket protocol is reverse-engineered and documented in `WEBSOCKET_PROTOCOL_REVERSED.md`.
 
+## Voice Commands (`server/webrtc.py`)
+
+Guard word **"vibr8"** (or **"vibrate"**) triggers commands only when followed by a known keyword. If no command matches, the entire transcript passes through unmodified (guard word included). When a command matches, any pre-text before the guard word is submitted as input first.
+
+**Commands:** `done`, `off`, `guard`, `listen`, `quiet`, `speak`, `ring zero on`, `ring zero off`, `note`
+**Escape sequences (also commands):** `vibr8 vibrate ...` → `vibrate ...`, `vibr8 app ...` → `vibr8 ...`
+
+**Guard mode:** When enabled (default), discards transcripts without the guard word. Guard word presence is checked independently of command matching.
+
+**Note mode** (`vibr8 note`): Accumulates speech silently, mutes Ring0 TTS. Only `vibr8 done` exits. On exit, submits `[voice note]` and sends `[note_mode ended]` to Ring0. Pre-text before "vibr8 done" is added as a final fragment.
+
+**Ring0 routing:** When Ring0 is enabled, all voice input routes to Ring0 instead of the active session.
+
+See `README.md` for full voice command documentation.
+
 ## Conventions
 
 - **Wire format**: REST API and TypedDicts use camelCase for JSON compatibility with the frontend. Python internals use snake_case.
