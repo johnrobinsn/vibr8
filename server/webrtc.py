@@ -260,6 +260,14 @@ class WebRTCManager:
                         self._ws_bridge.broadcast_voice_mode(ring0_sid, mode_name)
                     )
 
+        # Mute/unmute Ring0 TTS during note mode so it doesn't talk over dictation
+        if self._ring0_manager and self._ring0_manager.is_enabled:
+            is_note = isinstance(mode, NoteMode)
+            pair = self.get_any_outgoing_track()
+            if pair:
+                audio_sid, _ = pair
+                self.set_tts_muted(audio_sid, is_note)
+
     async def handle_offer(
         self, session_id: str, sdp: str, sdp_type: str, client_id: str = "",
         playground: bool = False, profile_id: str | None = None,
@@ -426,6 +434,14 @@ class WebRTCManager:
                             ring0_sid = self._ring0_manager.session_id
                             if ring0_sid:
                                 await self._ws_bridge.submit_user_message(ring0_sid, result, source_client_id=client_id)
+                                if isinstance(mode, NoteMode):
+                                    await self._ws_bridge.submit_user_message(
+                                        ring0_sid,
+                                        "[note_mode ended] Review what happened during note mode. "
+                                        "If any sessions finished, failed, or need user action, "
+                                        "give a brief spoken summary. If nothing needs attention, "
+                                        "say nothing.",
+                                    )
                                 return
                         await self._ws_bridge.submit_user_message(session_id, result, source_client_id=client_id)
                         return
