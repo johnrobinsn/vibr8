@@ -68,7 +68,7 @@ class PersistedSession:
 
 # ─── Store ──────────────────────────────────────────────────────────────────
 
-DEFAULT_DIR = Path(tempfile.gettempdir()) / "vibe-sessions"
+DEFAULT_DIR = Path.home() / ".vibr8" / "sessions"
 
 
 class SessionStore:
@@ -95,13 +95,19 @@ class SessionStore:
         self._debounce_timers[session.id] = handle
 
     def save_sync(self, session: PersistedSession) -> None:
-        """Immediate write -- use for critical state changes."""
+        """Immediate write -- use for critical state changes.
+
+        Uses atomic write (temp file + rename) so a full-disk scenario
+        cannot truncate the existing file to 0 bytes.
+        """
         # Clean up timer reference if we were called by the debounce callback.
         self._debounce_timers.pop(session.id, None)
+        target = self._file_path(session.id)
         try:
-            self._file_path(session.id).write_text(
-                json.dumps(session.to_dict()), encoding="utf-8"
-            )
+            data = json.dumps(session.to_dict())
+            tmp = target.with_suffix(".tmp")
+            tmp.write_text(data, encoding="utf-8")
+            tmp.replace(target)
         except Exception:
             logger.exception("Failed to save session %s", session.id)
 
@@ -152,10 +158,11 @@ class SessionStore:
 
     def save_launcher(self, data: Any) -> None:
         """Persist launcher state (separate file)."""
+        target = self._dir / "launcher.json"
         try:
-            (self._dir / "launcher.json").write_text(
-                json.dumps(data), encoding="utf-8"
-            )
+            tmp = target.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(target)
         except Exception:
             logger.exception("Failed to save launcher state")
 
