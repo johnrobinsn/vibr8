@@ -67,6 +67,15 @@ function getLanguageExtension(filename: string) {
   }
 }
 
+const IMAGE_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif",
+]);
+
+function isImageFile(filename: string): boolean {
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_EXTENSIONS.has(ext);
+}
+
 function FileIcon({ isDir, expanded }: { isDir: boolean; expanded?: boolean }) {
   if (isDir) {
     return expanded ? (
@@ -227,9 +236,16 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
     }).catch(() => setTreeLoading(false));
   }, [cwd]);
 
-  // Load file content when a file is selected
+  // Load file content when a file is selected (skip for images)
   useEffect(() => {
     if (!openFilePath) return;
+    const name = openFilePath.split("/").pop() ?? "";
+    if (isImageFile(name)) {
+      setFileContent("");
+      setSavedContent("");
+      setFileLoading(false);
+      return;
+    }
     setFileLoading(true);
     setSaveStatus(null);
     api.readFile(openFilePath).then((res) => {
@@ -465,6 +481,19 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
             </div>
           ) : diffMode && changedFiles.has(openFilePath) ? (
             <DiffView diff={diffContent} />
+          ) : fileName && isImageFile(fileName) ? (
+            <div className="h-full flex items-center justify-center p-8 overflow-auto bg-[repeating-conic-gradient(var(--color-cc-border)_0%_25%,transparent_0%_50%)_0_0/20px_20px]">
+              <img
+                src={`/api/fs/raw?path=${encodeURIComponent(openFilePath)}`}
+                alt={fileName}
+                className="max-w-full max-h-full object-contain rounded shadow-lg"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).style.display = "none";
+                  (e.target as HTMLImageElement).parentElement!.innerHTML =
+                    '<p class="text-cc-muted text-sm">Failed to load image</p>';
+                }}
+              />
+            </div>
           ) : (
             <CodeMirror
               value={fileContent}

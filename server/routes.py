@@ -418,6 +418,22 @@ def create_routes(
         except Exception as e:
             return web.json_response({"error": str(e)}, status=404)
 
+    @routes.get("/api/fs/raw")
+    async def fs_raw(request: web.Request) -> web.Response:
+        """Serve a file with its native MIME type (for images, etc.)."""
+        file_path = request.query.get("path")
+        if not file_path:
+            return web.json_response({"error": "path required"}, status=400)
+        p = Path(file_path).resolve()
+        if not p.is_file():
+            return web.json_response({"error": "File not found"}, status=404)
+        try:
+            if p.stat().st_size > 20 * 1024 * 1024:
+                return web.json_response({"error": "File too large (>20MB)"}, status=413)
+            return web.FileResponse(p)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
     @routes.put("/api/fs/write")
     async def fs_write(request: web.Request) -> web.Response:
         try:
