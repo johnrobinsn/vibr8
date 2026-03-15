@@ -1148,7 +1148,7 @@ class WsBridge:
             if self._client_roles.get(cid) == "secondscreen"
         }
 
-    async def _native_rpc(self, client_id: str, method: str, timeout: float = 5.0) -> dict:
+    async def _native_rpc(self, client_id: str, method: str, params: dict | None = None, timeout: float = 5.0) -> dict:
         """Send a command to the native WebSocket and await the response."""
         native_ws = self._native_ws_by_client.get(client_id)
         if not native_ws:
@@ -1162,7 +1162,9 @@ class WsBridge:
         rpc_id = str(uuid.uuid4())
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._native_rpc_pending[rpc_id] = future
-        msg = {"command": method, "id": rpc_id}
+        msg: dict = {"command": method, "id": rpc_id}
+        if params:
+            msg["params"] = params
         try:
             logger.info("[ws-bridge] Native RPC send: client=%s command=%s id=%s", client_id[:8], method, rpc_id[:8])
             await native_ws.send_str(json.dumps(msg))
@@ -1176,8 +1178,9 @@ class WsBridge:
 
     async def rpc_call(self, client_id: str, method: str, params: dict | None = None, timeout: float = 5.0) -> dict:
         """Send an RPC request to a specific browser client and await the response."""
-        # For bring_to_foreground, prefer native socket (works when WebView is paused)
-        if method == "bring_to_foreground":
+        # Native-only commands: prefer native socket (works when WebView is paused)
+        _native_methods = {"bring_to_foreground", "launch_app"}
+        if method in _native_methods:
             native_ws = self._native_ws_by_client.get(client_id)
             if not native_ws:
                 for cid in self._native_ws_by_client:
@@ -1185,7 +1188,7 @@ class WsBridge:
                         native_ws = self._native_ws_by_client[cid]
                         break
             if native_ws and not native_ws.closed:
-                return await self._native_rpc(client_id, method, timeout=timeout)
+                return await self._native_rpc(client_id, method, params=params, timeout=timeout)
             # Fall through to JS RPC path (PWA/browser)
 
         ws = self._ws_by_client.get(client_id)
