@@ -31,6 +31,7 @@ SESSION_MAX_AGE = 30 * 86400  # 30 days
 # Routes that don't require auth
 PUBLIC_PREFIXES = (
     "/ws/cli/",
+    "/ws/native/",
     "/api/auth/login",
     "/api/auth/me",
     "/api/ring0/",

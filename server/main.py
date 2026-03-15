@@ -163,6 +163,35 @@ async def handle_playground_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def handle_native_ws(request: web.Request) -> web.WebSocketResponse:
+    """Handle native WebSocket from Android foreground service.
+
+    This connection bypasses the WebView and stays alive when the app is
+    backgrounded, enabling bring-to-foreground and other native commands.
+    """
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+    client_id = request.match_info["client_id"]
+
+    bridge: WsBridge = request.app["bridge"]
+    bridge.register_native_ws(client_id, ws)
+
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    data = _json.loads(msg.data)
+                    bridge.handle_native_message(client_id, data)
+                except Exception:
+                    logger.exception("[native] Error handling message from client %s", client_id[:8])
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                break
+    finally:
+        bridge.unregister_native_ws(client_id)
+
+    return ws
+
+
 async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
     """Handle WebSocket connections for terminal (PTY) sessions."""
     import json as _json
@@ -341,6 +370,7 @@ def create_app() -> web.Application:
     # WebSocket endpoints
     app.router.add_get("/ws/cli/{session_id}", handle_cli_ws)
     app.router.add_get("/ws/browser/{session_id}", handle_browser_ws)
+    app.router.add_get("/ws/native/{client_id}", handle_native_ws)
     app.router.add_get("/ws/terminal/{session_id}", handle_terminal_ws)
     app.router.add_get("/ws/playground/{client_id}", handle_playground_ws)
 

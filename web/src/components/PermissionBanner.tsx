@@ -100,6 +100,7 @@ export function PermissionBanner({
               <AskUserQuestionDisplay
                 input={permission.input}
                 onSelect={(answers) => handleAllow({ ...permission.input, answers })}
+                onDismiss={handleDeny}
                 disabled={loading}
               />
             ) : (
@@ -208,10 +209,12 @@ function BashDisplay({ input }: { input: Record<string, unknown> }) {
 function AskUserQuestionDisplay({
   input,
   onSelect,
+  onDismiss,
   disabled,
 }: {
   input: Record<string, unknown>;
   onSelect: (answers: Record<string, string>) => void;
+  onDismiss: () => void;
   disabled: boolean;
 }) {
   const questions = Array.isArray(input.questions) ? input.questions : [];
@@ -250,8 +253,11 @@ function AskUserQuestionDisplay({
     const question = typeof input.question === "string" ? input.question : "";
     if (question) {
       return (
-        <div className="text-sm text-cc-fg bg-cc-code-bg/30 rounded-lg px-3 py-2">
-          {question}
+        <div className="space-y-2">
+          <div className="text-sm text-cc-fg bg-cc-code-bg/30 rounded-lg px-3 py-2">
+            {question}
+          </div>
+          <DismissButton onClick={onDismiss} disabled={disabled} />
         </div>
       );
     }
@@ -357,17 +363,35 @@ function AskUserQuestionDisplay({
         );
       })}
 
-      {/* Submit all for multi-question */}
-      {questions.length > 1 && Object.keys(selections).length > 0 && (
-        <button
-          onClick={handleSubmitAll}
-          disabled={disabled}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-lg bg-cc-primary hover:bg-cc-primary-hover text-white disabled:opacity-50 transition-colors cursor-pointer"
-        >
-          Submit answers
-        </button>
-      )}
+      <div className="flex items-center gap-2">
+        {/* Submit all for multi-question */}
+        {questions.length > 1 && Object.keys(selections).length > 0 && (
+          <button
+            onClick={handleSubmitAll}
+            disabled={disabled}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-lg bg-cc-primary hover:bg-cc-primary-hover text-white disabled:opacity-50 transition-colors cursor-pointer"
+          >
+            Submit answers
+          </button>
+        )}
+        <DismissButton onClick={onDismiss} disabled={disabled} />
+      </div>
     </div>
+  );
+}
+
+function DismissButton({ onClick, disabled }: { onClick: () => void; disabled: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-cc-hover hover:bg-cc-active text-cc-muted hover:text-cc-fg border border-cc-border disabled:opacity-50 transition-colors cursor-pointer"
+    >
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5" className="w-3 h-3">
+        <path d="M4 4l8 8M12 4l-8 8" />
+      </svg>
+      Dismiss
+    </button>
   );
 }
 

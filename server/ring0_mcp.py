@@ -4,9 +4,12 @@ Launched as a subprocess by Claude CLI with --mcp-config.
 Communicates with vibr8's REST API via localhost.
 """
 
+import asyncio
 import os
 import json
 import logging
+import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -39,6 +42,63 @@ async def _post(path: str, body: dict | None = None) -> dict[str, Any]:
         return r.json()
 
 
+
+def _slugify(name: str) -> str:
+    """Convert a name to a filesystem-safe slug."""
+    s = name.lower().strip()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"[\s_-]+", "-", s)
+    return s.strip("-") or "session"
+
+
+@mcp.tool()
+async def create_session(
+    name: str,
+    backend: str = "claude",
+    project_dir: str = "",
+    model: str = "",
+    initial_message: str = "",
+) -> str:
+    """Create a new coding session with its own working directory.
+
+    Args:
+        name: Human-readable session name (e.g., "auth refactor", "frontend tests").
+        backend: Backend type — "claude" (default) or "codex".
+        project_dir: Working directory for the session. If empty, creates /mntc/code/{slugified-name}.
+        model: Optional model override (e.g., "claude-sonnet-4-6").
+        initial_message: Optional first message to send to the session after creation.
+    """
+    if backend not in ("claude", "codex"):
+        return f"Error: backend must be 'claude' or 'codex', got '{backend}'."
+
+    # Resolve working directory
+    cwd = project_dir.strip() if project_dir else f"/mntc/code/{_slugify(name)}"
+    Path(cwd).mkdir(parents=True, exist_ok=True)
+
+    # Create the session via REST API
+    body: dict[str, Any] = {"cwd": cwd, "backend": backend, "name": name}
+    if model:
+        body["model"] = model
+    result = await _post("/ring0/create-session", body)
+
+    if result.get("error"):
+        return f"Error creating session: {result['error']}"
+
+    session_id = result.get("sessionId", "")
+    if not session_id:
+        return f"Error: no sessionId in response: {json.dumps(result)}"
+
+    # Wait for CLI to connect, then send initial message if provided
+    if initial_message:
+        await asyncio.sleep(2)
+        await _post("/ring0/send-message", {"sessionId": session_id, "message": initial_message})
+
+    parts = [f"Session created: {name} (id={session_id[:8]}, cwd={cwd})"]
+    if initial_message:
+        parts.append(f"Initial message sent: {initial_message[:80]}")
+    return "\n".join(parts)
+
+
 @mcp.tool()
 async def list_sessions() -> str:
     """List all active vibr8 sessions with their IDs, names, status, and working directories."""
@@ -60,6 +120,22 @@ async def list_sessions() -> str:
         perm_info = f", BLOCKED: {pending} pending permission(s)" if pending else ""
         lines.append(f"- {name} (id={sid[:8]}, state={state}, type={backend}, cwd={cwd}{perm_info})")
     return "\n".join(lines) if lines else "No active sessions."
+
+
+@mcp.tool()
+async def interrupt_session(session_id: str) -> str:
+    """Interrupt/cancel a running session (equivalent to Ctrl+C / Escape).
+
+    Use this when the user says "stop", "cancel", "nevermind", or you need to
+    halt a session that is doing something wrong.
+
+    Args:
+        session_id: The session ID (full or prefix) to interrupt.
+    """
+    result = await _post("/ring0/interrupt", {"sessionId": session_id})
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    return f"Interrupted session {session_id[:8]}."
 
 
 @mcp.tool()
@@ -93,6 +169,32 @@ async def switch_ui(session_id: str, client_id: str = "") -> str:
     return f"Switched {target} to session {session_id[:8]}."
 
 
+def _extract_assistant_text(message: Any) -> str:
+    """Extract readable text from an assistant message.
+
+    The message field can be a string, a list of content blocks,
+    or a dict with a content field containing blocks.
+    """
+    if isinstance(message, str):
+        return message.strip()
+    if isinstance(message, dict):
+        message = message.get("content", "")
+    if isinstance(message, list):
+        parts = []
+        for block in message:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and block.get("text", "").strip():
+                parts.append(block["text"].strip())
+            elif block.get("type") == "tool_use":
+                name = block.get("name", "unknown")
+                parts.append(f"[used tool: {name}]")
+        return " ".join(parts)
+    if isinstance(message, str):
+        return message.strip()
+    return ""
+
+
 @mcp.tool()
 async def get_session_output(session_id: str) -> str:
     """Get recent messages from a specific session.
@@ -114,14 +216,9 @@ async def get_session_output(session_id: str) -> str:
             content = msg.get("content", "")
             lines.append(f"User: {content}")
         elif role == "assistant":
-            content = msg.get("message", "")
-            if isinstance(content, dict):
-                content = content.get("content", "")
-            if isinstance(content, list):
-                texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-                content = " ".join(texts)
-            if isinstance(content, str):
-                lines.append(f"Assistant: {content[:500]}")
+            text = _extract_assistant_text(msg.get("message", ""))
+            if text:
+                lines.append(f"Assistant: {text[:500]}")
         elif role == "result":
             data = msg.get("data", {})
             if data.get("is_error"):
@@ -131,7 +228,7 @@ async def get_session_output(session_id: str) -> str:
         lines.append("")
         lines.append("--- PENDING PERMISSIONS (session is blocked, waiting for response) ---")
         for perm in permissions:
-            rid = perm.get("request_id", "?")[:8]
+            rid = perm.get("request_id", "?")
             tool = perm.get("tool_name", "?")
             desc = perm.get("description", "")
             inp = json.dumps(perm.get("input", {}))[:300]

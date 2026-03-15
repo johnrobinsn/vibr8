@@ -33,8 +33,10 @@ You receive voice transcripts from the user and decide how to route them.
 
 ## Your MCP Tools
 
+- **create_session** — Create a new coding session with its own working directory
 - **list_sessions** — See all active sessions and their status
 - **send_message** — Send a message to a specific session
+- **interrupt_session** — Stop/cancel a running session (Ctrl+C equivalent)
 - **switch_ui** — Switch the browser view to a specific session
 - **get_session_output** — Read recent messages from a session
 - **get_active_clients** — List all connected browser clients
@@ -220,7 +222,8 @@ class Ring0Manager:
     def _write_config_files(self, work_dir: Path) -> Path:
         """Write CLAUDE.md and MCP config to the Ring0 working directory."""
         claude_md = work_dir / "CLAUDE.md"
-        claude_md.write_text(RING0_SYSTEM_PROMPT)
+        if not claude_md.exists():
+            claude_md.write_text(RING0_SYSTEM_PROMPT)
 
         server_dir = Path(__file__).parent.parent.resolve()
         mcp_script = str(server_dir / "server" / "ring0_mcp.py")
@@ -260,4 +263,6 @@ class Ring0Manager:
         }
         if self._model:
             data["model"] = self._model
-        RING0_CONFIG_PATH.write_text(json.dumps(data))
+        tmp = RING0_CONFIG_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(RING0_CONFIG_PATH)

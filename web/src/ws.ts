@@ -14,6 +14,9 @@ const taskCounters = (_w.__v8_taskCounters ??= new Map()) as Map<string, number>
 /** Track processed tool_use IDs to prevent duplicate task creation */
 const processedToolUseIds = (_w.__v8_processedToolUseIds ??= new Map()) as Map<string, Set<string>>;
 
+// Expose clientId globally so Android native layer can read it via evaluateJavascript
+_w.__v8_clientId = useStore.getState().clientId;
+
 function getProcessedSet(sessionId: string): Set<string> {
   let set = processedToolUseIds.get(sessionId);
   if (!set) {
@@ -660,6 +663,20 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         store.setSecondScreenContent(null);
         store.setMirroredSessionId(null);
         response = { type: "rpc_response", id: rpcId, result: { cleared: true } };
+      } else if (method === "bring_to_foreground") {
+        const cap = (window as unknown as Record<string, unknown>).Capacitor as
+          | { Plugins?: Record<string, { bringToForeground?: () => Promise<void> }> }
+          | undefined;
+        const plugin = cap?.Plugins?.BringToForeground;
+        if (!plugin?.bringToForeground) {
+          response = { type: "rpc_response", id: rpcId, error: "BringToForeground plugin not available", errorCode: "not_supported" };
+        } else {
+          plugin.bringToForeground().then(
+            () => { rpcSend({ type: "rpc_response", id: rpcId, result: { foreground: true } }); },
+            (err: Error) => { rpcSend({ type: "rpc_response", id: rpcId, error: `BringToForeground error: ${err.message}` }); },
+          );
+          break; // async
+        }
       } else {
         response = { type: "rpc_response", id: rpcId, error: `unknown method: ${method}` };
       }

@@ -86,6 +86,27 @@ class WsBridge:
         self._client_roles: dict[str, str] = {}  # clientId → role ("primary" | "secondscreen")
         self._rpc_pending: dict[str, asyncio.Future] = {}  # rpc_id → Future
         self._mirror_sockets: set[web.WebSocketResponse] = set()  # passive mirror connections
+        # Native WebSocket connections (Android foreground service, bypasses WebView)
+        self._native_ws_by_client: dict[str, web.WebSocketResponse] = {}
+        self._native_rpc_pending: dict[str, asyncio.Future] = {}  # id → Future for native responses
+
+    # ── Native WebSocket (Android foreground service) ───────────────────
+
+    def register_native_ws(self, client_id: str, ws: web.WebSocketResponse) -> None:
+        self._native_ws_by_client[client_id] = ws
+        logger.info("[ws-bridge] Native WS registered for client %s", client_id[:8])
+
+    def unregister_native_ws(self, client_id: str) -> None:
+        self._native_ws_by_client.pop(client_id, None)
+        logger.info("[ws-bridge] Native WS unregistered for client %s", client_id[:8])
+
+    def handle_native_message(self, client_id: str, data: dict) -> None:
+        """Handle an incoming message from a native WebSocket (command response)."""
+        msg_id = data.get("id")
+        if msg_id and msg_id in self._native_rpc_pending:
+            future = self._native_rpc_pending.pop(msg_id)
+            if not future.done():
+                future.set_result(data)
 
     # ── WebRTC manager ─────────────────────────────────────────────────
 
@@ -1029,12 +1050,23 @@ class WsBridge:
         })
 
     def _handle_interrupt(self, session: Session) -> None:
+        self.interrupt_session(session.id)
+
+    def interrupt_session(self, session_id: str) -> bool:
+        """Send an interrupt (Ctrl+C equivalent) to a session's CLI.
+
+        Returns True if the session was found and interrupt sent.
+        """
+        session = self._sessions.get(session_id)
+        if not session:
+            return False
         ndjson = json.dumps({
             "type": "control_request",
             "request_id": str(uuid.uuid4()),
             "request": {"subtype": "interrupt"},
         })
         self._send_to_cli(session, ndjson)
+        return True
 
     def _handle_set_model(self, session: Session, model: str) -> None:
         ndjson = json.dumps({
@@ -1116,8 +1148,46 @@ class WsBridge:
             if self._client_roles.get(cid) == "secondscreen"
         }
 
+    async def _native_rpc(self, client_id: str, method: str, timeout: float = 5.0) -> dict:
+        """Send a command to the native WebSocket and await the response."""
+        native_ws = self._native_ws_by_client.get(client_id)
+        if not native_ws:
+            # Prefix match fallback
+            for cid, w in self._native_ws_by_client.items():
+                if cid.startswith(client_id):
+                    native_ws = w
+                    break
+        if not native_ws or native_ws.closed:
+            raise RuntimeError(f"No native WS for client {client_id}")
+        rpc_id = str(uuid.uuid4())
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._native_rpc_pending[rpc_id] = future
+        msg = {"command": method, "id": rpc_id}
+        try:
+            logger.info("[ws-bridge] Native RPC send: client=%s command=%s id=%s", client_id[:8], method, rpc_id[:8])
+            await native_ws.send_str(json.dumps(msg))
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._native_rpc_pending.pop(rpc_id, None)
+            raise RuntimeError(f"Native RPC to client {client_id} timed out after {timeout}s")
+        except Exception:
+            self._native_rpc_pending.pop(rpc_id, None)
+            raise
+
     async def rpc_call(self, client_id: str, method: str, params: dict | None = None, timeout: float = 5.0) -> dict:
         """Send an RPC request to a specific browser client and await the response."""
+        # For bring_to_foreground, prefer native socket (works when WebView is paused)
+        if method == "bring_to_foreground":
+            native_ws = self._native_ws_by_client.get(client_id)
+            if not native_ws:
+                for cid in self._native_ws_by_client:
+                    if cid.startswith(client_id):
+                        native_ws = self._native_ws_by_client[cid]
+                        break
+            if native_ws and not native_ws.closed:
+                return await self._native_rpc(client_id, method, timeout=timeout)
+            # Fall through to JS RPC path (PWA/browser)
+
         ws = self._ws_by_client.get(client_id)
         if not ws:
             # Prefix match fallback (Ring0 often passes short ID prefixes)
@@ -1261,6 +1331,13 @@ class WsBridge:
         if not session:
             return False
         pending = session.pending_permissions.pop(request_id, None)
+        if not pending:
+            # Try prefix match
+            for rid in list(session.pending_permissions):
+                if rid.startswith(request_id):
+                    request_id = rid
+                    pending = session.pending_permissions.pop(rid, None)
+                    break
         if not pending:
             return False
 

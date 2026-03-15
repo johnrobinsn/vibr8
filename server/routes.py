@@ -844,6 +844,56 @@ def create_routes(
             return web.json_response({"error": f"Permission {request_id} not found"}, status=404)
         return web.json_response({"ok": True})
 
+    @routes.post("/api/ring0/interrupt")
+    async def ring0_interrupt(request: web.Request) -> web.Response:
+        """Interrupt a running session (used by Ring0 MCP, auth-exempt)."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        session_id = body.get("sessionId", "")
+        if not session_id:
+            return web.json_response({"error": "sessionId required"}, status=400)
+        resolved = _resolve_session_id(session_id, launcher)
+        if not resolved:
+            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+        ok = ws_bridge.interrupt_session(resolved)
+        if not ok:
+            return web.json_response({"error": f"Session {session_id} not found in bridge"}, status=404)
+        return web.json_response({"ok": True, "sessionId": resolved})
+
+    @routes.post("/api/ring0/create-session")
+    async def ring0_create_session(request: web.Request) -> web.Response:
+        """Create a new session (used by Ring0 MCP, auth-exempt)."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        backend = body.get("backend", "claude")
+        if backend not in ("claude", "codex"):
+            return web.json_response({"error": f"Invalid backend: {backend}"}, status=400)
+        cwd = body.get("cwd")
+        if not cwd:
+            return web.json_response({"error": "cwd is required"}, status=400)
+        name = body.get("name", "").strip()
+        opts = LaunchOptions(
+            model=body.get("model"),
+            permissionMode=body.get("permissionMode"),
+            cwd=cwd,
+            backendType=backend,
+        )
+        try:
+            session = launcher.launch(opts)
+            if name:
+                session_names.set_name(session.sessionId, name)
+            result = session.to_dict()
+            if name:
+                result["name"] = name
+            return web.json_response(result)
+        except Exception as e:
+            logger.exception(f"[routes] Ring0 create session failed: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
     # ── Voice Profiles ──────────────────────────────────────────────────
 
     def _get_username(request: web.Request) -> str:
