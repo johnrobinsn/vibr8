@@ -411,18 +411,38 @@ class WebRTCManager:
                 if not transcript or not self._ws_bridge:
                     return
 
+                # Helper to submit text through Ring0 or active session
+                async def _submit_text(text: str) -> None:
+                    if self._ring0_manager and self._ring0_manager.is_enabled:
+                        r0sid = self._ring0_manager.session_id
+                        if not r0sid and self._launcher and self._ws_bridge:
+                            r0sid = await self._ring0_manager.ensure_session(self._launcher, self._ws_bridge)
+                        if r0sid:
+                            await self._ws_bridge.submit_user_message(r0sid, text, source_client_id=client_id)
+                            return
+                    await self._ws_bridge.submit_user_message(session_id, text, source_client_id=client_id)
+
                 transcript_lower = transcript.lower()
 
-                # Check for "vibr8/vibrate <command>" regardless of guard state
+                # Check for "vibr8/vibrate <command>" regardless of guard state.
+                # Only strip the guard word if a known command follows it.
+                # If no command matches, pass the entire transcript through unmodified.
+                guard_word_found = False
                 match = self._find_guard_word(transcript_lower)
                 if match:
+                    guard_word_found = True
                     after_word = transcript_lower[match[1]:].strip().lstrip(".,;:!?- ").strip()
+                    pre_text = transcript[:match[0]].strip()
+
                     # "done" is always honored — even inside voice modes (e.g. note mode).
                     if after_word.startswith("done"):
                         mode = self.get_voice_mode(session_id)
                         if not mode:
                             asyncio.ensure_future(self._speak_short(session_id, "No active mode"))
                             return
+                        # Add pre-text as a final note fragment (it was part of dictation)
+                        if pre_text:
+                            mode.on_transcript(pre_text)
                         result = mode.on_done()
                         self.set_voice_mode(session_id, None)
                         if not result:
@@ -445,43 +465,59 @@ class WebRTCManager:
                                 return
                         await self._ws_bridge.submit_user_message(session_id, result, source_client_id=client_id)
                         return
+
                     # In voice mode (e.g. note mode), only "done" is recognized.
                     # All other guard-prefixed speech falls through to fragment capture.
                     if not self.get_voice_mode(session_id):
                         if after_word.startswith("off"):
-                            # Disconnect audio entirely
+                            if pre_text:
+                                await _submit_text(pre_text)
                             if self._ws_bridge:
                                 asyncio.ensure_future(
                                     self._ws_bridge.broadcast_audio_off(session_id)
                                 )
                             return
                         if after_word.startswith("guard"):
+                            if pre_text:
+                                await _submit_text(pre_text)
                             self.set_guard_enabled(session_id, True)
                             asyncio.ensure_future(self._speak_short(session_id, "Guard on"))
                             return
                         if after_word.startswith("listen"):
+                            if pre_text:
+                                await _submit_text(pre_text)
                             self.set_guard_enabled(session_id, False)
                             asyncio.ensure_future(self._speak_short(session_id, "Listening"))
                             return
                         if after_word.startswith("quiet"):
+                            if pre_text:
+                                await _submit_text(pre_text)
                             self.set_tts_muted(session_id, True)
                             asyncio.ensure_future(self._speak_short(session_id, "Quiet mode"))
                             return
                         if after_word.startswith("speak"):
+                            if pre_text:
+                                await _submit_text(pre_text)
                             self.set_tts_muted(session_id, False)
                             asyncio.ensure_future(self._speak_short(session_id, "Speaking"))
                             return
                         if after_word.startswith("ring zero on") or after_word.startswith("ring 0 on"):
+                            if pre_text:
+                                await _submit_text(pre_text)
                             if self._ring0_manager:
                                 self._ring0_manager.enable()
                                 asyncio.ensure_future(self._speak_short(session_id, "Ring zero on"))
                             return
                         if after_word.startswith("ring zero off") or after_word.startswith("ring 0 off"):
+                            if pre_text:
+                                await _submit_text(pre_text)
                             if self._ring0_manager:
                                 self._ring0_manager.disable()
                                 asyncio.ensure_future(self._speak_short(session_id, "Ring zero off"))
                             return
                         if after_word.startswith("note"):
+                            if pre_text:
+                                await _submit_text(pre_text)
                             existing = self.get_voice_mode(session_id)
                             if existing and existing.name == "note":
                                 asyncio.ensure_future(self._speak_short(session_id, "Already in note mode"))
@@ -489,32 +525,27 @@ class WebRTCManager:
                                 self.set_voice_mode(session_id, NoteMode())
                                 asyncio.ensure_future(self._speak_short(session_id, "Note mode"))
                             return
-                        # Escape sequences: replace guard word with literal word,
-                        # propagate remaining text.
+                        # Escape sequences: submit pre-text, then transform and
+                        # fall through to submit the transformed text.
                         # "vibr8 vibrate ..." → "vibrate ..."
                         if after_word.startswith("vibrate"):
+                            if pre_text:
+                                await _submit_text(pre_text)
                             remaining = transcript[match[1]:].strip().lstrip(".,;:!?- ")
-                            # Strip the "vibrate" keyword, keep the rest
                             remaining = remaining[7:].strip() if remaining.lower().startswith("vibrate") else remaining
                             transcript = "vibrate" + (" " + remaining if remaining else "")
-                            match = None
                         # "vibr8 app ..." → "vibr8 ..."
                         elif after_word.startswith("app"):
+                            if pre_text:
+                                await _submit_text(pre_text)
                             remaining = transcript[match[1]:].strip()
                             remaining = remaining[3:].strip() if remaining.lower().startswith("app") else remaining
                             transcript = "vibr8" + (" " + remaining if remaining else "")
-                            match = None
 
-                # If guard word was found but no command matched, strip it.
-                if match:
-                    after = transcript[match[1]:].strip().lstrip(".,;:!?-")
-                    if not after:
-                        return  # guard word alone, nothing to submit
-                    transcript = after
+                    # No command matched — transcript passes through unmodified
+                    # (guard_word_found is True so guard mode still allows it)
 
                 # Voice mode interception: route to active mode instead of submitting.
-                # Must happen before guard check so note mode captures all speech,
-                # not just guard-prefixed utterances.
                 mode = self.get_voice_mode(session_id)
                 if mode:
                     mode.on_transcript(transcript)
@@ -522,21 +553,11 @@ class WebRTCManager:
 
                 # If guard is enabled, require guard word
                 if self.is_guard_enabled(session_id):
-                    if not match:
+                    if not guard_word_found:
                         logger.info("[guard] session %s: no guard word, discarding", session_id)
                         return
 
-                # Ring0 routing: if enabled, route to Ring0 session
-                if self._ring0_manager and self._ring0_manager.is_enabled:
-                    ring0_sid = self._ring0_manager.session_id
-                    if not ring0_sid and self._launcher and self._ws_bridge:
-                        ring0_sid = await self._ring0_manager.ensure_session(self._launcher, self._ws_bridge)
-                    if ring0_sid:
-                        logger.info("[ring0] Routing voice to Ring0 session %s", ring0_sid)
-                        await self._ws_bridge.submit_user_message(ring0_sid, transcript, source_client_id=client_id)
-                        return
-
-                await self._ws_bridge.submit_user_message(session_id, transcript, source_client_id=client_id)
+                await _submit_text(transcript)
             elif event_type == "voice_was_detected":
                 logger.info("[stt] session %s: voice detected — barge-in", session_id)
                 self.barge_in(session_id)
