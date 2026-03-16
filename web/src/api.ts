@@ -319,6 +319,12 @@ export const api = {
     ),
   writeFile: (path: string, content: string) =>
     put<{ ok: boolean; path: string }>("/fs/write", { path, content }),
+  mkdir: (path: string) =>
+    post<{ ok: boolean; path: string }>("/fs/mkdir", { path }),
+  deleteFile: (path: string) =>
+    post<{ ok: boolean }>("/fs/delete", { path }),
+  rename: (oldPath: string, newPath: string) =>
+    post<{ ok: boolean }>("/fs/rename", { oldPath, newPath }),
   getFileDiff: (path: string) =>
     get<{ path: string; diff: string }>(
       `/fs/diff?path=${encodeURIComponent(path)}`,

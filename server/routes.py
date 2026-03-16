@@ -451,6 +451,66 @@ def create_routes(
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
+    @routes.post("/api/fs/mkdir")
+    async def fs_mkdir(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        dir_path = body.get("path")
+        if not dir_path:
+            return web.json_response({"error": "path required"}, status=400)
+        p = Path(dir_path).resolve()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            return web.json_response({"ok": True, "path": str(p)})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.post("/api/fs/rename")
+    async def fs_rename(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        old_path = body.get("oldPath")
+        new_path = body.get("newPath")
+        if not old_path or not new_path:
+            return web.json_response({"error": "oldPath and newPath required"}, status=400)
+        src = Path(old_path).resolve()
+        dst = Path(new_path).resolve()
+        if not src.exists():
+            return web.json_response({"error": "source not found"}, status=404)
+        if dst.exists():
+            return web.json_response({"error": "destination already exists"}, status=409)
+        try:
+            src.rename(dst)
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    @routes.post("/api/fs/delete")
+    async def fs_delete(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        target = body.get("path")
+        if not target:
+            return web.json_response({"error": "path required"}, status=400)
+        p = Path(target).resolve()
+        if not p.exists():
+            return web.json_response({"error": "not found"}, status=404)
+        try:
+            if p.is_dir():
+                import shutil
+                shutil.rmtree(p)
+            else:
+                p.unlink()
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
     @routes.get("/api/fs/diff")
     async def fs_diff(request: web.Request) -> web.Response:
         file_path = request.query.get("path")

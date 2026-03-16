@@ -111,28 +111,57 @@ function FileTreeNode({
   selectedPath,
   onSelect,
   changedFiles,
+  renamingPath,
+  onRenameCommit,
+  onRenameCancel,
 }: {
   node: TreeNode;
   depth: number;
   selectedPath: string | null;
   onSelect: (path: string) => void;
   changedFiles: Set<string>;
+  renamingPath: string | null;
+  onRenameCommit: (oldPath: string, newName: string) => void;
+  onRenameCancel: () => void;
 }) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isDir = node.type === "directory";
   const isSelected = node.path === selectedPath;
   const isChanged = !isDir && changedFiles.has(node.path);
   const hasChanged = isDir && hasChangedDescendant(node, changedFiles);
+  const isRenaming = node.path === renamingPath;
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (isRenaming && inputRef.current) {
+      inputRef.current.focus();
+      // Select name without extension for files
+      const name = node.name;
+      const dot = name.lastIndexOf(".");
+      if (!isDir && dot > 0) {
+        inputRef.current.setSelectionRange(0, dot);
+      } else {
+        inputRef.current.select();
+      }
+    }
+  }, [isRenaming, node.name, isDir]);
+
+  // Auto-expand parent when a child is being renamed
+  useEffect(() => {
+    if (isDir && renamingPath && renamingPath.startsWith(node.path + "/") && !expanded) {
+      setExpanded(true);
+    }
+  }, [isDir, renamingPath, node.path, expanded]);
 
   return (
     <div>
       <button
         onClick={() => {
+          if (isRenaming) return;
           if (isDir) {
             setExpanded(!expanded);
-          } else {
-            onSelect(node.path);
           }
+          onSelect(node.path);
         }}
         className={`flex items-center gap-2 w-full mx-1 px-2 py-1 text-[13px] rounded-[10px] hover:bg-cc-hover transition-colors cursor-pointer whitespace-nowrap ${
           isSelected ? "bg-cc-active text-cc-fg" : "text-cc-fg/80"
@@ -150,7 +179,30 @@ function FileTreeNode({
         )}
         {!isDir && <span className="w-3 shrink-0" />}
         <FileIcon isDir={isDir} expanded={expanded} />
-        <span className={`leading-snug ${isChanged ? "text-cc-warning" : ""}`}>{node.name}</span>
+        {isRenaming ? (
+          <input
+            ref={inputRef}
+            defaultValue={node.name}
+            className="bg-cc-bg text-cc-fg text-[13px] px-1 py-0 border border-cc-primary rounded outline-none w-full"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const val = (e.target as HTMLInputElement).value.trim();
+                if (val && val !== node.name) onRenameCommit(node.path, val);
+                else onRenameCancel();
+              } else if (e.key === "Escape") {
+                onRenameCancel();
+              }
+            }}
+            onBlur={(e) => {
+              const val = e.target.value.trim();
+              if (val && val !== node.name) onRenameCommit(node.path, val);
+              else onRenameCancel();
+            }}
+            onClick={(e) => e.stopPropagation()}
+          />
+        ) : (
+          <span className={`leading-snug ${isChanged ? "text-cc-warning" : ""}`}>{node.name}</span>
+        )}
         {(isChanged || hasChanged) && (
           <span className="w-1.5 h-1.5 rounded-full bg-cc-warning shrink-0 ml-auto" />
         )}
@@ -163,6 +215,9 @@ function FileTreeNode({
           selectedPath={selectedPath}
           onSelect={onSelect}
           changedFiles={changedFiles}
+          renamingPath={renamingPath}
+          onRenameCommit={onRenameCommit}
+          onRenameCancel={onRenameCancel}
         />
       ))}
     </div>
@@ -198,7 +253,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
   const sdkSession = useStore((s) => s.sdkSessions.find((sdk) => sdk.sessionId === sessionId));
   const openFilePath = useStore((s) => s.editorOpenFile.get(sessionId) ?? null);
   const setEditorOpenFile = useStore((s) => s.setEditorOpenFile);
-  const [fileTreeOpen, setFileTreeOpen] = useState(() => typeof window !== "undefined" ? window.innerWidth >= 640 : true);
+  const [fileTreeOpen, setFileTreeOpen] = useState(true);
 
   const changedFilesSet = useStore((s) => s.changedFiles.get(sessionId));
 
@@ -214,6 +269,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
   const [diffMode, setDiffMode] = useState(false);
   const [diffContent, setDiffContent] = useState<string>("");
   const [diffLoading, setDiffLoading] = useState(false);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
 
   const changedFiles = useMemo(() => changedFilesSet ?? new Set<string>(), [changedFilesSet]);
 
@@ -259,25 +315,11 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
     });
   }, [openFilePath]);
 
-  // Auto-save with debounce
+  // Track edits without auto-saving
   const handleChange = useCallback((value: string) => {
     setFileContent(value);
     setSaveStatus("dirty");
-
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    if (!openFilePath) return;
-
-    saveTimerRef.current = setTimeout(() => {
-      setSaveStatus("saving");
-      api.writeFile(openFilePath, value).then(() => {
-        setSavedContent(value);
-        setSaveStatus("saved");
-        setTimeout(() => setSaveStatus(null), 2000);
-      }).catch(() => {
-        setSaveStatus("dirty");
-      });
-    }, 800);
-  }, [openFilePath]);
+  }, []);
 
   // Cleanup timer on unmount
   useEffect(() => {
@@ -306,6 +348,125 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
       setFileTreeOpen(false);
     }
   }, [sessionId, setEditorOpenFile]);
+
+  const refreshTree = useCallback(() => {
+    if (!cwd) return;
+    api.getFileTree(cwd).then((res) => setTree(res.tree)).catch(() => {});
+  }, [cwd]);
+
+  const getTargetDir = useCallback(() => {
+    if (!openFilePath) return cwd || "";
+    // Find if selected path is a directory in the tree
+    const findNode = (nodes: TreeNode[], path: string): TreeNode | null => {
+      for (const n of nodes) {
+        if (n.path === path) return n;
+        if (n.children) {
+          const found = findNode(n.children, path);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+    const node = findNode(tree, openFilePath);
+    if (node?.type === "directory") return openFilePath;
+    // File selected — use its parent directory
+    const lastSlash = openFilePath.lastIndexOf("/");
+    return lastSlash > 0 ? openFilePath.slice(0, lastSlash) : cwd || "";
+  }, [openFilePath, tree, cwd]);
+
+  const handleNewFolder = useCallback(async () => {
+    const dir = getTargetDir();
+    const tempName = "untitled";
+    const fullPath = `${dir}/${tempName}`;
+    try {
+      await api.mkdir(fullPath);
+      refreshTree();
+      // Select the new folder and start inline rename
+      handleFileSelect(fullPath);
+      setTimeout(() => setRenamingPath(fullPath), 100);
+    } catch (e) {
+      console.error("[editor] Failed to create folder:", e);
+    }
+  }, [getTargetDir, refreshTree, handleFileSelect]);
+
+  const handleNewFile = useCallback(async () => {
+    const dir = getTargetDir();
+    const tempName = "untitled";
+    const fullPath = `${dir}/${tempName}`;
+    try {
+      await api.writeFile(fullPath, "");
+      refreshTree();
+      handleFileSelect(fullPath);
+      setTimeout(() => setRenamingPath(fullPath), 100);
+    } catch (e) {
+      console.error("[editor] Failed to create file:", e);
+    }
+  }, [getTargetDir, refreshTree, handleFileSelect]);
+
+  const handleRenameCommit = useCallback(async (oldPath: string, newName: string) => {
+    const parentDir = oldPath.substring(0, oldPath.lastIndexOf("/"));
+    const newPath = `${parentDir}/${newName}`;
+    try {
+      await api.rename(oldPath, newPath);
+      setRenamingPath(null);
+      refreshTree();
+      // If the renamed item was open in editor, update the open file
+      if (openFilePath === oldPath) {
+        handleFileSelect(newPath);
+      }
+    } catch (e) {
+      console.error("[editor] Failed to rename:", e);
+      setRenamingPath(null);
+    }
+  }, [refreshTree, openFilePath, handleFileSelect]);
+
+  const handleRenameCancel = useCallback(() => {
+    setRenamingPath(null);
+  }, []);
+
+  const handleDelete = useCallback(async () => {
+    if (!openFilePath) return;
+    const name = openFilePath.split("/").pop() ?? openFilePath;
+    if (!window.confirm(`Delete "${name}"?`)) return;
+    try {
+      await api.deleteFile(openFilePath);
+      setEditorOpenFile(sessionId, "");
+      setFileContent("");
+      setSavedContent("");
+      setSaveStatus(null);
+      refreshTree();
+    } catch (e) {
+      console.error("[editor] Failed to delete:", e);
+    }
+  }, [openFilePath, sessionId, setEditorOpenFile, refreshTree]);
+
+  const handleClose = useCallback(() => {
+    if (isDirty && !window.confirm("Discard unsaved changes?")) return;
+    setEditorOpenFile(sessionId, "");
+    setFileContent("");
+    setSavedContent("");
+    setSaveStatus(null);
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+  }, [isDirty, sessionId, setEditorOpenFile]);
+
+  const handleSave = useCallback(() => {
+    if (!openFilePath || !isDirty) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    setSaveStatus("saving");
+    api.writeFile(openFilePath, fileContent).then(() => {
+      setSavedContent(fileContent);
+      setSaveStatus("saved");
+      setTimeout(() => setSaveStatus(null), 2000);
+    }).catch(() => setSaveStatus("dirty"));
+  }, [openFilePath, isDirty, fileContent]);
+
+  const handleDiscard = useCallback(() => {
+    if (!isDirty) return;
+    if (!window.confirm("Discard unsaved changes?")) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    setFileContent(savedContent);
+    setSaveStatus(null);
+  }, [isDirty, savedContent]);
 
   const fileName = openFilePath?.split("/").pop() ?? null;
 
@@ -342,18 +503,51 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
         ${fileTreeOpen ? "w-[220px] translate-x-0" : "w-0 -translate-x-full"}
         fixed sm:relative z-30 sm:z-auto
         ${fileTreeOpen ? "sm:w-[220px]" : "sm:w-0 sm:-translate-x-full"}
-        shrink-0 h-full flex flex-col bg-cc-sidebar border-r border-cc-border transition-all duration-200 overflow-hidden
+        shrink-0 h-[100dvh] sm:h-full flex flex-col bg-cc-sidebar border-r border-cc-border transition-all duration-200 overflow-hidden
       `}>
         <div className="w-[220px] px-4 py-3 text-[11px] font-semibold text-cc-fg uppercase tracking-wider border-b border-cc-border shrink-0 flex items-center justify-between">
           <span>Explorer</span>
-          <button
-            onClick={() => setFileTreeOpen(false)}
-            className="w-5 h-5 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer sm:hidden"
-          >
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3">
-              <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={handleNewFile}
+              title="New File"
+              className="w-5 h-5 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
+                <path d="M9 2H4.5A1.5 1.5 0 003 3.5v9A1.5 1.5 0 004.5 14h7a1.5 1.5 0 001.5-1.5V6L9 2z" strokeLinejoin="round" />
+                <path d="M8 7v4M6 9h4" strokeLinecap="round" />
+              </svg>
+            </button>
+            <button
+              onClick={handleNewFolder}
+              title="New Folder"
+              className="w-5 h-5 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
+                <path d="M2 4.5A1.5 1.5 0 013.5 3H6l1.5 1.5h5A1.5 1.5 0 0114 6v5.5a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5v-7z" strokeLinejoin="round" />
+                <path d="M8 7v4M6 9h4" strokeLinecap="round" />
+              </svg>
+            </button>
+            {openFilePath && (
+              <button
+                onClick={handleDelete}
+                title="Delete selected"
+                className="w-5 h-5 flex items-center justify-center rounded-md text-cc-muted hover:text-red-400 hover:bg-cc-hover transition-colors cursor-pointer"
+              >
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
+                  <path d="M3 4h10M6 4V3h4v1M5 4v8.5a.5.5 0 00.5.5h5a.5.5 0 00.5-.5V4" strokeLinejoin="round" />
+                </svg>
+              </button>
+            )}
+            <button
+              onClick={() => setFileTreeOpen(false)}
+              className="w-5 h-5 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer sm:hidden"
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3">
+                <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Changed Files section */}
@@ -383,7 +577,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto overflow-x-hidden py-1">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden py-1 pb-[env(safe-area-inset-bottom,8px)]">
           {treeLoading ? (
             <div className="flex items-center justify-center py-8">
               <div className="w-4 h-4 border-2 border-cc-primary border-t-transparent rounded-full animate-spin" />
@@ -399,6 +593,9 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
                 selectedPath={openFilePath}
                 onSelect={handleFileSelect}
                 changedFiles={changedFiles}
+                renamingPath={renamingPath}
+                onRenameCommit={handleRenameCommit}
+                onRenameCancel={handleRenameCancel}
               />
             ))
           )}
@@ -427,28 +624,57 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
               <span className="text-cc-fg text-[13px] font-medium truncate">{fileName}</span>
             </div>
             <span className="text-cc-muted truncate text-[11px] hidden sm:inline">{openFilePath}</span>
-            {saveStatus === "saving" && <span className="text-cc-muted text-[11px]">Saving...</span>}
-            {saveStatus === "saved" && <span className="text-cc-success text-[11px]">Saved</span>}
-            {changedFiles.has(openFilePath) && (
-              <div className="flex items-center bg-cc-hover rounded-lg p-0.5 ml-auto">
-                <button
-                  onClick={() => setDiffMode(false)}
-                  className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors ${
-                    !diffMode ? "bg-cc-card text-cc-fg shadow-sm" : "text-cc-muted hover:text-cc-fg"
-                  }`}
-                >
-                  Edit
-                </button>
-                <button
-                  onClick={() => setDiffMode(true)}
-                  className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors ${
-                    diffMode ? "bg-cc-card text-cc-fg shadow-sm" : "text-cc-muted hover:text-cc-fg"
-                  }`}
-                >
-                  Diff
-                </button>
-              </div>
-            )}
+            {saveStatus === "saving" && <span className="text-cc-muted text-[11px] shrink-0">Saving...</span>}
+            {saveStatus === "saved" && <span className="text-cc-success text-[11px] shrink-0">Saved</span>}
+            <div className="flex items-center gap-1 ml-auto shrink-0">
+              {isDirty && (
+                <>
+                  <button
+                    onClick={handleSave}
+                    className="px-2 py-1 text-[11px] font-medium rounded-md text-cc-fg bg-cc-primary/20 hover:bg-cc-primary/30 transition-colors cursor-pointer"
+                    title="Save"
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={handleDiscard}
+                    className="px-2 py-1 text-[11px] font-medium rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+                    title="Discard changes"
+                  >
+                    Discard
+                  </button>
+                </>
+              )}
+              {changedFiles.has(openFilePath) && (
+                <div className="flex items-center bg-cc-hover rounded-lg p-0.5">
+                  <button
+                    onClick={() => setDiffMode(false)}
+                    className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors ${
+                      !diffMode ? "bg-cc-card text-cc-fg shadow-sm" : "text-cc-muted hover:text-cc-fg"
+                    }`}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => setDiffMode(true)}
+                    className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors ${
+                      diffMode ? "bg-cc-card text-cc-fg shadow-sm" : "text-cc-muted hover:text-cc-fg"
+                    }`}
+                  >
+                    Diff
+                  </button>
+                </div>
+              )}
+              <button
+                onClick={handleClose}
+                className="w-6 h-6 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+                title="Close file"
+              >
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3">
+                  <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
           </div>
         )}
 

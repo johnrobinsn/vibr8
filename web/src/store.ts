@@ -245,7 +245,7 @@ export const useStore = create<AppState>((set) => ({
   commandPaletteOpen: false,
   secondScreenContent: null,
   mirroredSessionId: null,
-  secondScreenScale: parseFloat(localStorage.getItem("cc-second-screen-scale") || "1"),
+  secondScreenScale: parseFloat(localStorage.getItem("cc-second-screen-scale") || "1.5"),
   playgroundActive: false,
   playgroundSessionId: null,
   playgroundSegments: [],
