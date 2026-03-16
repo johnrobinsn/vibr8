@@ -768,13 +768,14 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
           }
         }
       }
-      const existing = store.messages.get(sessionId) || [];
-      // Only replace if history has at least as many messages as current state,
-      // or if the current state is empty (initial connect). This prevents a race
-      // condition where live messages (e.g., tool_use) are lost by a stale history replay.
-      // An empty message_history is an explicit clear (e.g., CLI session changed).
-      if (chatMessages.length === 0 || existing.length === 0 || chatMessages.length >= existing.length) {
-        store.setMessages(sessionId, chatMessages);
+      if (chatMessages.length > 0) {
+        const existing = store.messages.get(sessionId) || [];
+        // Only replace if history has at least as many messages as current state,
+        // or if the current state is empty (initial connect). This prevents a race
+        // condition where live messages (e.g., tool_use) are lost by a stale history replay.
+        if (existing.length === 0 || chatMessages.length >= existing.length) {
+          store.setMessages(sessionId, chatMessages);
+        }
       }
       break;
     }

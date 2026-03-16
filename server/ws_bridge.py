@@ -64,9 +64,7 @@ class Session:
     pending_permissions: dict[str, dict[str, Any]] = field(default_factory=dict)
     message_history: list[dict[str, Any]] = field(default_factory=list)
     pending_messages: list[str] = field(default_factory=list)
-    syncing: bool = False  # True while syncing CLI replay to last known UUID
-    sync_uuid: str | None = None  # Target UUID to sync to during replay
-    cli_init_seen: bool = False  # True after first init from current CLI connection
+    _user_msg_counter: int = 0  # Counter for stable user message IDs
 
 
 # ── Bridge ───────────────────────────────────────────────────────────────────
@@ -427,7 +425,6 @@ class WsBridge:
     def handle_cli_open(self, ws: web.WebSocketResponse, session_id: str) -> None:
         session = self.get_or_create_session(session_id)
         session.cli_socket = ws
-        session.cli_init_seen = False
         logger.info(f"[ws-bridge] CLI connected for session {session_id}")
         import asyncio
         asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
@@ -522,13 +519,9 @@ class WsBridge:
         # Send current session state
         await self._send_to_browser(ws, {"type": "session_init", "session": session.state})
 
-        # Replay message history — defer if CLI hasn't sent init yet (sync
-        # decision hasn't been made, history may be stale and about to be cleared).
-        if session.cli_init_seen:
-            if session.message_history:
-                await self._send_to_browser(ws, {"type": "message_history", "messages": session.message_history})
-        else:
-            logger.info("[ws-bridge] session %s: deferring message_history until CLI init", session.id)
+        # Replay message history
+        if session.message_history:
+            await self._send_to_browser(ws, {"type": "message_history", "messages": session.message_history})
 
         # Send pending permissions
         for perm in session.pending_permissions.values():
@@ -644,42 +637,6 @@ class WsBridge:
             session.state["is_running"] = False
             session.state["is_waiting_for_permission"] = False
 
-            cli_sid = msg.get("session_id", "")
-
-            # Replay sync: only on first init after CLI connects (subsequent
-            # inits are per-turn during normal operation, not replay).
-            if not session.cli_init_seen:
-                session.cli_init_seen = True
-                stored_sid = session.state.get("cli_session_id", "")
-                last_uuid = None
-                for entry in reversed(session.message_history):
-                    if entry.get("uuid"):
-                        last_uuid = entry["uuid"]
-                        break
-
-                if cli_sid == stored_sid and last_uuid:
-                    # Same session, history has UUIDs — sync to last known UUID
-                    session.syncing = True
-                    session.sync_uuid = last_uuid
-                    logger.info("[ws-bridge] session %s: replay sync started, target uuid=%s", session.id, last_uuid[:8])
-                else:
-                    # Different session or no UUIDs — clean break
-                    if cli_sid != stored_sid:
-                        logger.info("[ws-bridge] session %s: CLI session changed (%s → %s), clearing history",
-                                    session.id, stored_sid[:8] if stored_sid else "none", cli_sid[:8] if cli_sid else "none")
-                    else:
-                        logger.info("[ws-bridge] session %s: no UUIDs in history, clearing for fresh sync", session.id)
-                    session.message_history.clear()
-                    session.syncing = False
-                    session.sync_uuid = None
-
-                # Send deferred message history now that sync decision is made.
-                # On clean break this sends empty list (clears browser view).
-                # On UUID sync this sends existing history (browser catches up).
-                await self._broadcast_to_browsers(session, {"type": "message_history", "messages": session.message_history})
-
-            session.state["cli_session_id"] = cli_sid
-
             if msg.get("session_id") and self._on_cli_session_id:
                 self._on_cli_session_id(session.id, msg["session_id"])
 
@@ -747,13 +704,10 @@ class WsBridge:
             })
 
     async def _handle_assistant_message(self, session: Session, msg: dict[str, Any]) -> None:
-        # During replay sync, suppress until we pass the target UUID
-        if session.syncing:
-            msg_uuid = msg.get("uuid")
-            if msg_uuid == session.sync_uuid:
-                session.syncing = False
-                session.sync_uuid = None
-                logger.info("[ws-bridge] session %s: replay sync complete (matched uuid=%s)", session.id, msg_uuid[:8])
+        # Dedup by Anthropic message ID — skip replayed messages we already have
+        msg_content = msg.get("message")
+        msg_id = msg_content.get("id") if isinstance(msg_content, dict) else None
+        if msg_id and any(e.get("msg_id") == msg_id for e in session.message_history):
             return
 
         # Detect idle → running transition
@@ -794,8 +748,8 @@ class WsBridge:
             "message": text,
             "parent_tool_use_id": msg.get("parent_tool_use_id"),
         }
-        if msg.get("uuid"):
-            browser_msg["uuid"] = msg["uuid"]
+        if msg_id:
+            browser_msg["msg_id"] = msg_id
         session.message_history.append(browser_msg)
         await self._broadcast_to_browsers(session, browser_msg)
         self._persist_session(session)
@@ -870,14 +824,13 @@ class WsBridge:
             self._stop_thinking(session_id)
 
     async def _handle_result_message(self, session: Session, msg: dict[str, Any]) -> None:
-        # During replay sync, suppress until we pass the target UUID
-        if session.syncing:
-            msg_uuid = msg.get("uuid")
-            if msg_uuid == session.sync_uuid:
-                session.syncing = False
-                session.sync_uuid = None
-                logger.info("[ws-bridge] session %s: replay sync complete (matched uuid=%s)", session.id, msg_uuid[:8])
-            return
+        # Dedup by num_turns + session_id — skip replayed results we already have
+        num_turns = msg.get("num_turns")
+        result_sid = msg.get("session_id", "")
+        if num_turns is not None and result_sid:
+            dedup_key = f"{result_sid}:{num_turns}"
+            if any(e.get("result_dedup_key") == dedup_key for e in session.message_history):
+                return
 
         # Detect running → idle transition
         if session.state.get("is_running"):
@@ -906,8 +859,8 @@ class WsBridge:
                     session.state["context_used_percent"] = max(0, min(pct, 100))
 
         browser_msg: dict[str, Any] = {"type": "result", "data": msg}
-        if msg.get("uuid"):
-            browser_msg["uuid"] = msg["uuid"]
+        if num_turns is not None and result_sid:
+            browser_msg["result_dedup_key"] = f"{result_sid}:{num_turns}"
         session.message_history.append(browser_msg)
         await self._broadcast_to_browsers(session, browser_msg)
         self._persist_session(session)
@@ -952,8 +905,6 @@ class WsBridge:
             pass
 
     async def _handle_stream_event(self, session: Session, msg: dict[str, Any]) -> None:
-        if session.syncing:
-            return
         # Agent is streaming a response — stop thinking tone.
         self._stop_thinking(session.id)
         await self._broadcast_to_browsers(session, {
@@ -963,8 +914,6 @@ class WsBridge:
         })
 
     async def _handle_control_request(self, session: Session, msg: dict[str, Any]) -> None:
-        if session.syncing:
-            return
         # Tool permission request — agent is working, play thinking tone.
         self._start_thinking_now(session.id)
         request = msg.get("request", {})
@@ -989,8 +938,6 @@ class WsBridge:
                 asyncio.ensure_future(self._notify_ring0_state_change(session, "running→waiting_for_permission"))
 
     async def _handle_tool_progress(self, session: Session, msg: dict[str, Any]) -> None:
-        if session.syncing:
-            return
         # Agent is executing a tool — play thinking tone.
         self._start_thinking_now(session.id)
         await self._broadcast_to_browsers(session, {
@@ -1001,8 +948,6 @@ class WsBridge:
         })
 
     async def _handle_tool_use_summary(self, session: Session, msg: dict[str, Any]) -> None:
-        if session.syncing:
-            return
         await self._broadcast_to_browsers(session, {
             "type": "tool_use_summary",
             "summary": msg.get("summary"),
@@ -1063,16 +1008,14 @@ class WsBridge:
         content = msg.get("content", "")
         preview = content[:80] if isinstance(content, str) else str(type(content))
         logger.info("[ws-bridge] session %s: user_message received %r", session.id, preview)
-        # Safety fallback: user message always ends sync
-        if session.syncing:
-            logger.info("[ws-bridge] session %s: replay sync cleared by user_message", session.id)
-            session.syncing = False
-            session.sync_uuid = None
         import time
+        ts = int(time.time() * 1000)
+        session._user_msg_counter += 1
         history_entry: dict[str, Any] = {
             "type": "user_message",
             "content": msg.get("content", ""),
-            "timestamp": int(time.time() * 1000),
+            "timestamp": ts,
+            "id": f"user-{ts}-{session._user_msg_counter}",
         }
         if source_client_id:
             history_entry["sourceClientId"] = source_client_id
