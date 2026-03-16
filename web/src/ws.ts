@@ -644,6 +644,20 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         store.setMirroredSessionId(sid);
         store.setSecondScreenContent(null);
         response = { type: "rpc_response", id: rpcId, result: { mirroring: true, sessionId: sid } };
+      } else if (method === "set_scale") {
+        const params = data.params as Record<string, number> | undefined;
+        const current = store.secondScreenScale;
+        let newScale: number;
+        if (params?.delta !== undefined) {
+          newScale = current + params.delta;
+        } else if (params?.scale !== undefined) {
+          newScale = params.scale;
+        } else {
+          newScale = current;
+        }
+        newScale = Math.max(0.5, Math.min(3.0, newScale));
+        store.setSecondScreenScale(newScale);
+        response = { type: "rpc_response", id: rpcId, result: { scale: newScale } };
       } else if (method === "get_device_info") {
         response = {
           type: "rpc_response", id: rpcId,
@@ -657,6 +671,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
             colorScheme: window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light",
             online: navigator.onLine,
             touchSupport: navigator.maxTouchPoints > 0,
+            scale: store.secondScreenScale,
           },
         };
       } else if (method === "clear_content") {

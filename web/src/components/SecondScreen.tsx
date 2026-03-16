@@ -28,6 +28,7 @@ export function SecondScreen() {
   const pushedContent = useStore((s) => s.secondScreenContent);
   const mirroredSessionId = useStore((s) => s.mirroredSessionId);
   const sessionNames = useStore((s) => s.sessionNames);
+  const scale = useStore((s) => s.secondScreenScale);
 
   // Set client role to secondscreen on mount
   useEffect(() => {
@@ -284,7 +285,7 @@ export function SecondScreen() {
       </div>
 
       {/* Content area */}
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 overflow-hidden" style={{ fontSize: `${scale}rem` }}>
         {pushedContent ? (
           <PushedContentView content={pushedContent} onHome={handleGoHome} />
         ) : (

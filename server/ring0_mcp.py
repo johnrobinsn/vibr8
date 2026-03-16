@@ -506,6 +506,59 @@ async def query_second_screen(client_id: str = "") -> str:
 
 
 @mcp.tool()
+async def set_second_screen_scale(
+    scale: float = 0,
+    delta: float = 0,
+    client_id: str = "",
+) -> str:
+    """Adjust font size / scale on second screen displays.
+
+    Use scale for absolute values (0.5–3.0, where 1.0 is default),
+    or delta for relative adjustments (e.g., 0.25 to increase, -0.25 to decrease).
+
+    Args:
+        scale: Absolute scale (0.5–3.0). 1.0 = default. Leave at 0 to use delta instead.
+        delta: Relative adjustment (e.g., 0.25 to increase, -0.25 to decrease).
+        client_id: Target specific second screen (prefix-match). Omit for all screens.
+    """
+    if scale == 0 and delta == 0:
+        return "Error: provide either 'scale' (absolute) or 'delta' (relative adjustment)."
+
+    screens = await _get("/second-screen/list")
+    online_screens = [s for s in screens if s.get("online")]
+    if not online_screens:
+        return "No second screens are online."
+
+    targets = online_screens
+    if client_id:
+        targets = [s for s in online_screens if s["clientId"].startswith(client_id)]
+        if not targets:
+            return f"No online second screen matching '{client_id}'."
+
+    params: dict[str, float] = {}
+    if scale != 0:
+        params["scale"] = scale
+    else:
+        params["delta"] = delta
+
+    results = []
+    for screen in targets:
+        body: dict[str, Any] = {
+            "clientId": screen["clientId"],
+            "method": "set_scale",
+            "params": params,
+        }
+        result = await _post("/ring0/query-client", body)
+        if result.get("error"):
+            results.append(f"Screen {screen['clientId'][:8]}: error — {result['error']}")
+        else:
+            new_scale = result.get("result", {}).get("scale", "?")
+            results.append(f"Screen {screen['clientId'][:8]}: scale set to {new_scale}")
+
+    return "\n".join(results)
+
+
+@mcp.tool()
 async def toggle_second_screen(client_id: str, enabled: bool = True) -> str:
     """Enable or disable a second screen. Disabled screens won't receive pushed content.
 

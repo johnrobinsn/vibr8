@@ -359,6 +359,10 @@ class CliLauncher:
         if options.env:
             env.update(options.env)
 
+        # Ensure cwd exists (user may have specified a new project directory)
+        if info.cwd:
+            Path(info.cwd).mkdir(parents=True, exist_ok=True)
+
         logger.info(
             "Spawning session %s: %s %s",
             session_id, binary, " ".join(args),
