@@ -65,6 +65,7 @@ class Session:
     message_history: list[dict[str, Any]] = field(default_factory=list)
     pending_messages: list[str] = field(default_factory=list)
     _user_msg_counter: int = 0  # Counter for stable user message IDs
+    _last_assistant_msg_id: str | None = None  # Last assistant msg_id, used as dedup key for results
 
 
 # ── Bridge ───────────────────────────────────────────────────────────────────
@@ -707,8 +708,11 @@ class WsBridge:
         # Dedup by Anthropic message ID — skip replayed messages we already have
         msg_content = msg.get("message")
         msg_id = msg_content.get("id") if isinstance(msg_content, dict) else None
-        if msg_id and any(e.get("msg_id") == msg_id for e in session.message_history):
-            return
+        if msg_id:
+            if any(e.get("msg_id") == msg_id for e in session.message_history):
+                session._last_assistant_msg_id = msg_id  # Track for result dedup even on skip
+                return
+            session._last_assistant_msg_id = msg_id
 
         # Detect idle → running transition
         if not session.state.get("is_running"):
@@ -824,13 +828,10 @@ class WsBridge:
             self._stop_thinking(session_id)
 
     async def _handle_result_message(self, session: Session, msg: dict[str, Any]) -> None:
-        # Dedup by num_turns + session_id — skip replayed results we already have
-        num_turns = msg.get("num_turns")
-        result_sid = msg.get("session_id", "")
-        if num_turns is not None and result_sid:
-            dedup_key = f"{result_sid}:{num_turns}"
-            if any(e.get("result_dedup_key") == dedup_key for e in session.message_history):
-                return
+        # Dedup by preceding assistant's msg_id — each result follows a specific assistant turn
+        result_dedup_key = session._last_assistant_msg_id
+        if result_dedup_key and any(e.get("result_dedup_key") == result_dedup_key for e in session.message_history):
+            return
 
         # Detect running → idle transition
         if session.state.get("is_running"):
@@ -859,8 +860,8 @@ class WsBridge:
                     session.state["context_used_percent"] = max(0, min(pct, 100))
 
         browser_msg: dict[str, Any] = {"type": "result", "data": msg}
-        if num_turns is not None and result_sid:
-            browser_msg["result_dedup_key"] = f"{result_sid}:{num_turns}"
+        if result_dedup_key:
+            browser_msg["result_dedup_key"] = result_dedup_key
         session.message_history.append(browser_msg)
         await self._broadcast_to_browsers(session, browser_msg)
         self._persist_session(session)
