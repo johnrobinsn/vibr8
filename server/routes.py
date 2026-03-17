@@ -869,7 +869,7 @@ def create_routes(
         if not client_id or not method:
             return web.json_response({"error": "clientId and method required"}, status=400)
         # Longer timeout for methods that may trigger browser permission prompts
-        interactive_methods = {"get_location", "send_notification", "read_clipboard", "write_clipboard"}
+        interactive_methods = {"get_location", "send_notification", "read_clipboard", "write_clipboard", "capture_screenshot"}
         timeout = 30.0 if method in interactive_methods else 5.0
         try:
             result = await ws_bridge.rpc_call(client_id, method, params, timeout=timeout)

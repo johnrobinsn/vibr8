@@ -169,30 +169,32 @@ async def switch_ui(session_id: str, client_id: str = "") -> str:
     return f"Switched {target} to session {session_id[:8]}."
 
 
-def _extract_assistant_text(message: Any) -> str:
+def _extract_assistant_text(message: Any) -> tuple[str, bool]:
     """Extract readable text from an assistant message.
 
-    The message field can be a string, a list of content blocks,
-    or a dict with a content field containing blocks.
+    Returns (text, has_real_text) where has_real_text is True if
+    the message contains actual text content beyond just tool-use markers.
     """
     if isinstance(message, str):
-        return message.strip()
+        return message.strip(), bool(message.strip())
     if isinstance(message, dict):
         message = message.get("content", "")
     if isinstance(message, list):
-        parts = []
+        text_parts = []
+        tool_parts = []
         for block in message:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text" and block.get("text", "").strip():
-                parts.append(block["text"].strip())
+                text_parts.append(block["text"].strip())
             elif block.get("type") == "tool_use":
                 name = block.get("name", "unknown")
-                parts.append(f"[used tool: {name}]")
-        return " ".join(parts)
+                tool_parts.append(f"[used tool: {name}]")
+        parts = text_parts + tool_parts
+        return " ".join(parts), bool(text_parts)
     if isinstance(message, str):
-        return message.strip()
-    return ""
+        return message.strip(), bool(message.strip())
+    return "", False
 
 
 @mcp.tool()
@@ -209,20 +211,24 @@ async def get_session_output(session_id: str) -> str:
     if not messages and not permissions:
         return "No messages in this session yet."
 
+    # Scan last 30 messages but only keep meaningful ones (up to 10 output lines)
     lines = []
-    for msg in messages[-10:]:  # Last 10 messages
+    for msg in messages[-30:]:
         role = msg.get("type", "?")
         if role == "user_message":
             content = msg.get("content", "")
             lines.append(f"User: {content}")
         elif role == "assistant":
-            text = _extract_assistant_text(msg.get("message", ""))
-            if text:
+            text, has_real_text = _extract_assistant_text(msg.get("message", ""))
+            if has_real_text:
                 lines.append(f"Assistant: {text[:500]}")
+            # Skip tool-use-only assistant messages — they add noise
         elif role == "result":
             data = msg.get("data", {})
             if data.get("is_error"):
                 lines.append(f"Error: {', '.join(data.get('errors', []))}")
+    # Keep last 10 meaningful lines
+    lines = lines[-10:]
 
     if permissions:
         lines.append("")
@@ -301,6 +307,7 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
             - "set_audio_input" — switch microphone input device. params: {"deviceId": "..."}
             - "bring_to_foreground" — bring the vibr8 app to front (Android native). No params.
             - "launch_app" — launch an app on Android. params: {"package": "com.example.app"} or {"url": "https://..."} or {"url": "tel:+1234567890"}
+            - "capture_screenshot" — capture a screenshot of the client's current view. params: {"format": "png"|"jpeg", "quality": 0.0-1.0}. Use the capture_screen tool instead for a higher-level interface.
         params: Optional JSON string of parameters to pass to the method (e.g., '{"title": "Hello", "body": "World"}').
     """
     body: dict[str, Any] = {"clientId": client_id, "method": method}
@@ -580,6 +587,68 @@ async def toggle_second_screen(client_id: str, enabled: bool = True) -> str:
         return f"Error: {result['error']}"
     state = "enabled" if result.get("enabled") else "disabled"
     return f"Screen {full_id[:8]} is now {state}."
+
+
+@mcp.tool()
+async def capture_screen(
+    client_id: str = "",
+    format: str = "png",
+    quality: float = 0.8,
+) -> str:
+    """Capture a screenshot of a browser client's current view.
+
+    Returns the file path of the saved screenshot image and its dimensions.
+    Works with both main UI clients and second screen displays.
+
+    Args:
+        client_id: Client ID (or prefix) to capture. If empty, captures the first connected client.
+        format: Image format — "png" or "jpeg". Default "png".
+        quality: JPEG quality 0.0–1.0. Only used for jpeg format. Default 0.8.
+    """
+    import base64
+    import tempfile
+
+    # Resolve client ID
+    if not client_id:
+        clients = await _get("/ring0/active-clients")
+        client_list = clients.get("clients", [])
+        if not client_list:
+            return "Error: no clients connected."
+        client_id = client_list[0].get("clientId", "")
+        if not client_id:
+            return "Error: first client has no clientId."
+
+    body: dict[str, Any] = {
+        "clientId": client_id,
+        "method": "capture_screenshot",
+        "params": {"format": format, "quality": quality},
+    }
+    result = await _post("/ring0/query-client", body)
+    if result.get("error"):
+        return f"Error: {result['error']}"
+
+    data = result.get("result", {})
+    image_b64 = data.get("image", "")
+    if not image_b64:
+        return "Error: no image data returned from client."
+
+    # Save to temp file
+    ext = "jpg" if format == "jpeg" else "png"
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="vibr8_screenshot_", suffix=f".{ext}", delete=False
+    )
+    tmp.write(base64.b64decode(image_b64))
+    tmp.close()
+
+    width = data.get("width", "?")
+    height = data.get("height", "?")
+    size_kb = len(image_b64) * 3 // 4 // 1024
+
+    return (
+        f"Screenshot captured: {tmp.name}\n"
+        f"Dimensions: {width}x{height}, Size: ~{size_kb}KB, Format: {format}\n"
+        f"Client: {client_id[:12]}..."
+    )
 
 
 if __name__ == "__main__":

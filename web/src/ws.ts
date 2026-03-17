@@ -692,6 +692,37 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
           );
           break; // async
         }
+      } else if (method === "capture_screenshot") {
+        const params = data.params as Record<string, unknown> | undefined;
+        const format = (params?.format as string) ?? "png";
+        const quality = (params?.quality as number) ?? 0.8;
+
+        import("html2canvas").then(({ default: html2canvas }) => {
+          html2canvas(document.body, {
+            useCORS: true,
+            scale: window.devicePixelRatio || 1,
+            logging: false,
+          }).then((canvas) => {
+            const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
+            const dataUrl = canvas.toDataURL(mimeType, quality);
+            const base64 = dataUrl.split(",")[1];
+            rpcSend({
+              type: "rpc_response",
+              id: rpcId,
+              result: {
+                image: base64,
+                mime: mimeType,
+                width: canvas.width,
+                height: canvas.height,
+              },
+            });
+          }).catch((err: Error) => {
+            rpcSend({ type: "rpc_response", id: rpcId, error: `Screenshot failed: ${err.message}` });
+          });
+        }).catch((err: Error) => {
+          rpcSend({ type: "rpc_response", id: rpcId, error: `Failed to load html2canvas: ${err.message}` });
+        });
+        break; // async
       } else {
         response = { type: "rpc_response", id: rpcId, error: `unknown method: ${method}` };
       }

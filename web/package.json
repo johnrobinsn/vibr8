@@ -42,5 +42,8 @@
     "vite": "^6.3.0",
     "vitest": "^4.0.18",
     "zustand": "^5.0.0"
+  },
+  "dependencies": {
+    "html2canvas": "^1.4.1"
   }
 }
