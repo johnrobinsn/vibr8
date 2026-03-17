@@ -258,6 +258,19 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
           timestamp: Date.now(),
         });
       }
+      // Surface result text when assistant had thinking-only content (no text blocks)
+      if (r.result && !r.is_error) {
+        const msgs = store.messages.get(sessionId);
+        const last = msgs?.[msgs.length - 1];
+        if (last?.role === "assistant" && last.contentBlocks?.length &&
+            !last.contentBlocks.some((b) => b.type === "text")) {
+          store.updateLastAssistantMessage(sessionId, (msg) => ({
+            ...msg,
+            content: msg.content ? msg.content + "\n" + r.result : r.result!,
+            contentBlocks: [...(msg.contentBlocks || []), { type: "text" as const, text: r.result! }],
+          }));
+        }
+      }
       break;
     }
 
@@ -811,6 +824,15 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
               content: `Error: ${r.errors.join(", ")}`,
               timestamp: Date.now(),
             });
+          }
+          // Surface result text when preceding assistant had thinking-only content
+          if (r.result && !r.is_error && chatMessages.length > 0) {
+            const last = chatMessages[chatMessages.length - 1];
+            if (last.role === "assistant" && last.contentBlocks?.length &&
+                !last.contentBlocks.some((b) => b.type === "text")) {
+              last.content = last.content ? last.content + "\n" + r.result : r.result;
+              last.contentBlocks = [...(last.contentBlocks || []), { type: "text" as const, text: r.result }];
+            }
           }
         }
       }
