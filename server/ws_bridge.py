@@ -349,6 +349,12 @@ class WsBridge:
 
             if msg.get("type") in ("assistant", "result"):
                 session.message_history.append(msg)
+                # If CLI continues with new messages while permissions are pending,
+                # those permissions were auto-approved — clear them to avoid stale state.
+                if session.pending_permissions:
+                    for req_id in list(session.pending_permissions):
+                        await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
+                    session.pending_permissions.clear()
                 self._persist_session(session)
 
             if msg.get("type") == "permission_request":
