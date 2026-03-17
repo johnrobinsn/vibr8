@@ -473,6 +473,11 @@ def create_app() -> web.Application:
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
 
+        # Always kill CLI processes so they respawn fresh with updated code.
+        # This is critical for Ring0's MCP subprocess which loads ring0_mcp.py
+        # at startup — without this, code changes never take effect.
+        await launcher.kill_all()
+
         if _restart["requested"]:
             # Fast path: skip graceful WebSocket close (10s timeout per socket).
             # Connections break naturally when the process exits; clients reconnect.
@@ -481,7 +486,6 @@ def create_app() -> web.Application:
             await terminal_manager.close_all()
             await webrtc_manager.close_all()
             await ws_bridge.close_all()
-            await launcher.kill_all()
         logger.info("[server] Shutdown complete")
 
     app.on_shutdown.append(on_shutdown)
