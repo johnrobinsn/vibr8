@@ -320,6 +320,7 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
             - "bring_to_foreground" — bring the vibr8 app to front (Android native). No params.
             - "launch_app" — launch an app on Android. params: {"package": "com.example.app"} or {"url": "https://..."} or {"url": "tel:+1234567890"}
             - "capture_screenshot" — capture a screenshot of the client's current view. params: {"format": "png"|"jpeg", "quality": 0.0-1.0}. Use the capture_screen tool instead for a higher-level interface.
+            - "set_scale" — set second screen font scale. params: {"scale": 1.5} for absolute, or {"delta": 0.25} for relative adjustment.
         params: Optional JSON string of parameters to pass to the method (e.g., '{"title": "Hello", "body": "World"}').
     """
     body: dict[str, Any] = {"clientId": client_id, "method": method}
