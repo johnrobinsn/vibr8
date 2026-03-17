@@ -374,6 +374,7 @@ class CliLauncher:
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
 
         info.pid = proc.pid
@@ -458,6 +459,7 @@ class CliLauncher:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
 
         info.pid = proc.pid
@@ -632,19 +634,28 @@ class CliLauncher:
             self._persist_state()
 
     async def kill(self, session_id: str) -> bool:
-        """Kill a session's CLI process."""
+        """Kill a session's CLI process and all its children (e.g. MCP)."""
         proc = self._processes.get(session_id)
         if not proc:
             return False
 
-        proc.terminate()
+        # Kill the entire process group so child processes (MCP) die too.
+        # CLI processes are spawned with start_new_session=True.
+        import signal
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            proc.terminate()
 
         # Wait up to 5s for graceful exit, then force kill
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             logger.info("Force-killing session %s", session_id)
-            proc.kill()
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
 
         session = self._sessions.get(session_id)
         if session:

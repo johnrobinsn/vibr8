@@ -211,31 +211,36 @@ async def get_session_output(session_id: str) -> str:
     if not messages and not permissions:
         return "No messages in this session yet."
 
-    # Scan ALL messages but keep only last 10 meaningful lines.
-    # During long tool-use sequences the tail can be hundreds of tool-only messages,
-    # so we must scan the full history to find real text.
+    # Scan ALL messages, keep last 10 meaningful lines.
     lines = []
+    trailing_tool_count = 0  # tool-use messages after last text response
     for msg in messages:
         role = msg.get("type", "?")
         if role == "user_message":
             content = msg.get("content", "")
             lines.append(f"User: {content}")
+            trailing_tool_count = 0
         elif role == "assistant":
             raw_message = msg.get("message", "")
-            # The message field can be the inner message dict (with content/model/role)
-            # or already a content list or string. Extract content blocks if wrapped.
             if isinstance(raw_message, dict) and "content" in raw_message:
                 raw_message = raw_message["content"]
             text, has_real_text = _extract_assistant_text(raw_message)
             if has_real_text:
                 lines.append(f"Assistant: {text[:500]}")
-            # Skip tool-use-only assistant messages — they add noise
+                trailing_tool_count = 0
+            else:
+                trailing_tool_count += 1
         elif role == "result":
             data = msg.get("data", {})
             if data.get("is_error"):
                 lines.append(f"Error: {', '.join(data.get('errors', []))}")
+                trailing_tool_count = 0
     # Keep last 10 meaningful lines
     lines = lines[-10:]
+
+    # If the session is mid-work (many tool calls after last text), note it
+    if trailing_tool_count > 3:
+        lines.append(f"[Session is actively working — {trailing_tool_count} tool calls since last text response]")
 
     if permissions:
         lines.append("")
