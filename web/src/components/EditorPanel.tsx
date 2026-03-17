@@ -114,15 +114,17 @@ function FileTreeNode({
   renamingPath,
   onRenameCommit,
   onRenameCancel,
+  onRequestRename,
 }: {
   node: TreeNode;
   depth: number;
   selectedPath: string | null;
-  onSelect: (path: string) => void;
+  onSelect: (path: string, isDir?: boolean) => void;
   changedFiles: Set<string>;
   renamingPath: string | null;
   onRenameCommit: (oldPath: string, newName: string) => void;
   onRenameCancel: () => void;
+  onRequestRename: (path: string) => void;
 }) {
   const [expanded, setExpanded] = useState(depth < 1);
   const isDir = node.type === "directory";
@@ -131,6 +133,7 @@ function FileTreeNode({
   const hasChanged = isDir && hasChangedDescendant(node, changedFiles);
   const isRenaming = node.path === renamingPath;
   const inputRef = useRef<HTMLInputElement>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (isRenaming && inputRef.current) {
@@ -158,11 +161,27 @@ function FileTreeNode({
       <button
         onClick={() => {
           if (isRenaming) return;
-          if (isDir) {
-            setExpanded(!expanded);
-          }
-          onSelect(node.path);
+          onSelect(node.path, isDir);
         }}
+        onTouchStart={() => {
+          longPressTimer.current = setTimeout(() => {
+            longPressTimer.current = null;
+            onRequestRename(node.path);
+          }, 500);
+        }}
+        onTouchEnd={() => {
+          if (longPressTimer.current) {
+            clearTimeout(longPressTimer.current);
+            longPressTimer.current = null;
+          }
+        }}
+        onTouchMove={() => {
+          if (longPressTimer.current) {
+            clearTimeout(longPressTimer.current);
+            longPressTimer.current = null;
+          }
+        }}
+        onContextMenu={(e) => e.preventDefault()}
         className={`flex items-center gap-2 w-full mx-1 px-2 py-1 text-[13px] rounded-[10px] hover:bg-cc-hover transition-colors cursor-pointer whitespace-nowrap ${
           isSelected ? "bg-cc-active text-cc-fg" : "text-cc-fg/80"
         }`}
@@ -170,9 +189,10 @@ function FileTreeNode({
       >
         {isDir && (
           <svg
+            onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); if (!expanded) onSelect(node.path, true); }}
             viewBox="0 0 20 20"
             fill="currentColor"
-            className={`w-3 h-3 text-cc-muted shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+            className={`w-4 h-4 p-0.5 text-cc-muted shrink-0 transition-transform cursor-pointer hover:text-cc-fg ${expanded ? "rotate-90" : ""}`}
           >
             <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" />
           </svg>
@@ -218,6 +238,7 @@ function FileTreeNode({
           renamingPath={renamingPath}
           onRenameCommit={onRenameCommit}
           onRenameCancel={onRenameCancel}
+          onRequestRename={onRequestRename}
         />
       ))}
     </div>
@@ -254,6 +275,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
   const openFilePath = useStore((s) => s.editorOpenFile.get(sessionId) ?? null);
   const setEditorOpenFile = useStore((s) => s.setEditorOpenFile);
   const [fileTreeOpen, setFileTreeOpen] = useState(true);
+  const [selectedDir, setSelectedDir] = useState<string | null>(null);
 
   const changedFilesSet = useStore((s) => s.changedFiles.get(sessionId));
 
@@ -270,6 +292,9 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
   const [diffContent, setDiffContent] = useState<string>("");
   const [diffLoading, setDiffLoading] = useState(false);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [renamingTab, setRenamingTab] = useState(false);
+  const tabRenameRef = useRef<HTMLInputElement>(null);
+  const tabLongPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const changedFiles = useMemo(() => changedFilesSet ?? new Set<string>(), [changedFilesSet]);
 
@@ -341,7 +366,12 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
     }).catch(() => { setDiffContent(""); setDiffLoading(false); });
   }, [diffMode, openFilePath, changedFiles]);
 
-  const handleFileSelect = useCallback((path: string) => {
+  const handleFileSelect = useCallback((path: string, isDir = false) => {
+    if (isDir) {
+      setSelectedDir(path);
+      return;
+    }
+    setSelectedDir(null);
     setEditorOpenFile(sessionId, path);
     // Close file tree on mobile after selecting a file
     if (typeof window !== "undefined" && window.innerWidth < 640) {
@@ -350,58 +380,64 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
   }, [sessionId, setEditorOpenFile]);
 
   const refreshTree = useCallback(() => {
-    if (!cwd) return;
-    api.getFileTree(cwd).then((res) => setTree(res.tree)).catch(() => {});
+    if (!cwd) return Promise.resolve();
+    return api.getFileTree(cwd).then((res) => setTree(res.tree)).catch(() => {});
   }, [cwd]);
 
+
   const getTargetDir = useCallback(() => {
+    // Use explicitly selected directory first
+    if (selectedDir) return selectedDir;
     if (!openFilePath) return cwd || "";
-    // Find if selected path is a directory in the tree
-    const findNode = (nodes: TreeNode[], path: string): TreeNode | null => {
-      for (const n of nodes) {
-        if (n.path === path) return n;
-        if (n.children) {
-          const found = findNode(n.children, path);
-          if (found) return found;
-        }
-      }
-      return null;
-    };
-    const node = findNode(tree, openFilePath);
-    if (node?.type === "directory") return openFilePath;
     // File selected — use its parent directory
     const lastSlash = openFilePath.lastIndexOf("/");
     return lastSlash > 0 ? openFilePath.slice(0, lastSlash) : cwd || "";
-  }, [openFilePath, tree, cwd]);
+  }, [selectedDir, openFilePath, cwd]);
+
+  const nextUntitledName = useCallback((dirPath: string) => {
+    const findChildren = (nodes: TreeNode[], path: string): TreeNode[] => {
+      for (const n of nodes) {
+        if (n.path === path) return n.children || [];
+        if (n.children) {
+          const found = findChildren(n.children, path);
+          if (found.length) return found;
+        }
+      }
+      return [];
+    };
+    const siblings = dirPath === cwd ? tree : findChildren(tree, dirPath);
+    const names = new Set(siblings.map((n) => n.name.toLowerCase()));
+    let i = 1;
+    while (names.has(`untitled ${i}`)) i++;
+    return `Untitled ${i}`;
+  }, [tree, cwd]);
 
   const handleNewFolder = useCallback(async () => {
     const dir = getTargetDir();
-    const tempName = "untitled";
-    const fullPath = `${dir}/${tempName}`;
+    const name = nextUntitledName(dir);
+    const fullPath = `${dir}/${name}`;
     try {
       await api.mkdir(fullPath);
       refreshTree();
-      // Select the new folder and start inline rename
-      handleFileSelect(fullPath);
+      setSelectedDir(fullPath);
       setTimeout(() => setRenamingPath(fullPath), 100);
     } catch (e) {
       console.error("[editor] Failed to create folder:", e);
     }
-  }, [getTargetDir, refreshTree, handleFileSelect]);
+  }, [getTargetDir, nextUntitledName, refreshTree]);
 
   const handleNewFile = useCallback(async () => {
     const dir = getTargetDir();
-    const tempName = "untitled";
-    const fullPath = `${dir}/${tempName}`;
+    const name = nextUntitledName(dir);
+    const fullPath = `${dir}/${name}`;
     try {
       await api.writeFile(fullPath, "");
       refreshTree();
-      handleFileSelect(fullPath);
       setTimeout(() => setRenamingPath(fullPath), 100);
     } catch (e) {
       console.error("[editor] Failed to create file:", e);
     }
-  }, [getTargetDir, refreshTree, handleFileSelect]);
+  }, [getTargetDir, nextUntitledName, refreshTree]);
 
   const handleRenameCommit = useCallback(async (oldPath: string, newName: string) => {
     const parentDir = oldPath.substring(0, oldPath.lastIndexOf("/"));
@@ -419,6 +455,35 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
       setRenamingPath(null);
     }
   }, [refreshTree, openFilePath, handleFileSelect]);
+
+  const fileName = openFilePath?.split("/").pop() ?? null;
+
+  useEffect(() => {
+    if (renamingTab && tabRenameRef.current) {
+      tabRenameRef.current.focus();
+      const name = fileName || "";
+      const dot = name.lastIndexOf(".");
+      if (dot > 0) {
+        tabRenameRef.current.setSelectionRange(0, dot);
+      } else {
+        tabRenameRef.current.select();
+      }
+    }
+  }, [renamingTab, fileName]);
+
+  const handleTabRename = useCallback(async (newName: string) => {
+    setRenamingTab(false);
+    if (!openFilePath || !newName.trim() || newName.trim() === fileName) return;
+    const parentDir = openFilePath.substring(0, openFilePath.lastIndexOf("/"));
+    const newPath = `${parentDir}/${newName.trim()}`;
+    try {
+      await api.rename(openFilePath, newPath);
+      setEditorOpenFile(sessionId, newPath);
+      refreshTree();
+    } catch (e) {
+      console.error("[editor] Failed to rename:", e);
+    }
+  }, [openFilePath, fileName, sessionId, setEditorOpenFile, refreshTree]);
 
   const handleRenameCancel = useCallback(() => {
     setRenamingPath(null);
@@ -468,8 +533,6 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
     setSaveStatus(null);
   }, [isDirty, savedContent]);
 
-  const fileName = openFilePath?.split("/").pop() ?? null;
-
   const extensions = useMemo(() => {
     const exts = [warmTheme];
     if (darkMode) exts.push(oneDark);
@@ -500,12 +563,12 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
 
       {/* File Tree — overlay on mobile, inline on desktop */}
       <div className={`
-        ${fileTreeOpen ? "w-[220px] translate-x-0" : "w-0 -translate-x-full"}
-        fixed sm:relative z-30 sm:z-auto
-        ${fileTreeOpen ? "sm:w-[220px]" : "sm:w-0 sm:-translate-x-full"}
+        ${fileTreeOpen ? "w-[85vw] max-w-[320px] sm:max-w-none translate-x-0" : "w-0 -translate-x-full"}
+        fixed top-0 left-0 sm:relative sm:top-auto sm:left-auto z-30 sm:z-auto
+        ${fileTreeOpen ? "sm:w-[220px] sm:max-w-none" : "sm:w-0 sm:-translate-x-full"}
         shrink-0 h-[100dvh] sm:h-full flex flex-col bg-cc-sidebar border-r border-cc-border transition-all duration-200 overflow-hidden
       `}>
-        <div className="w-[220px] px-4 py-3 text-[11px] font-semibold text-cc-fg uppercase tracking-wider border-b border-cc-border shrink-0 flex items-center justify-between">
+        <div className="w-full px-4 py-3 text-[11px] font-semibold text-cc-fg uppercase tracking-wider border-b border-cc-border shrink-0 flex items-center justify-between">
           <span>Explorer</span>
           <div className="flex items-center gap-1">
             <button
@@ -539,6 +602,16 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
                 </svg>
               </button>
             )}
+            <button
+              onClick={refreshTree}
+              title="Refresh"
+              className="w-5 h-5 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
+                <path d="M13 8A5 5 0 113.5 5.5" strokeLinecap="round" />
+                <path d="M3 2v4h4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
             <button
               onClick={() => setFileTreeOpen(false)}
               className="w-5 h-5 flex items-center justify-center rounded-md text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer sm:hidden"
@@ -577,7 +650,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto overflow-x-hidden py-1 pb-[env(safe-area-inset-bottom,8px)]">
+        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pt-1 pb-[max(env(safe-area-inset-bottom,0px),16px)]">
           {treeLoading ? (
             <div className="flex items-center justify-center py-8">
               <div className="w-4 h-4 border-2 border-cc-primary border-t-transparent rounded-full animate-spin" />
@@ -590,12 +663,13 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
                 key={node.path}
                 node={node}
                 depth={0}
-                selectedPath={openFilePath}
+                selectedPath={selectedDir || openFilePath}
                 onSelect={handleFileSelect}
                 changedFiles={changedFiles}
                 renamingPath={renamingPath}
                 onRenameCommit={handleRenameCommit}
                 onRenameCancel={handleRenameCancel}
+                onRequestRename={setRenamingPath}
               />
             ))
           )}
@@ -621,7 +695,41 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
             )}
             <div className="flex items-center gap-2 min-w-0">
               {isDirty && <span className="w-2 h-2 rounded-full bg-cc-warning shrink-0" title="Unsaved changes" />}
-              <span className="text-cc-fg text-[13px] font-medium truncate">{fileName}</span>
+              {renamingTab ? (
+                <input
+                  ref={tabRenameRef}
+                  defaultValue={fileName || ""}
+                  className="bg-cc-bg text-cc-fg text-[13px] font-medium px-1 py-0 border border-cc-primary rounded outline-none min-w-[80px]"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleTabRename((e.target as HTMLInputElement).value);
+                    else if (e.key === "Escape") setRenamingTab(false);
+                  }}
+                  onBlur={(e) => handleTabRename(e.target.value)}
+                />
+              ) : (
+                <span
+                  className="text-cc-fg text-[13px] font-medium truncate select-none"
+                  onTouchStart={() => {
+                    tabLongPressTimer.current = setTimeout(() => {
+                      tabLongPressTimer.current = null;
+                      setRenamingTab(true);
+                    }, 500);
+                  }}
+                  onTouchEnd={() => {
+                    if (tabLongPressTimer.current) {
+                      clearTimeout(tabLongPressTimer.current);
+                      tabLongPressTimer.current = null;
+                    }
+                  }}
+                  onTouchMove={() => {
+                    if (tabLongPressTimer.current) {
+                      clearTimeout(tabLongPressTimer.current);
+                      tabLongPressTimer.current = null;
+                    }
+                  }}
+                  onDoubleClick={() => setRenamingTab(true)}
+                >{fileName}</span>
+              )}
             </div>
             <span className="text-cc-muted truncate text-[11px] hidden sm:inline">{openFilePath}</span>
             {saveStatus === "saving" && <span className="text-cc-muted text-[11px] shrink-0">Saving...</span>}
