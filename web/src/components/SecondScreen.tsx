@@ -25,6 +25,8 @@ export function SecondScreen() {
   const [pairingState, setPairingState] = useState<PairingState>("checking");
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [pairedClientId, setPairedClientId] = useState<string | null>(null);
+  const [clientName, setClientName] = useState<string | null>(null);
+  const [renameOpen, setRenameOpen] = useState(false);
   const pushedContent = useStore((s) => s.secondScreenContent);
   const mirroredSessionId = useStore((s) => s.mirroredSessionId);
   const sessionNames = useStore((s) => s.sessionNames);
@@ -47,6 +49,34 @@ export function SecondScreen() {
       document.documentElement.classList.toggle("dark", isDark);
     };
   }, []);
+
+  // Report device info on mount (fire-and-forget)
+  useEffect(() => {
+    api.reportDeviceInfo(clientId, {
+      screenWidth: window.innerWidth,
+      screenHeight: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio,
+      userAgent: navigator.userAgent,
+      platform: navigator.platform,
+      language: navigator.language,
+      touchSupport: navigator.maxTouchPoints > 0,
+    }).catch(() => {});
+  }, [clientId]);
+
+  // Fetch client name on mount
+  useEffect(() => {
+    api.getClientMetadata(clientId).then((meta) => {
+      if (meta.name) setClientName(meta.name);
+    }).catch(() => {});
+  }, [clientId]);
+
+  const displayClientName = clientName || clientId.slice(0, 8) + "…";
+
+  const handleRename = useCallback(async (newName: string) => {
+    await api.updateClientMetadata(clientId, { name: newName });
+    setClientName(newName || null);
+    setRenameOpen(false);
+  }, [clientId]);
 
   // Check pairing status on mount
   useEffect(() => {
@@ -258,12 +288,18 @@ export function SecondScreen() {
       <div className="shrink-0 flex items-center justify-between px-4 py-2 border-b border-cc-border text-xs text-cc-fg-muted">
         <div className="flex items-center gap-2">
           <span className="inline-block w-2 h-2 rounded-full bg-green-500" />
-          <span>
+          <button
+            onClick={() => setRenameOpen(true)}
+            className="hover:text-cc-fg transition-colors underline decoration-dotted underline-offset-2"
+          >
+            {displayClientName}
+          </button>
+          <span className="text-cc-fg-muted">
             {pushedContent
-              ? `Second Screen — ${pushedContent.type}`
+              ? `— ${pushedContent.type}`
               : isMirroring
-                ? `Second Screen — Mirroring: ${displayName}`
-                : "Second Screen — Ring0"}
+                ? `— Mirroring: ${displayName}`
+                : "— Ring0"}
           </span>
         </div>
         <div className="flex items-center gap-3">
@@ -284,6 +320,15 @@ export function SecondScreen() {
         </div>
       </div>
 
+      {/* Rename dialog */}
+      {renameOpen && (
+        <RenameDialog
+          currentName={clientName || ""}
+          onSave={handleRename}
+          onCancel={() => setRenameOpen(false)}
+        />
+      )}
+
       {/* Content area */}
       <div className="flex-1 flex flex-col min-h-0" style={{ zoom: scale }}>
         {pushedContent ? (
@@ -292,6 +337,65 @@ export function SecondScreen() {
           <MessageFeed sessionId={displaySessionId} />
         )}
       </div>
+    </div>
+  );
+}
+
+function RenameDialog({
+  currentName,
+  onSave,
+  onCancel,
+}: {
+  currentName: string;
+  onSave: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(currentName);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onSave(name.trim());
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onCancel}>
+      <form
+        onSubmit={handleSubmit}
+        onClick={(e) => e.stopPropagation()}
+        className="bg-cc-bg border border-cc-border rounded-lg p-4 shadow-xl w-72 space-y-3"
+      >
+        <label className="block text-sm font-medium text-cc-fg">Device Name</label>
+        <input
+          ref={inputRef}
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}
+          placeholder="e.g. Tesla, Phone, iPad"
+          className="w-full px-3 py-2 rounded border border-cc-border bg-cc-input-bg text-cc-fg text-sm focus:outline-none focus:ring-1 focus:ring-cc-primary/50"
+        />
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-3 py-1.5 text-xs text-cc-fg-muted hover:text-cc-fg transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className="px-3 py-1.5 text-xs bg-cc-primary text-white rounded hover:bg-cc-primary-hover transition-colors"
+          >
+            Save
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

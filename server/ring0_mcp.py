@@ -42,6 +42,16 @@ async def _post(path: str, body: dict | None = None) -> dict[str, Any]:
         return r.json()
 
 
+async def _put(path: str, body: dict | None = None) -> dict[str, Any]:
+    async with httpx.AsyncClient() as client:
+        r = await client.put(f"{BASE_URL}{path}", json=body, timeout=10)
+        if r.status_code >= 400:
+            try:
+                return r.json()
+            except Exception:
+                return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
+        return r.json()
+
 
 def _slugify(name: str) -> str:
     """Convert a name to a filesystem-safe slug."""
@@ -156,12 +166,15 @@ async def switch_ui(session_id: str, client_id: str = "") -> str:
 
     Args:
         session_id: The session ID to switch to.
-        client_id: Optional client ID to target. If provided, only that browser instance switches.
+        client_id: Optional client ID, name, or prefix to target. If provided, only that browser instance switches.
                    If omitted, all connected browsers switch.
     """
     body: dict[str, str] = {"sessionId": session_id}
     if client_id:
-        body["clientId"] = client_id
+        resolved, err = await _resolve_client(client_id)
+        if err:
+            return err
+        body["clientId"] = resolved
     result = await _post("/ring0/switch-ui", body)
     if result.get("error"):
         return f"Error: {result['error']}"
@@ -257,22 +270,98 @@ async def get_session_output(session_id: str) -> str:
 
 @mcp.tool()
 async def get_active_clients() -> str:
-    """List all connected browser clients and which sessions they are connected to.
+    """List all known browser clients with names, device info, and online status.
 
-    Returns a mapping of client IDs to their WebSocket session IDs.
+    Shows both online and offline clients with their metadata.
     """
-    clients = await _get("/ring0/clients")
+    clients = await _get("/clients")
     if not clients:
-        return "No clients connected."
+        return "No clients known."
     lines = []
-    for client_id, info in clients.items():
-        if isinstance(info, dict):
-            sid = info.get("sessionId", "?")
-            role = info.get("role", "primary")
-            lines.append(f"- client={client_id[:8]}... → session={sid[:8]}... role={role}")
-        else:
-            lines.append(f"- client={client_id[:8]}... → session={info[:8]}...")
+    for c in clients:
+        cid = c.get("clientId", "?")
+        name = c.get("name", "")
+        online = c.get("online", False)
+        sid = c.get("sessionId", "")
+        ws_role = c.get("wsRole", c.get("role", ""))
+        role = c.get("role", "")
+        dev = c.get("deviceInfo", {})
+
+        label = f'"{name}"' if name else f"(unnamed)"
+        status = "online" if online else "offline"
+        parts = [f"- {label} (id={cid[:8]}..., {status}"]
+        if sid:
+            parts[0] += f", session={sid[:8]}..."
+        if ws_role:
+            parts[0] += f", wsRole={ws_role}"
+        if role and role != ws_role:
+            parts[0] += f", role={role}"
+        parts[0] += ")"
+
+        if dev:
+            platform = dev.get("platform", "")
+            w = dev.get("screenWidth", "")
+            h = dev.get("screenHeight", "")
+            touch = dev.get("touchSupport", False)
+            info_parts = []
+            if platform:
+                info_parts.append(f"Platform: {platform}")
+            if w and h:
+                info_parts.append(f"Screen: {w}x{h}")
+            info_parts.append(f"Touch: {'yes' if touch else 'no'}")
+            parts.append(f"  {', '.join(info_parts)}")
+
+        if c.get("description"):
+            parts.append(f"  Description: {c['description']}")
+
+        lines.append("\n".join(parts))
     return "\n".join(lines)
+
+
+async def _resolve_client(identifier: str) -> tuple[str, str | None]:
+    """Resolve a client by name, UUID, or prefix.
+
+    Returns (resolved_client_id, error_message).
+    If ambiguous or not found, error_message describes the issue.
+    """
+    clients = await _get("/clients")
+    if not clients:
+        return "", "No clients known."
+
+    # Exact UUID match
+    for c in clients:
+        if c.get("clientId") == identifier:
+            return c["clientId"], None
+
+    # Exact name match (case-insensitive)
+    by_name = [c for c in clients if c.get("name", "").lower() == identifier.lower()]
+    if len(by_name) == 1:
+        return by_name[0]["clientId"], None
+    if len(by_name) > 1:
+        desc_lines = [f"Multiple clients named \"{identifier}\":"]
+        for c in by_name:
+            cid = c["clientId"][:8]
+            dev = c.get("deviceInfo", {})
+            platform = dev.get("platform", "unknown")
+            w = dev.get("screenWidth", "?")
+            h = dev.get("screenHeight", "?")
+            status = "online" if c.get("online") else "offline"
+            role = c.get("role", "")
+            desc = f"  - {cid}: role={role}, Platform: {platform}, Screen: {w}x{h}, {status}"
+            if c.get("description"):
+                desc += f" — {c['description']}"
+            desc_lines.append(desc)
+        desc_lines.append("Please specify by ID prefix or give them unique names.")
+        return "", "\n".join(desc_lines)
+
+    # UUID prefix match
+    by_prefix = [c for c in clients if c.get("clientId", "").startswith(identifier)]
+    if len(by_prefix) == 1:
+        return by_prefix[0]["clientId"], None
+    if len(by_prefix) > 1:
+        return "", f"Ambiguous prefix '{identifier}' matches {len(by_prefix)} clients."
+
+    return "", f"No client matching '{identifier}'."
 
 
 @mcp.tool()
@@ -305,7 +394,7 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
     """Send an RPC query to a specific browser client and get their response.
 
     Args:
-        client_id: The client ID to query.
+        client_id: The client ID, name, or prefix to query.
         method: The RPC method to call. Available methods:
             - "get_state" — returns currentSessionId, dateTime, timeZone, locale, url
             - "get_location" — returns latitude, longitude, accuracy (may prompt user)
@@ -323,7 +412,10 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
             - "set_scale" — set second screen font scale. params: {"scale": 1.5} for absolute, or {"delta": 0.25} for relative adjustment.
         params: Optional JSON string of parameters to pass to the method (e.g., '{"title": "Hello", "body": "World"}').
     """
-    body: dict[str, Any] = {"clientId": client_id, "method": method}
+    resolved, err = await _resolve_client(client_id)
+    if err:
+        return err
+    body: dict[str, Any] = {"clientId": resolved, "method": method}
     if params:
         try:
             body["params"] = json.loads(params)
@@ -333,6 +425,40 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
     if result.get("error"):
         return f"Error: {result['error']}"
     return json.dumps(result.get("result", {}), indent=2)
+
+
+@mcp.tool()
+async def update_client_metadata(
+    client_id: str,
+    name: str = "",
+    description: str = "",
+    role: str = "",
+) -> str:
+    """Update metadata for a client device (name, description, role).
+
+    Args:
+        client_id: Client ID, name, or prefix to identify the client.
+        name: Display name for this client (e.g., "Laptop", "Tesla", "Phone").
+        description: Free text description of the client.
+        role: What this client is used for (e.g., "primary", "car display", "second screen").
+    """
+    resolved, err = await _resolve_client(client_id)
+    if err:
+        return err
+    updates: dict[str, str] = {}
+    if name:
+        updates["name"] = name
+    if description:
+        updates["description"] = description
+    if role:
+        updates["role"] = role
+    if not updates:
+        return "Error: provide at least one of name, description, or role."
+    result = await _put(f"/clients/{resolved}", updates)
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    new_name = result.get("name", "")
+    return f"Updated client {resolved[:8]}" + (f' (name: "{new_name}")' if new_name else "") + "."
 
 
 @mcp.tool()
@@ -449,7 +575,12 @@ async def show_on_second_screen(
 
     targets = online_screens
     if client_id:
-        targets = [s for s in online_screens if s["clientId"].startswith(client_id)]
+        # Try name resolution first, fall back to prefix match on screen list
+        resolved, err = await _resolve_client(client_id)
+        if not err:
+            targets = [s for s in online_screens if s["clientId"] == resolved]
+        else:
+            targets = [s for s in online_screens if s["clientId"].startswith(client_id)]
         if not targets:
             return f"No online second screen matching '{client_id}'."
 
@@ -539,7 +670,7 @@ async def set_second_screen_scale(
     Args:
         scale: Absolute scale (0.5–3.0). 1.0 = default. Leave at 0 to use delta instead.
         delta: Relative adjustment (e.g., 0.25 to increase, -0.25 to decrease).
-        client_id: Target specific second screen (prefix-match). Omit for all screens.
+        client_id: Target specific second screen (name, prefix, or full ID). Omit for all screens.
     """
     if scale == 0 and delta == 0:
         return "Error: provide either 'scale' (absolute) or 'delta' (relative adjustment)."
@@ -551,7 +682,11 @@ async def set_second_screen_scale(
 
     targets = online_screens
     if client_id:
-        targets = [s for s in online_screens if s["clientId"].startswith(client_id)]
+        resolved, err = await _resolve_client(client_id)
+        if not err:
+            targets = [s for s in online_screens if s["clientId"] == resolved]
+        else:
+            targets = [s for s in online_screens if s["clientId"].startswith(client_id)]
         if not targets:
             return f"No online second screen matching '{client_id}'."
 
@@ -614,7 +749,7 @@ async def capture_screen(
     Works with both main UI clients and second screen displays.
 
     Args:
-        client_id: Client ID (or prefix) to capture. If empty, captures the first connected client.
+        client_id: Client ID, name, or prefix to capture. If empty, captures the first connected client.
         format: Image format — "png" or "jpeg". Default "png".
         quality: JPEG quality 0.0–1.0. Only used for jpeg format. Default 0.8.
     """
@@ -623,13 +758,16 @@ async def capture_screen(
 
     # Resolve client ID
     if not client_id:
-        clients = await _get("/ring0/active-clients")
-        client_list = clients.get("clients", [])
-        if not client_list:
+        clients = await _get("/clients")
+        online = [c for c in clients if c.get("online")]
+        if not online:
             return "Error: no clients connected."
-        client_id = client_list[0].get("clientId", "")
-        if not client_id:
-            return "Error: first client has no clientId."
+        client_id = online[0].get("clientId", "")
+    else:
+        resolved, err = await _resolve_client(client_id)
+        if err:
+            return err
+        client_id = resolved
 
     body: dict[str, Any] = {
         "clientId": client_id,

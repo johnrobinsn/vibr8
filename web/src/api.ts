@@ -153,6 +153,20 @@ export interface TreeNode {
   children?: TreeNode[];
 }
 
+export interface ClientMetadata {
+  clientId: string;
+  name?: string;
+  description?: string;
+  role?: string;
+  deviceInfo?: Record<string, unknown>;
+  fingerprint?: string;
+  online?: boolean;
+  sessionId?: string;
+  wsRole?: string;
+  lastSeen?: number;
+  createdAt?: number;
+}
+
 export interface UsageLimits {
   five_hour: { utilization: number; resets_at: string | null } | null;
   seven_day: { utilization: number; resets_at: string | null } | null;
@@ -405,6 +419,15 @@ export const api = {
   secondScreenUnpair: (clientId: string) => post<{ ok: boolean }>("/second-screen/unpair", { clientId }),
   secondScreenToggle: (clientId: string, enabled: boolean) => post<{ ok: boolean; enabled: boolean }>("/second-screen/toggle", { clientId, enabled }),
   secondScreenList: () => get<Array<{ clientId: string; pairedClientId: string; pairedAt: number; enabled: boolean; online: boolean }>>("/second-screen/list"),
+
+  // Client metadata
+  getClients: () => get<ClientMetadata[]>("/clients"),
+  getClientMetadata: (clientId: string) =>
+    get<ClientMetadata>(`/clients/${encodeURIComponent(clientId)}`),
+  updateClientMetadata: (clientId: string, data: { name?: string; description?: string; role?: string }) =>
+    put<ClientMetadata>(`/clients/${encodeURIComponent(clientId)}`, data),
+  reportDeviceInfo: (clientId: string, info: Record<string, unknown>) =>
+    post<ClientMetadata>(`/clients/${encodeURIComponent(clientId)}/device-info`, info),
 
   // Admin
   restartServer: () => post("/admin/restart"),

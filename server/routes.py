@@ -842,6 +842,53 @@ def create_routes(
             return web.json_response({"error": f"Client {client_id} not connected"}, status=400)
         return web.json_response({"ok": True, "sessionId": resolved})
 
+    # ── Client metadata ────────────────────────────────────────────────
+
+    @routes.get("/api/clients")
+    async def list_clients(request: web.Request) -> web.Response:
+        clients = ws_bridge._build_client_list()
+        return web.json_response(clients)
+
+    @routes.get("/api/clients/{clientId}")
+    async def get_client(request: web.Request) -> web.Response:
+        client_id = request.match_info["clientId"]
+        meta = ws_bridge.get_client_metadata(client_id)
+        if not meta:
+            return web.json_response({"error": "Client not found"}, status=404)
+        result = dict(meta)
+        result["clientId"] = client_id
+        result["online"] = client_id in ws_bridge._client_sessions
+        return web.json_response(result)
+
+    @routes.put("/api/clients/{clientId}")
+    async def update_client(request: web.Request) -> web.Response:
+        client_id = request.match_info["clientId"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        updates = {k: v for k, v in body.items() if k in ("name", "description", "role")}
+        if not updates:
+            return web.json_response({"error": "No valid fields to update"}, status=400)
+        entry = ws_bridge.set_client_metadata(client_id, updates)
+        result = dict(entry)
+        result["clientId"] = client_id
+        return web.json_response(result)
+
+    @routes.post("/api/clients/{clientId}/device-info")
+    async def report_device_info(request: web.Request) -> web.Response:
+        client_id = request.match_info["clientId"]
+        try:
+            device_info = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        entry = ws_bridge.register_device_info(client_id, device_info)
+        result = dict(entry)
+        result["clientId"] = client_id
+        return web.json_response(result)
+
+    # ── Ring0 API ────────────────────────────────────────────────────────
+
     @routes.get("/api/ring0/session-output/{id}")
     async def ring0_session_output(request: web.Request) -> web.Response:
         session_id = request.match_info["id"]
