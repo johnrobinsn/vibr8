@@ -876,6 +876,20 @@ export function connectSession(sessionId: string) {
         ws.send(JSON.stringify({ type: "ping" }));
       }
     }, 15000);
+    // Report device info for client metadata (fire-and-forget)
+    fetch(`/api/clients/${encodeURIComponent(s.clientId)}/device-info`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        screenWidth: window.innerWidth,
+        screenHeight: window.innerHeight,
+        devicePixelRatio: window.devicePixelRatio,
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        language: navigator.language,
+        touchSupport: navigator.maxTouchPoints > 0,
+      }),
+    }).catch(() => {});
   };
 
   ws.onmessage = (event) => handleMessage(sessionId, event);

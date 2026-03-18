@@ -6,7 +6,9 @@ import asyncio
 import json
 import logging
 import subprocess
+import time
 import uuid
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
@@ -91,6 +93,10 @@ class WsBridge:
         # Native WebSocket connections (Android foreground service, bypasses WebView)
         self._native_ws_by_client: dict[str, web.WebSocketResponse] = {}
         self._native_rpc_pending: dict[str, asyncio.Future] = {}  # id → Future for native responses
+        # Client metadata (persisted to ~/.vibr8/clients.json)
+        self._client_metadata: dict[str, dict[str, Any]] = {}
+        self._CLIENTS_PATH = Path.home() / ".vibr8" / "clients.json"
+        self._load_client_metadata()
 
     # ── Native WebSocket (Android foreground service) ───────────────────
 
@@ -109,6 +115,136 @@ class WsBridge:
             future = self._native_rpc_pending.pop(msg_id)
             if not future.done():
                 future.set_result(data)
+
+    # ── Client metadata ─────────────────────────────────────────────────
+
+    def _load_client_metadata(self) -> None:
+        if self._CLIENTS_PATH.exists():
+            try:
+                self._client_metadata = json.loads(self._CLIENTS_PATH.read_text())
+                logger.info("[ws-bridge] Loaded %d client metadata records", len(self._client_metadata))
+            except Exception as e:
+                logger.error("[ws-bridge] Failed to load client metadata: %s", e)
+                self._client_metadata = {}
+        else:
+            self._client_metadata = {}
+
+    def _save_client_metadata(self) -> None:
+        try:
+            self._CLIENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._CLIENTS_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._client_metadata, indent=2))
+            tmp.rename(self._CLIENTS_PATH)
+        except Exception as e:
+            logger.error("[ws-bridge] Failed to save client metadata: %s", e)
+
+    def get_client_metadata(self, client_id: str) -> dict[str, Any] | None:
+        return self._client_metadata.get(client_id)
+
+    def get_all_client_metadata(self) -> dict[str, dict[str, Any]]:
+        return dict(self._client_metadata)
+
+    def set_client_metadata(self, client_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+        entry = self._client_metadata.get(client_id, {"createdAt": time.time()})
+        for key in ("name", "description", "role", "deviceInfo", "fingerprint"):
+            if key in updates:
+                entry[key] = updates[key]
+        entry["lastSeen"] = time.time()
+        self._client_metadata[client_id] = entry
+        self._save_client_metadata()
+        return entry
+
+    def register_device_info(self, client_id: str, device_info: dict[str, Any]) -> dict[str, Any]:
+        """Register device info for a client, compute fingerprint, and do fingerprint matching."""
+        fingerprint = self._compute_fingerprint(device_info)
+
+        existing = self._client_metadata.get(client_id)
+        if existing:
+            existing["deviceInfo"] = device_info
+            existing["fingerprint"] = fingerprint
+            existing["lastSeen"] = time.time()
+            self._client_metadata[client_id] = existing
+            self._save_client_metadata()
+            return existing
+
+        # New client — check for fingerprint match to inherit name/description/role
+        inherited: dict[str, Any] = {}
+        for cid, meta in self._client_metadata.items():
+            if cid != client_id and meta.get("fingerprint") == fingerprint:
+                for key in ("name", "description", "role"):
+                    if meta.get(key):
+                        inherited[key] = meta[key]
+                logger.info("[ws-bridge] Fingerprint match: %s inherits metadata from %s", client_id[:8], cid[:8])
+                break
+
+        entry: dict[str, Any] = {
+            "deviceInfo": device_info,
+            "fingerprint": fingerprint,
+            "lastSeen": time.time(),
+            "createdAt": time.time(),
+            **inherited,
+        }
+        self._client_metadata[client_id] = entry
+        self._save_client_metadata()
+        return entry
+
+    @staticmethod
+    def _compute_fingerprint(device_info: dict[str, Any]) -> str:
+        import hashlib
+        parts = [
+            device_info.get("userAgent", ""),
+            str(device_info.get("screenWidth", "")),
+            str(device_info.get("screenHeight", "")),
+            str(device_info.get("devicePixelRatio", "")),
+            device_info.get("platform", ""),
+        ]
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+    def resolve_client(self, identifier: str) -> list[dict[str, Any]]:
+        """Resolve a client by name, UUID, or prefix. Returns list of matches with full info."""
+        all_clients = self._build_client_list()
+
+        # Exact UUID match
+        for c in all_clients:
+            if c["clientId"] == identifier:
+                return [c]
+
+        # Exact name match (case-insensitive)
+        by_name = [c for c in all_clients if c.get("name", "").lower() == identifier.lower()]
+        if by_name:
+            return by_name
+
+        # UUID prefix match
+        by_prefix = [c for c in all_clients if c["clientId"].startswith(identifier)]
+        if by_prefix:
+            return by_prefix
+
+        return []
+
+    def _build_client_list(self) -> list[dict[str, Any]]:
+        """Build merged list of all known clients with online status."""
+        result = []
+        seen = set()
+
+        # Online clients
+        for cid, sid in self._client_sessions.items():
+            entry = dict(self._client_metadata.get(cid, {}))
+            entry["clientId"] = cid
+            entry["online"] = True
+            entry["sessionId"] = sid
+            entry["wsRole"] = self._client_roles.get(cid, "primary")
+            result.append(entry)
+            seen.add(cid)
+
+        # Offline clients from metadata
+        for cid, meta in self._client_metadata.items():
+            if cid not in seen:
+                entry = dict(meta)
+                entry["clientId"] = cid
+                entry["online"] = False
+                result.append(entry)
+
+        return result
 
     # ── WebRTC manager ─────────────────────────────────────────────────
 
@@ -512,6 +648,10 @@ class WsBridge:
                 self._client_sessions[client_id] = session_id
                 self._ws_by_client[client_id] = ws
                 self._client_roles[client_id] = role
+                # Update lastSeen in metadata
+                if client_id in self._client_metadata:
+                    self._client_metadata[client_id]["lastSeen"] = time.time()
+                    self._save_client_metadata()
             logger.info(f"[ws-bridge] Browser connected for session {session_id} client={client_id or '(none)'} role={role} ({len(session.browser_sockets)} browsers)")
 
             # Notify Ring0 when a paired second screen connects (not for mirror)
@@ -942,7 +1082,12 @@ class WsBridge:
             # Fire state transition: running → waiting_for_permission
             if session.state.get("is_running") and not session.state.get("is_waiting_for_permission"):
                 session.state["is_waiting_for_permission"] = True
-                asyncio.ensure_future(self._notify_ring0_state_change(session, "running→waiting_for_permission"))
+                # Include permission details so Ring0 can see what's needed without a tool call
+                tool_name = perm.get("tool_name", "?")
+                desc = perm.get("description", "")
+                inp = json.dumps(perm.get("input", {}))[:300]
+                detail = f" — {tool_name}: {desc or inp}"
+                asyncio.ensure_future(self._notify_ring0_state_change(session, "running→waiting_for_permission" + detail))
 
     async def _handle_tool_progress(self, session: Session, msg: dict[str, Any]) -> None:
         # Agent is executing a tool — play thinking tone.
