@@ -31,6 +31,7 @@ export function SecondScreen() {
   const mirroredSessionId = useStore((s) => s.mirroredSessionId);
   const sessionNames = useStore((s) => s.sessionNames);
   const scale = useStore((s) => s.secondScreenScale);
+  const tvSafe = useStore((s) => s.secondScreenTvSafe);
 
   // Set client role to secondscreen on mount
   useEffect(() => {
@@ -296,7 +297,7 @@ export function SecondScreen() {
 
   // Paired — show content
   return (
-    <div className="h-[100dvh] flex flex-col bg-cc-bg text-cc-fg">
+    <div className="h-[100dvh] flex flex-col bg-cc-bg text-cc-fg" style={tvSafe > 0 ? { padding: `${tvSafe}%` } : undefined}>
       {/* Status bar */}
       <div className="shrink-0 flex items-center justify-between px-4 py-2 border-b border-cc-border text-xs text-cc-fg-muted">
         <div className="flex items-center gap-2">

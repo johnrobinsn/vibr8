@@ -671,6 +671,23 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         newScale = Math.max(0.5, Math.min(3.0, newScale));
         store.setSecondScreenScale(newScale);
         response = { type: "rpc_response", id: rpcId, result: { scale: newScale } };
+      } else if (method === "set_tv_safe") {
+        const params = data.params as Record<string, unknown> | undefined;
+        const enabled = params?.enabled as boolean | undefined;
+        const pct = params?.padding_percent as number | undefined;
+        let padding: number;
+        if (enabled === false) {
+          padding = 0;
+        } else if (pct != null && pct > 0) {
+          padding = pct;
+        } else if (enabled === true) {
+          padding = store.secondScreenTvSafe > 0 ? store.secondScreenTvSafe : 2.5;
+        } else {
+          // toggle
+          padding = store.secondScreenTvSafe > 0 ? 0 : 2.5;
+        }
+        store.setSecondScreenTvSafe(padding);
+        response = { type: "rpc_response", id: rpcId, result: { tvSafe: padding > 0, paddingPercent: padding } };
       } else if (method === "get_device_info") {
         response = {
           type: "rpc_response", id: rpcId,
@@ -685,6 +702,8 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
             online: navigator.onLine,
             touchSupport: navigator.maxTouchPoints > 0,
             scale: store.secondScreenScale,
+            tvSafe: store.secondScreenTvSafe > 0,
+            tvSafePaddingPercent: store.secondScreenTvSafe,
           },
         };
       } else if (method === "clear_content") {

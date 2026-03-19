@@ -176,6 +176,7 @@ async def handle_native_ws(request: web.Request) -> web.WebSocketResponse:
     bridge: WsBridge = request.app["bridge"]
     bridge.register_native_ws(client_id, ws)
 
+    logger.info("[native] Connection opened for client %s", client_id[:8])
     try:
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
@@ -185,8 +186,10 @@ async def handle_native_ws(request: web.Request) -> web.WebSocketResponse:
                 except Exception:
                     logger.exception("[native] Error handling message from client %s", client_id[:8])
             elif msg.type == aiohttp.WSMsgType.ERROR:
+                logger.info("[native] WS error for client %s: %s", client_id[:8], ws.exception())
                 break
     finally:
+        logger.info("[native] Connection closed for client %s close_code=%s exception=%s", client_id[:8], ws.close_code, ws.exception())
         bridge.unregister_native_ws(client_id)
 
     return ws

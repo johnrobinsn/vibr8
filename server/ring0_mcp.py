@@ -746,6 +746,62 @@ async def set_second_screen_scale(
 
 
 @mcp.tool()
+async def set_tv_safe(
+    enabled: bool = True,
+    padding_percent: float = 0,
+    client_id: str = "",
+) -> str:
+    """Enable or disable TV-safe mode on second screen displays.
+
+    TV-safe mode adds padding around the content to keep it visible on TVs
+    where bezels cover the screen edges. Off by default (edge-to-edge).
+
+    Args:
+        enabled: True to enable TV-safe padding, False for edge-to-edge.
+        padding_percent: Custom padding percentage (e.g. 1.0, 2.5, 5.0). When enabled
+                         without specifying this, the current value is kept (default 2.5%).
+        client_id: Target specific second screen (name, prefix, or full ID). Omit for all screens.
+    """
+    screens = await _get("/second-screen/list")
+    online_screens = [s for s in screens if s.get("online")]
+    if not online_screens:
+        return "No second screens are online."
+
+    targets = online_screens
+    if client_id:
+        resolved, err = await _resolve_client(client_id)
+        if not err:
+            targets = [s for s in online_screens if s["clientId"] == resolved]
+        else:
+            targets = [s for s in online_screens if s["clientId"].startswith(client_id)]
+        if not targets:
+            return f"No online second screen matching '{client_id}'."
+
+    params: dict[str, Any] = {"enabled": enabled}
+    if padding_percent > 0:
+        params["padding_percent"] = padding_percent
+
+    results = []
+    for screen in targets:
+        body: dict[str, Any] = {
+            "clientId": screen["clientId"],
+            "method": "set_tv_safe",
+            "params": params,
+        }
+        result = await _post("/ring0/query-client", body)
+        if result.get("error"):
+            results.append(f"Screen {screen['clientId'][:8]}: error — {result['error']}")
+        else:
+            r = result.get("result", {})
+            state = "enabled" if r.get("tvSafe") else "disabled"
+            pct = r.get("paddingPercent", 0)
+            detail = f" ({pct}%)" if pct > 0 else ""
+            results.append(f"Screen {screen['clientId'][:8]}: TV-safe {state}{detail}")
+
+    return "\n".join(results)
+
+
+@mcp.tool()
 async def toggle_second_screen(client_id: str, enabled: bool = True) -> str:
     """Enable or disable a second screen. Disabled screens won't receive pushed content.
 

@@ -102,11 +102,11 @@ class WsBridge:
 
     def register_native_ws(self, client_id: str, ws: web.WebSocketResponse) -> None:
         self._native_ws_by_client[client_id] = ws
-        logger.info("[ws-bridge] Native WS registered for client %s", client_id[:8])
+        logger.debug("[ws-bridge] Native WS registered for client %s", client_id[:8])
 
     def unregister_native_ws(self, client_id: str) -> None:
         self._native_ws_by_client.pop(client_id, None)
-        logger.info("[ws-bridge] Native WS unregistered for client %s", client_id[:8])
+        logger.debug("[ws-bridge] Native WS unregistered for client %s", client_id[:8])
 
     def handle_native_message(self, client_id: str, data: dict) -> None:
         """Handle an incoming message from a native WebSocket (command response)."""
@@ -644,6 +644,7 @@ class WsBridge:
             self._mirror_sockets.add(ws)
             logger.info(f"[ws-bridge] Mirror WS connected for session {session_id} client={client_id or '(none)'} ({len(session.browser_sockets)} browsers)")
         else:
+            was_already_connected = client_id and self._client_roles.get(client_id) == "secondscreen"
             if client_id:
                 self._client_sessions[client_id] = session_id
                 self._ws_by_client[client_id] = ws
@@ -654,10 +655,10 @@ class WsBridge:
                     self._save_client_metadata()
             logger.info(f"[ws-bridge] Browser connected for session {session_id} client={client_id or '(none)'} role={role} ({len(session.browser_sockets)} browsers)")
 
-            # Notify Ring0 when a paired second screen connects (not for mirror)
-            if client_id and role == "secondscreen" and self._ring0_manager:
+            # Notify Ring0 when a paired second screen connects for the first time (not reconnects)
+            if client_id and role == "secondscreen" and not was_already_connected and self._ring0_manager:
                 ring0 = self._ring0_manager
-                if ring0.is_enabled:
+                if ring0.is_enabled and not ring0.events_muted:
                     await self.submit_user_message(
                         ring0.session_id,
                         f"[event second_screen_connected] clientId={client_id[:8]}"
@@ -666,9 +667,12 @@ class WsBridge:
         # Send current session state
         await self._send_to_browser(ws, {"type": "session_init", "session": session.state})
 
-        # Replay message history
+        # Replay message history (limit for second screens to avoid giant payloads)
         if session.message_history:
-            await self._send_to_browser(ws, {"type": "message_history", "messages": session.message_history})
+            history = session.message_history
+            if role == "secondscreen" and len(history) > 100:
+                history = history[-100:]
+            await self._send_to_browser(ws, {"type": "message_history", "messages": history})
 
         # Send pending permissions
         for perm in session.pending_permissions.values():
@@ -748,7 +752,7 @@ class WsBridge:
                     # Notify Ring0 when a paired second screen disconnects
                     if was_second_screen and client_id and self._ring0_manager:
                         ring0 = self._ring0_manager
-                        if ring0.is_enabled:
+                        if ring0.is_enabled and not ring0.events_muted:
                             await self.submit_user_message(
                                 ring0.session_id,
                                 f"[event second_screen_disconnected] clientId={client_id[:8]}"
@@ -1320,6 +1324,8 @@ class WsBridge:
         """Notify Ring0 of a session state transition (e.g. idle→running)."""
         ring0 = self._ring0_manager
         if not ring0 or not ring0.is_enabled or not ring0.session_id:
+            return
+        if ring0.events_muted:
             return
         # Don't notify Ring0 about its own session
         if session.id == ring0.session_id:

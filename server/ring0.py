@@ -133,6 +133,7 @@ class Ring0Manager:
     def __init__(self, port: int) -> None:
         self._port = port
         self._enabled: bool = False
+        self._events_muted: bool = False
         self._session_id: str = RING0_SESSION_ID
         self._cli_session_id: Optional[str] = None
         self._model: Optional[str] = None
@@ -143,6 +144,10 @@ class Ring0Manager:
     @property
     def is_enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def events_muted(self) -> bool:
+        return self._events_muted
 
     @property
     def session_id(self) -> str:
@@ -165,6 +170,11 @@ class Ring0Manager:
             self.enable()
         else:
             self.disable()
+
+    def set_events_muted(self, muted: bool) -> None:
+        self._events_muted = muted
+        self._save_state()
+        logger.info("[ring0] Events %s", "muted" if muted else "unmuted")
 
     # ── Session management ────────────────────────────────────────────────
 
@@ -249,6 +259,7 @@ class Ring0Manager:
             try:
                 data = json.loads(RING0_CONFIG_PATH.read_text())
                 self._enabled = data.get("enabled", False)
+                self._events_muted = data.get("eventsMuted", False)
                 self._cli_session_id = data.get("cliSessionId")
                 self._model = data.get("model")
             except Exception:
@@ -258,6 +269,7 @@ class Ring0Manager:
         RING0_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         data: dict[str, Any] = {
             "enabled": self._enabled,
+            "eventsMuted": self._events_muted,
             "sessionId": self._session_id,
             "cliSessionId": self._cli_session_id,
         }

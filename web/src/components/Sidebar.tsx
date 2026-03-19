@@ -13,6 +13,7 @@ export function Sidebar() {
   const [authEnabled, setAuthEnabled] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [ring0SessionId, setRing0SessionId] = useState<string | null>(null);
+  const [ring0EventsMuted, setRing0EventsMuted] = useState(false);
   const [confirmArchiveId, setConfirmArchiveId] = useState<string | null>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
   const sessions = useStore((s) => s.sessions);
@@ -75,10 +76,11 @@ export function Sidebar() {
       try {
         const [list, ring0Status] = await Promise.all([
           api.listSessions(),
-          api.getRing0Status().catch(() => ({ enabled: false, sessionId: null })),
+          api.getRing0Status().catch(() => ({ enabled: false, eventsMuted: false, sessionId: null })),
         ]);
         if (active) {
           setRing0SessionId(ring0Status.sessionId ?? null);
+          setRing0EventsMuted(ring0Status.eventsMuted ?? false);
           useStore.getState().setSdkSessions(list);
           // Hydrate session names from server (server is source of truth for auto-generated names)
           const store = useStore.getState();
@@ -691,6 +693,27 @@ export function Sidebar() {
           </svg>
           <span>Environments</span>
         </button>
+        {ring0SessionId && (
+          <button
+            onClick={async () => {
+              const newMuted = !ring0EventsMuted;
+              setRing0EventsMuted(newMuted);
+              await api.muteRing0Events(newMuted).catch(() => setRing0EventsMuted(!newMuted));
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-[10px] text-sm text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+          >
+            {ring0EventsMuted ? (
+              <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                <path fillRule="evenodd" d="M5.05 3.636a1 1 0 010 1.414 7 7 0 000 9.9 1 1 0 11-1.414 1.414 9 9 0 010-12.728 1 1 0 011.414 0zm9.9 0a1 1 0 011.414 0 9 9 0 010 12.728 1 1 0 11-1.414-1.414 7 7 0 000-9.9 1 1 0 010-1.414zM7.879 6.464a1 1 0 010 1.414 3 3 0 000 4.243 1 1 0 11-1.415 1.414 5 5 0 010-7.07 1 1 0 011.415 0zm4.242 0a1 1 0 011.415 0 5 5 0 010 7.072 1 1 0 01-1.415-1.415 3 3 0 000-4.242 1 1 0 010-1.415zM10 9a1 1 0 100 2 1 1 0 000-2z" clipRule="evenodd" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                <path fillRule="evenodd" d="M5.05 3.636a1 1 0 010 1.414 7 7 0 000 9.9 1 1 0 11-1.414 1.414 9 9 0 010-12.728 1 1 0 011.414 0zm9.9 0a1 1 0 011.414 0 9 9 0 010 12.728 1 1 0 11-1.414-1.414 7 7 0 000-9.9 1 1 0 010-1.414zM7.879 6.464a1 1 0 010 1.414 3 3 0 000 4.243 1 1 0 11-1.415 1.414 5 5 0 010-7.07 1 1 0 011.415 0zm4.242 0a1 1 0 011.415 0 5 5 0 010 7.072 1 1 0 01-1.415-1.415 3 3 0 000-4.242 1 1 0 010-1.415zM10 9a1 1 0 100 2 1 1 0 000-2z" clipRule="evenodd" />
+              </svg>
+            )}
+            <span>{ring0EventsMuted ? "Events muted" : "Events on"}</span>
+          </button>
+        )}
         <button
           onClick={toggleNotificationSound}
           className="w-full flex items-center gap-2.5 px-3 py-2 rounded-[10px] text-sm text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"

@@ -788,6 +788,7 @@ def create_routes(
             return web.json_response({"enabled": False, "sessionId": None})
         return web.json_response({
             "enabled": ring0_manager.is_enabled,
+            "eventsMuted": ring0_manager.events_muted,
             "sessionId": ring0_manager.session_id,
         })
 
@@ -806,6 +807,18 @@ def create_routes(
             session_id = await ring0_manager.ensure_session(launcher, ws_bridge)
             return web.json_response({"ok": True, "enabled": True, "sessionId": session_id})
         return web.json_response({"ok": True, "enabled": False, "sessionId": ring0_manager.session_id})
+
+    @routes.post("/api/ring0/mute-events")
+    async def ring0_mute_events(request: web.Request) -> web.Response:
+        if ring0_manager is None:
+            return web.json_response({"error": "Ring0 not available"}, status=501)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        muted = bool(body.get("muted", False))
+        ring0_manager.set_events_muted(muted)
+        return web.json_response({"ok": True, "eventsMuted": muted})
 
     @routes.post("/api/ring0/send-message")
     async def ring0_send_message(request: web.Request) -> web.Response:

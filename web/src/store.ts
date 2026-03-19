@@ -91,6 +91,7 @@ interface AppState {
   secondScreenContent: { type: string; content: string; filename?: string } | null;
   mirroredSessionId: string | null;
   secondScreenScale: number;
+  secondScreenTvSafe: number; // 0 = off, >0 = padding percent
 
   // Playground state
   playgroundActive: boolean;
@@ -104,6 +105,7 @@ interface AppState {
   setSecondScreenContent: (content: { type: string; content: string; filename?: string } | null) => void;
   setMirroredSessionId: (id: string | null) => void;
   setSecondScreenScale: (scale: number) => void;
+  setSecondScreenTvSafe: (padding: number) => void;
   setDarkMode: (v: boolean) => void;
   toggleDarkMode: () => void;
   setNotificationSound: (v: boolean) => void;
@@ -246,6 +248,13 @@ export const useStore = create<AppState>((set) => ({
   secondScreenContent: null,
   mirroredSessionId: null,
   secondScreenScale: parseFloat(localStorage.getItem("cc-second-screen-scale") || "1.5"),
+  secondScreenTvSafe: (() => {
+    const v = localStorage.getItem("cc-second-screen-tv-safe");
+    if (v === "true") return 2.5; // migrate legacy boolean
+    if (v === "false" || v === null) return 0;
+    const n = parseFloat(v);
+    return isNaN(n) ? 0 : n;
+  })(),
   playgroundActive: false,
   playgroundSessionId: null,
   playgroundSegments: [],
@@ -259,6 +268,10 @@ export const useStore = create<AppState>((set) => ({
     const clamped = Math.max(0.5, Math.min(3.0, scale));
     localStorage.setItem("cc-second-screen-scale", String(clamped));
     set({ secondScreenScale: clamped });
+  },
+  setSecondScreenTvSafe: (padding) => {
+    localStorage.setItem("cc-second-screen-tv-safe", String(padding));
+    set({ secondScreenTvSafe: padding });
   },
   setDarkMode: (v) => {
     localStorage.setItem("cc-dark-mode", String(v));

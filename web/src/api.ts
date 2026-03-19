@@ -363,13 +363,16 @@ export const api = {
 
   // Ring0 meta-agent
   getRing0Status: () =>
-    get<{ enabled: boolean; sessionId: string | null }>("/ring0/status"),
+    get<{ enabled: boolean; eventsMuted: boolean; sessionId: string | null }>("/ring0/status"),
 
   toggleRing0: (enabled: boolean) =>
     post<{ ok: boolean; enabled: boolean; sessionId: string | null }>(
       "/ring0/toggle",
       { enabled },
     ),
+
+  muteRing0Events: (muted: boolean) =>
+    post<{ ok: boolean; eventsMuted: boolean }>("/ring0/mute-events", { muted }),
 
   // WebRTC signaling
   getIceServers: () =>
