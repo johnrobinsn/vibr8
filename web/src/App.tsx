@@ -156,15 +156,16 @@ export default function App() {
 
   const sessionsLoaded = useStore((s) => s.sessionsLoaded);
 
+  // Second screen bypasses auth — it uses pairing codes instead
+  if (hash === "#/second-screen") {
+    return <SecondScreen />;
+  }
+
   if (authState === "loading") return null;
   if (authState === "login") return <LoginPage onLogin={() => setAuthState("authenticated")} />;
 
   if (hash === "#/playground") {
     return <Playground />;
-  }
-
-  if (hash === "#/second-screen") {
-    return <SecondScreen />;
   }
 
   if (hash === "#/settings") {

@@ -32,10 +32,12 @@ SESSION_MAX_AGE = 30 * 86400  # 30 days
 PUBLIC_PREFIXES = (
     "/ws/cli/",
     "/ws/native/",
+    "/ws/browser/",
     "/api/auth/login",
     "/api/auth/me",
     "/api/ring0/",
     "/api/second-screen/",
+    "/api/clients/",
     "/assets/",
     "/sw.js",
     "/manifest.json",

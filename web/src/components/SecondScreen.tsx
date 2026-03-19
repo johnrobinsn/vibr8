@@ -78,16 +78,35 @@ export function SecondScreen() {
     setRenameOpen(false);
   }, [clientId]);
 
-  // Check pairing status on mount
+  // Check pairing status on mount and generate code if unpaired (single flow)
   useEffect(() => {
-    api.secondScreenStatus(clientId).then((status) => {
-      if (status.paired && status.role === "secondscreen" && status.pairedClientId) {
-        setPairingState("paired");
-        setPairedClientId(status.pairedClientId);
-      } else {
-        setPairingState("unpaired");
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    async function checkAndGenerate() {
+      try {
+        const status = await api.secondScreenStatus(clientId);
+        if (cancelled) return;
+        if (status.paired && status.role === "secondscreen" && status.pairedClientId) {
+          setPairingState("paired");
+          setPairedClientId(status.pairedClientId);
+          return;
+        }
+      } catch {
+        if (cancelled) return;
       }
-    }).catch(() => setPairingState("unpaired"));
+      setPairingState("unpaired");
+      try {
+        const { code } = await api.secondScreenPairCode(clientId);
+        if (!cancelled) setPairingCode(code);
+      } catch (err) {
+        console.error("[second-screen] Failed to generate code, retrying in 3s:", err);
+        if (!cancelled) retryTimer = setTimeout(checkAndGenerate, 3000);
+      }
+    }
+
+    checkAndGenerate();
+    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
   }, [clientId]);
 
   // When paired, open a dedicated WebSocket to Ring0 (control channel)
@@ -184,7 +203,7 @@ export function SecondScreen() {
     };
   }, [mirroredSessionId, clientId]);
 
-  // Generate pairing code
+  // Generate a fresh pairing code (used after unpair)
   const generateCode = useCallback(async () => {
     try {
       const { code } = await api.secondScreenPairCode(clientId);
@@ -193,13 +212,6 @@ export function SecondScreen() {
       console.error("[second-screen] Failed to generate code:", err);
     }
   }, [clientId]);
-
-  // Auto-generate code when unpaired
-  useEffect(() => {
-    if (pairingState === "unpaired" && !pairingCode) {
-      generateCode();
-    }
-  }, [pairingState, pairingCode, generateCode]);
 
   // Listen for pairing completion via polling
   useEffect(() => {
@@ -231,7 +243,8 @@ export function SecondScreen() {
     useStore.getState().setCurrentSession(null);
     useStore.getState().setMirroredSessionId(null);
     useStore.getState().setSecondScreenContent(null);
-  }, [clientId]);
+    generateCode();
+  }, [clientId, generateCode]);
 
   const handleGoHome = useCallback(() => {
     useStore.getState().setMirroredSessionId(null);

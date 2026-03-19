@@ -509,6 +509,38 @@ async def launch_app(package: str = "", url: str = "") -> str:
 
 
 @mcp.tool()
+async def pair_second_screen(code: str, primary_client_id: str = "") -> str:
+    """Pair a second screen display using its pairing code.
+
+    The second screen shows a pairing code on its display. Enter that code here
+    to complete the pairing. If primary_client_id is omitted, the first connected
+    primary client is used.
+
+    Args:
+        code: The pairing code displayed on the second screen.
+        primary_client_id: Optional primary client ID to pair with. If omitted,
+                          uses the first connected primary client.
+    """
+    if not primary_client_id:
+        # Find first connected primary client
+        clients = await _get("/ring0/clients")
+        for c in clients:
+            if c.get("online") and c.get("role") != "secondscreen":
+                primary_client_id = c["clientId"]
+                break
+        if not primary_client_id:
+            return "Error: no online primary client found. Provide a primary_client_id."
+
+    result = await _post("/second-screen/pair", {
+        "code": code,
+        "clientId": primary_client_id,
+    })
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    return f"Paired successfully. Second screen {result.get('secondScreenClientId', '?')[:8]}... is now connected."
+
+
+@mcp.tool()
 async def list_second_screens() -> str:
     """List all paired second screen displays and their online/offline status.
 
