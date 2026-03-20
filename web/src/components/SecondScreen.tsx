@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
 import { MessageFeed } from "./MessageFeed.js";
@@ -33,6 +33,7 @@ export function SecondScreen() {
   const sessionNames = useStore((s) => s.sessionNames);
   const scale = useStore((s) => s.secondScreenScale);
   const tvSafe = useStore((s) => s.secondScreenTvSafe);
+  const secondScreenDarkMode = useStore((s) => s.secondScreenDarkMode);
 
   // Set client role to secondscreen on mount
   useEffect(() => {
@@ -42,15 +43,15 @@ export function SecondScreen() {
     };
   }, []);
 
-  // Force dark mode
-  useEffect(() => {
-    document.documentElement.classList.add("dark");
+  // Apply second screen dark mode before paint (independent of primary dark mode)
+  useLayoutEffect(() => {
+    document.documentElement.classList.toggle("dark", secondScreenDarkMode);
     return () => {
-      // Restore original dark mode on unmount
+      // Restore primary dark mode on unmount
       const isDark = useStore.getState().darkMode;
       document.documentElement.classList.toggle("dark", isDark);
     };
-  }, []);
+  }, [secondScreenDarkMode]);
 
   // Report device info on mount (fire-and-forget)
   useEffect(() => {
@@ -113,8 +114,11 @@ export function SecondScreen() {
     return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
   }, [clientId]);
 
-  // When paired, open a dedicated WebSocket to Ring0 (control channel)
+  // When paired, open a dedicated WebSocket to Ring0 (control channel).
+  // The connectKey is bumped to force a reconnect when messages are lost
+  // (e.g. after HMR replaces the store with an empty messages map).
   const wsRef = useRef<WebSocket | null>(null);
+  const [connectKey, setConnectKey] = useState(0);
   useEffect(() => {
     if (pairingState !== "paired") return;
     useStore.getState().setCurrentSession(RING0_SESSION_ID);
@@ -158,7 +162,18 @@ export function SecondScreen() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     };
-  }, [pairingState]);
+  }, [pairingState, connectKey]);
+
+  // After HMR, the store may have been recreated with an empty messages map
+  // while the WS is still connected.  Detect this and force a reconnect so
+  // the server re-sends session_init + message_history.
+  const ring0Messages = useStore((s) => s.messages.get(RING0_SESSION_ID));
+  const ring0Connected = useStore((s) => s.connectionStatus.get(RING0_SESSION_ID));
+  useEffect(() => {
+    if (pairingState === "paired" && ring0Connected === "connected" && (!ring0Messages || ring0Messages.length === 0)) {
+      setConnectKey((k) => k + 1);
+    }
+  }, [pairingState, ring0Connected, ring0Messages]);
 
   // Mirror WebSocket — opens a second WS to the mirrored session for live data
   const mirrorWsRef = useRef<WebSocket | null>(null);

@@ -693,6 +693,12 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         const name = params?.name ?? null;
         store.setSecondScreenClientName(name);
         response = { type: "rpc_response", id: rpcId, result: { name } };
+      } else if (method === "set_dark_mode") {
+        const params = data.params as Record<string, unknown> | undefined;
+        const enabled = params?.enabled as boolean | undefined;
+        const newVal = enabled ?? !store.secondScreenDarkMode;
+        store.setSecondScreenDarkMode(newVal);
+        response = { type: "rpc_response", id: rpcId, result: { darkMode: newVal } };
       } else if (method === "get_device_info") {
         response = {
           type: "rpc_response", id: rpcId,
@@ -709,6 +715,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
             scale: store.secondScreenScale,
             tvSafe: store.secondScreenTvSafe > 0,
             tvSafePaddingPercent: store.secondScreenTvSafe,
+            darkMode: store.secondScreenDarkMode,
           },
         };
       } else if (method === "clear_content") {

@@ -67,6 +67,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Second screen manages its own dark mode independently — read hash
+    // directly so this is resilient to HMR re-renders where reactive state
+    // may briefly be stale.
+    if (window.location.hash === "#/second-screen") return;
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
 

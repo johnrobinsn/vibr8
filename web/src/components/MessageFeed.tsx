@@ -371,7 +371,6 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
   const streamingStartedAt = useStore((s) => s.streamingStartedAt.get(sessionId));
   const streamingOutputTokens = useStore((s) => s.streamingOutputTokens.get(sessionId));
   const sessionStatus = useStore((s) => s.sessionStatus.get(sessionId));
-  const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
   const justSwitchedRef = useRef(true);
@@ -429,16 +428,20 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     if (isNearBottom.current) {
-      const behavior = justSwitchedRef.current ? "instant" : "smooth";
+      const el = containerRef.current;
+      if (!el) return;
+      const instant = justSwitchedRef.current;
       // Only clear the flag once we've actually scrolled with messages present
       if (justSwitchedRef.current && messages.length > 0) {
         justSwitchedRef.current = false;
       }
-      // Suppress handleScroll during smooth animation so isNearBottom stays true
-      if (behavior === "smooth") {
+      // Use scrollTop directly — scrollIntoView miscalculates under CSS zoom
+      if (instant) {
+        el.scrollTop = el.scrollHeight;
+      } else {
         programmaticScrollUntil.current = Date.now() + 500;
+        el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
       }
-      bottomRef.current?.scrollIntoView({ behavior });
     }
   }, [messages.length, streamingText]);
 
@@ -466,7 +469,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="h-full overflow-y-auto px-3 sm:px-4 py-4 sm:py-6"
+        className="h-full overflow-y-auto overflow-x-hidden px-3 sm:px-4 py-4 sm:py-6"
       >
         <div className="max-w-3xl mx-auto space-y-3 sm:space-y-5">
           {hasMore && (
@@ -520,7 +523,6 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
             </div>
           )}
 
-          <div ref={bottomRef} />
         </div>
       </div>
     </div>

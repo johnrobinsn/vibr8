@@ -162,8 +162,8 @@ Events sent to Ring0 (session state changes, second screen connect/disconnect/pa
 ```json5
 {
   "rules": [
-    // Suppress all second screen events
-    { "match": { "type": "second_screen_*" }, "suppress": true },
+    // Show second screen events in UI but don't send to Ring0
+    { "match": { "type": "second_screen_*" }, "send": false },
 
     // Custom template for state changes, collapsed in UI
     {
@@ -181,11 +181,11 @@ Events sent to Ring0 (session state changes, second screen connect/disconnect/pa
 
 **Rules** are first-match-wins. Each rule has a `match` object — events are flat key/value dicts and all match keys use glob patterns (`fnmatch`).
 
-**Rule options:**
-- `suppress: true` — drop the event (Ring0 never sees it)
+**Rule options (two orthogonal knobs):**
+- `send` — whether to submit to Ring0 LLM (default: `true`)
 - `template` — text the LLM sees (`${evt.fieldName}` for fields, `${evt}` for full JSON)
 - `summary` — short label for collapsed UI mode (also supports interpolation)
-- `ui` — `"visible"` (default, system-message divider), `"collapsed"` (disclosure triangle), or `"hidden"` (sent to Ring0 but not shown in browser)
+- `ui` — `"visible"` (default, system-message divider), `"collapsed"` (disclosure triangle), or `"hidden"` (not shown in browser)
 
 **Event types:** `session_state_change` (fields: `session`, `sessionId`, `transition`, `detail`), `second_screen_connected` / `second_screen_disconnected` / `second_screen_paired` / `second_screen_unpaired` / `second_screen_enabled` / `second_screen_disabled` (fields: `clientId`, plus `user` for paired), `note_mode_ended` (no fields).
 

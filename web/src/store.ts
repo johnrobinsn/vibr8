@@ -94,6 +94,7 @@ interface AppState {
   secondScreenScale: number;
   secondScreenTvSafe: number; // 0 = off, >0 = padding percent
   secondScreenClientName: string | null;
+  secondScreenDarkMode: boolean;
 
   // Playground state
   playgroundActive: boolean;
@@ -109,6 +110,7 @@ interface AppState {
   setSecondScreenScale: (scale: number) => void;
   setSecondScreenTvSafe: (padding: number) => void;
   setSecondScreenClientName: (name: string | null) => void;
+  setSecondScreenDarkMode: (v: boolean) => void;
   setDarkMode: (v: boolean) => void;
   toggleDarkMode: () => void;
   setNotificationSound: (v: boolean) => void;
@@ -261,6 +263,7 @@ export const useStore = create<AppState>((set) => ({
     const n = parseFloat(v);
     return isNaN(n) ? 0 : n;
   })(),
+  secondScreenDarkMode: localStorage.getItem("cc-second-screen-dark-mode") !== "false",
   playgroundActive: false,
   playgroundSessionId: null,
   playgroundSegments: [],
@@ -280,6 +283,10 @@ export const useStore = create<AppState>((set) => ({
     set({ secondScreenTvSafe: padding });
   },
   setSecondScreenClientName: (name) => set({ secondScreenClientName: name }),
+  setSecondScreenDarkMode: (v) => {
+    localStorage.setItem("cc-second-screen-dark-mode", String(v));
+    set({ secondScreenDarkMode: v });
+  },
   setDarkMode: (v) => {
     localStorage.setItem("cc-dark-mode", String(v));
     set({ darkMode: v });

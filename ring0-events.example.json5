@@ -5,12 +5,18 @@
   // Match fields: all keys use glob patterns (fnmatch). "type" is just a conventional key.
   //
   // Rule options:
-  //   suppress: true          — drop the event entirely (Ring0 never sees it)
+  //   send: false              — don't submit to Ring0 LLM (default: true)
   //   template: "..."         — text the LLM sees (default: "[event {type}] {json}")
   //   summary: "..."          — short label for collapsed UI mode
   //   ui: "visible"           — render as a system-message-style divider (default)
   //   ui: "collapsed"         — render as a disclosure triangle (twisty)
-  //   ui: "hidden"            — event reaches Ring0 but is hidden from the browser UI
+  //   ui: "hidden"            — don't show in the browser UI
+  //
+  // "send" and "ui" are orthogonal:
+  //   send: true,  ui: "visible"  — LLM sees it, browser shows it (default)
+  //   send: true,  ui: "hidden"   — LLM sees it, browser hides it
+  //   send: false, ui: "visible"  — LLM doesn't see it, browser shows it
+  //   send: false, ui: "hidden"   — dropped entirely
   //
   // Template interpolation:
   //   ${evt.fieldName}  — value of a specific field (empty string if missing)
@@ -47,8 +53,8 @@
   //
 
   "rules": [
-    // ── Suppress noisy events ──────────────────────────────────────────
-    // { "match": { "type": "second_screen_*" }, "suppress": true },
+    // ── Don't send noisy events to LLM but show in UI ────────────────
+    // { "match": { "type": "second_screen_*" }, "send": false },
 
     // ── Custom template for state changes ──────────────────────────────
     // {
@@ -65,15 +71,16 @@
     //   "ui": "visible"
     // },
 
-    // ── Hide second screen events from UI but still send to Ring0 ─────
+    // ── Show second screen events in UI but don't send to Ring0 ──────
     // {
     //   "match": { "type": "second_screen_*" },
-    //   "template": "Second screen event: ${evt}",
-    //   "ui": "hidden"
+    //   "send": false,
+    //   "summary": "second screen: ${evt.type}",
+    //   "ui": "collapsed"
     // },
 
-    // ── Catch-all: suppress everything ─────────────────────────────────
-    { "match": { "type": "*" }, "suppress": true }
+    // ── Catch-all: drop everything ───────────────────────────────────
+    { "match": { "type": "*" }, "send": false, "ui": "hidden" }
 
     // ── Catch-all: pass everything through with default formatting ─────
     // { "match": { "type": "*" } }

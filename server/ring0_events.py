@@ -5,6 +5,10 @@ Events are structured JSON objects that pass through a rules engine loaded from
 template text the LLM sees, and how the UI renders them (visible / collapsed /
 hidden).  First matching rule wins.  See ring0-events.example.json5 for the
 full schema and examples.
+
+Two orthogonal knobs per rule:
+  - send (default true)  — submit expanded text to Ring0 CLI as a user message
+  - ui   (default "visible") — browser rendering: "visible" | "collapsed" | "hidden"
 """
 
 from __future__ import annotations
@@ -37,9 +41,10 @@ class Ring0Event:
 @dataclass
 class ProcessedEvent:
     """Result of applying a config rule to an event."""
-    text: str                    # expanded template — what the LLM sees
+    text: str                    # expanded template — what the LLM sees (or would see)
     summary: str | None          # short label for collapsed UI
     ui: str                      # "visible" | "collapsed" | "hidden"
+    send: bool                   # whether to submit to the LLM
     event: Ring0Event            # original event
 
 
@@ -47,7 +52,7 @@ class ProcessedEvent:
 class _EventRule:
     """A single config rule (internal representation)."""
     match: dict[str, str]
-    suppress: bool = False
+    send: bool = True
     template: str | None = None
     summary: str | None = None
     ui: str = "visible"
@@ -75,7 +80,7 @@ class Ring0EventRouter:
                     continue
                 self._rules.append(_EventRule(
                     match=match,
-                    suppress=bool(r.get("suppress", False)),
+                    send=bool(r.get("send", True)),
                     template=r.get("template"),
                     summary=r.get("summary"),
                     ui=r.get("ui", "visible"),
@@ -85,21 +90,23 @@ class Ring0EventRouter:
             logger.exception("[ring0-events] Failed to parse %s — using defaults", CONFIG_PATH)
             self._rules = []
 
-    def process(self, event: Ring0Event) -> ProcessedEvent | None:
-        """Apply first-match-wins rules.  Returns None if suppressed."""
+    def process(self, event: Ring0Event) -> ProcessedEvent:
+        """Apply first-match-wins rules.  Always returns a ProcessedEvent."""
         for rule in self._rules:
             if self._match_rule(rule, event):
-                if rule.suppress:
-                    return None
                 text = self._expand(rule.template, event) if rule.template else self._default_text(event)
                 summary = self._expand(rule.summary, event) if rule.summary else None
-                return ProcessedEvent(text=text, summary=summary, ui=rule.ui, event=event)
+                return ProcessedEvent(
+                    text=text, summary=summary, ui=rule.ui,
+                    send=rule.send, event=event,
+                )
 
-        # No rule matched — hardcoded fallback
+        # No rule matched — hardcoded fallback: send + visible
         return ProcessedEvent(
             text=self._default_text(event),
             summary=None,
             ui="visible",
+            send=True,
             event=event,
         )
 

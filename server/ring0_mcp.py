@@ -803,6 +803,52 @@ async def set_tv_safe(
 
 
 @mcp.tool()
+async def set_dark_mode(
+    enabled: bool = True,
+    client_id: str = "",
+) -> str:
+    """Enable or disable dark mode on second screen displays.
+
+    Dark mode uses a dark background with light text. Enabled by default.
+
+    Args:
+        enabled: True for dark mode, False for light mode.
+        client_id: Target specific second screen (name, prefix, or full ID). Omit for all screens.
+    """
+    screens = await _get("/second-screen/list")
+    online_screens = [s for s in screens if s.get("online")]
+    if not online_screens:
+        return "No second screens are online."
+
+    targets = online_screens
+    if client_id:
+        resolved, err = await _resolve_client(client_id)
+        if not err:
+            targets = [s for s in online_screens if s["clientId"] == resolved]
+        else:
+            targets = [s for s in online_screens if s["clientId"].startswith(client_id)]
+        if not targets:
+            return f"No online second screen matching '{client_id}'."
+
+    results = []
+    for screen in targets:
+        body: dict[str, Any] = {
+            "clientId": screen["clientId"],
+            "method": "set_dark_mode",
+            "params": {"enabled": enabled},
+        }
+        result = await _post("/ring0/query-client", body)
+        if result.get("error"):
+            results.append(f"Screen {screen['clientId'][:8]}: error — {result['error']}")
+        else:
+            r = result.get("result", {})
+            mode = "dark" if r.get("darkMode") else "light"
+            results.append(f"Screen {screen['clientId'][:8]}: {mode} mode")
+
+    return "\n".join(results)
+
+
+@mcp.tool()
 async def toggle_second_screen(client_id: str, enabled: bool = True) -> str:
     """Enable or disable a second screen. Disabled screens won't receive pushed content.
 

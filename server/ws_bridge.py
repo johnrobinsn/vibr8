@@ -1379,9 +1379,12 @@ class WsBridge:
     # ── Ring0 event notifications ────────────────────────────────────────
 
     async def emit_ring0_event(self, event: Any) -> None:
-        """Process an event through the router and submit to Ring0 if not suppressed.
+        """Process an event through the router, then send to LLM and/or UI.
 
         ``event`` is a Ring0Event (imported lazily to avoid circular deps).
+        Two orthogonal knobs from the config rule:
+          - send: whether to submit to Ring0 CLI as a user message
+          - ui: how (or whether) the browser renders it
         """
         ring0 = self._ring0_manager
         if not ring0 or not ring0.is_enabled or not ring0.session_id:
@@ -1395,23 +1398,26 @@ class WsBridge:
         router = getattr(self, "_ring0_event_router", None)
         if router:
             processed = router.process(event)
-            if processed is None:  # suppressed
-                return
         else:
-            # No router configured — use default text
+            # No router configured — default: send + visible
             import json as _json
             evt_type = event.fields.get("type", "unknown")
             rest = {k: v for k, v in event.fields.items() if k != "type"}
             processed_text = f"[event {evt_type}] {_json.dumps(rest)}"
             from server.ring0_events import ProcessedEvent
-            processed = ProcessedEvent(text=processed_text, summary=None, ui="visible", event=event)
+            processed = ProcessedEvent(
+                text=processed_text, summary=None, ui="visible",
+                send=True, event=event,
+            )
 
-        logger.info("[ws-bridge] Ring0 event: %s", processed.text[:120])
-        await self._submit_ring0_event(ring0.session_id, processed)
+        # Skip entirely if not sending to LLM and hidden from UI
+        if not processed.send and processed.ui == "hidden":
+            return
 
-    async def _submit_ring0_event(self, session_id: str, processed: Any) -> None:
-        """Submit a processed event as a user message with event metadata."""
-        session = self._sessions.get(session_id)
+        logger.info("[ws-bridge] Ring0 event (send=%s, ui=%s): %s",
+                     processed.send, processed.ui, processed.text[:120])
+
+        session = self._sessions.get(ring0.session_id)
         if not session:
             return
 
@@ -1420,17 +1426,22 @@ class WsBridge:
             "summary": processed.summary,
             "ui": processed.ui,
         }
-        msg = {"type": "user_message", "content": processed.text, "eventMeta": event_meta}
-        await self._handle_user_message(session, msg)
-        # Broadcast to browsers with event metadata (no thinking tone for events)
-        broadcast: dict[str, Any] = {
-            "type": "user_message",
-            "content": processed.text,
-            "source": "event",
-            "sessionId": session_id,
-            "eventMeta": event_meta,
-        }
-        await self._broadcast_to_browsers(session, broadcast)
+
+        # Submit to CLI if send=true
+        if processed.send:
+            msg = {"type": "user_message", "content": processed.text, "eventMeta": event_meta}
+            await self._handle_user_message(session, msg)
+
+        # Broadcast to browsers if UI is not hidden
+        if processed.ui != "hidden":
+            broadcast: dict[str, Any] = {
+                "type": "user_message",
+                "content": processed.text,
+                "source": "event",
+                "sessionId": ring0.session_id,
+                "eventMeta": event_meta,
+            }
+            await self._broadcast_to_browsers(session, broadcast)
 
     async def _notify_ring0_state_change(self, session: Session, transition: str) -> None:
         """Notify Ring0 of a session state transition (e.g. idle->running)."""
