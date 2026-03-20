@@ -114,6 +114,11 @@ export function SecondScreen() {
     return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
   }, [clientId]);
 
+  // Keep a ref to handleMessage so the WS onmessage always dispatches to the
+  // latest version (survives HMR replacing ws.ts / store.ts modules).
+  const handleMsgRef = useRef(handleMessage);
+  handleMsgRef.current = handleMessage;
+
   // When paired, open a dedicated WebSocket to Ring0 (control channel).
   // The connectKey is bumped to force a reconnect when messages are lost
   // (e.g. after HMR replaces the store with an empty messages map).
@@ -141,7 +146,7 @@ export function SecondScreen() {
         }, 15000);
       };
 
-      ws.onmessage = (event) => handleMessage(RING0_SESSION_ID, event, ws);
+      ws.onmessage = (event) => handleMsgRef.current(RING0_SESSION_ID, event, ws);
 
       ws.onclose = () => {
         if (keepalive) { clearInterval(keepalive); keepalive = null; }
@@ -166,12 +171,14 @@ export function SecondScreen() {
 
   // After HMR, the store may have been recreated with an empty messages map
   // while the WS is still connected.  Detect this and force a reconnect so
-  // the server re-sends session_init + message_history.
+  // the server re-sends session_init + message_history.  Use a delay to avoid
+  // false positives on normal reconnects (messages arrive shortly after open).
   const ring0Messages = useStore((s) => s.messages.get(RING0_SESSION_ID));
   const ring0Connected = useStore((s) => s.connectionStatus.get(RING0_SESSION_ID));
   useEffect(() => {
     if (pairingState === "paired" && ring0Connected === "connected" && (!ring0Messages || ring0Messages.length === 0)) {
-      setConnectKey((k) => k + 1);
+      const timer = setTimeout(() => setConnectKey((k) => k + 1), 500);
+      return () => clearTimeout(timer);
     }
   }, [pairingState, ring0Connected, ring0Messages]);
 

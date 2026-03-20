@@ -252,7 +252,10 @@ export const useStore = create<AppState>((set) => ({
   voiceMode: null,
   pendingFocus: null,
   commandPaletteOpen: false,
-  secondScreenContent: null,
+  secondScreenContent: (() => {
+    const raw = localStorage.getItem("cc-second-screen-content");
+    try { return raw ? JSON.parse(raw) : null; } catch { return null; }
+  })(),
   mirroredSessionId: null,
   secondScreenScale: parseFloat(localStorage.getItem("cc-second-screen-scale") || "1.5"),
   secondScreenClientName: null,
@@ -271,7 +274,14 @@ export const useStore = create<AppState>((set) => ({
   playgroundVadActive: false,
 
   setClientRole: (role) => set({ clientRole: role }),
-  setSecondScreenContent: (content) => set({ secondScreenContent: content }),
+  setSecondScreenContent: (content) => {
+    if (content) {
+      localStorage.setItem("cc-second-screen-content", JSON.stringify(content));
+    } else {
+      localStorage.removeItem("cc-second-screen-content");
+    }
+    set({ secondScreenContent: content });
+  },
   setMirroredSessionId: (id) => set({ mirroredSessionId: id }),
   setSecondScreenScale: (scale) => {
     const clamped = Math.max(0.5, Math.min(3.0, scale));
