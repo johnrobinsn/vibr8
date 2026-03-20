@@ -25,6 +25,7 @@ interface AppState {
 
   // Messages per session
   messages: Map<string, ChatMessage[]>;
+  archivedCount: Map<string, number>;
 
   // Streaming partial text per session
   streaming: Map<string, string>;
@@ -92,6 +93,7 @@ interface AppState {
   mirroredSessionId: string | null;
   secondScreenScale: number;
   secondScreenTvSafe: number; // 0 = off, >0 = padding percent
+  secondScreenClientName: string | null;
 
   // Playground state
   playgroundActive: boolean;
@@ -106,6 +108,7 @@ interface AppState {
   setMirroredSessionId: (id: string | null) => void;
   setSecondScreenScale: (scale: number) => void;
   setSecondScreenTvSafe: (padding: number) => void;
+  setSecondScreenClientName: (name: string | null) => void;
   setDarkMode: (v: boolean) => void;
   toggleDarkMode: () => void;
   setNotificationSound: (v: boolean) => void;
@@ -124,6 +127,7 @@ interface AppState {
   // Message actions
   appendMessage: (sessionId: string, msg: ChatMessage) => void;
   setMessages: (sessionId: string, msgs: ChatMessage[]) => void;
+  setArchivedCount: (sessionId: string, count: number) => void;
   updateLastAssistantMessage: (sessionId: string, updater: (msg: ChatMessage) => ChatMessage) => void;
   setStreaming: (sessionId: string, text: string | null) => void;
   setStreamingStats: (sessionId: string, stats: { startedAt?: number; outputTokens?: number } | null) => void;
@@ -213,6 +217,7 @@ export const useStore = create<AppState>((set) => ({
   currentSessionId: typeof window !== "undefined" ? localStorage.getItem("cc-last-session") : null,
   sessionsLoaded: false,
   messages: new Map(),
+  archivedCount: new Map(),
   streaming: new Map(),
   streamingStartedAt: new Map(),
   streamingOutputTokens: new Map(),
@@ -248,6 +253,7 @@ export const useStore = create<AppState>((set) => ({
   secondScreenContent: null,
   mirroredSessionId: null,
   secondScreenScale: parseFloat(localStorage.getItem("cc-second-screen-scale") || "1.5"),
+  secondScreenClientName: null,
   secondScreenTvSafe: (() => {
     const v = localStorage.getItem("cc-second-screen-tv-safe");
     if (v === "true") return 2.5; // migrate legacy boolean
@@ -273,6 +279,7 @@ export const useStore = create<AppState>((set) => ({
     localStorage.setItem("cc-second-screen-tv-safe", String(padding));
     set({ secondScreenTvSafe: padding });
   },
+  setSecondScreenClientName: (name) => set({ secondScreenClientName: name }),
   setDarkMode: (v) => {
     localStorage.setItem("cc-dark-mode", String(v));
     set({ darkMode: v });
@@ -425,6 +432,13 @@ export const useStore = create<AppState>((set) => ({
       const messages = new Map(s.messages);
       messages.set(sessionId, msgs);
       return { messages };
+    }),
+
+  setArchivedCount: (sessionId, count) =>
+    set((s) => {
+      const archivedCount = new Map(s.archivedCount);
+      archivedCount.set(sessionId, count);
+      return { archivedCount };
     }),
 
   updateLastAssistantMessage: (sessionId, updater) =>

@@ -329,6 +329,30 @@ def create_routes(
         session_store.set_archived(sid, False)
         return web.json_response({"ok": True})
 
+    # ── Message history archive ──────────────────────────────────────────
+
+    @routes.get("/api/sessions/{id}/history-archive")
+    async def get_session_history_archive(request: web.Request) -> web.Response:
+        """Retrieve archived (rolled-off) messages with optional date filter and pagination."""
+        sid = request.match_info["id"]
+        date = request.query.get("date")
+        offset = int(request.query.get("offset", "0"))
+        limit = int(request.query.get("limit", "100"))
+        messages, total = session_store.load_archive(sid, date=date, offset=offset, limit=limit)
+        return web.json_response({
+            "messages": messages,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        })
+
+    @routes.get("/api/sessions/{id}/history-archive/dates")
+    async def get_session_history_archive_dates(request: web.Request) -> web.Response:
+        """List available archive dates with message counts and sizes."""
+        sid = request.match_info["id"]
+        dates = session_store.list_archive_dates(sid)
+        return web.json_response({"dates": dates})
+
     # ── Backends ─────────────────────────────────────────────────────────
 
     @routes.get("/api/backends")
@@ -1158,15 +1182,38 @@ def create_routes(
 
     # Ephemeral pairing codes: {code → {secondScreenClientId, expiresAt}}
     _pairing_codes: dict[str, dict[str, Any]] = {}
-    # Durable pairings: {secondScreenClientId → {pairedClientId, pairedAt}}
+    # Durable pairings: {secondScreenClientId → {pairedUser, pairedAt, enabled}}
     _second_screen_pairings: dict[str, dict[str, Any]] = {}
     _PAIRINGS_PATH = Path.home() / ".vibr8" / "second-screens.json"
+
+    def _default_username() -> str:
+        """Get the single configured username for migration, or 'default'."""
+        users_path = Path.home() / ".vibr8" / "users.json"
+        if users_path.exists():
+            try:
+                data = json.loads(users_path.read_text())
+                users = data.get("users", {})
+                if len(users) == 1:
+                    return next(iter(users))
+            except Exception:
+                pass
+        return "default"
 
     def _load_pairings() -> None:
         nonlocal _second_screen_pairings
         if _PAIRINGS_PATH.exists():
             try:
                 _second_screen_pairings = json.loads(_PAIRINGS_PATH.read_text())
+                # Migrate legacy entries: pairedClientId → pairedUser
+                migrated = False
+                for info in _second_screen_pairings.values():
+                    if "pairedClientId" in info and "pairedUser" not in info:
+                        info["pairedUser"] = _default_username()
+                        del info["pairedClientId"]
+                        migrated = True
+                if migrated:
+                    _save_pairings()
+                    logger.info("[second-screen] Migrated pairings to user-based model")
             except Exception:
                 pass
 
@@ -1198,9 +1245,11 @@ def create_routes(
         """Primary device submits a pairing code to complete pairing."""
         body = await request.json()
         code = body.get("code", "").upper().strip()
-        primary_client_id = body.get("clientId", "")
-        if not code or not primary_client_id:
-            return web.json_response({"error": "code and clientId required"}, status=400)
+        if not code:
+            return web.json_response({"error": "code required"}, status=400)
+
+        # Resolve username: auth cookie → body param → default
+        username = request.get("auth_user") or body.get("username") or _default_username()
 
         # Validate code
         entry = _pairing_codes.get(code)
@@ -1213,7 +1262,7 @@ def create_routes(
 
         # Store durable pairing
         _second_screen_pairings[second_screen_client_id] = {
-            "pairedClientId": primary_client_id,
+            "pairedUser": username,
             "pairedAt": time.time(),
             "enabled": True,
         }
@@ -1224,17 +1273,17 @@ def create_routes(
         if ws and not ws.closed:
             await ws.send_str(json.dumps({
                 "type": "second_screen_paired",
-                "pairedClientId": primary_client_id,
+                "pairedUser": username,
             }))
 
         # Notify Ring0
-        if ring0_manager and ring0_manager.is_enabled:
-            await ws_bridge.submit_user_message(
-                ring0_manager.session_id,
-                f"[event second_screen_paired] clientId={second_screen_client_id[:8]}"
-            )
+        from server.ring0_events import Ring0Event
+        await ws_bridge.emit_ring0_event(Ring0Event(fields={
+            "type": "second_screen_paired",
+            "clientId": second_screen_client_id[:8], "user": username,
+        }))
 
-        logger.info(f"[second-screen] Paired {second_screen_client_id[:8]} → {primary_client_id[:8]}")
+        logger.info(f"[second-screen] Paired {second_screen_client_id[:8]} → user={username}")
         return web.json_response({"ok": True, "secondScreenClientId": second_screen_client_id})
 
     @routes.get("/api/second-screen/status")
@@ -1250,18 +1299,20 @@ def create_routes(
             return web.json_response({
                 "paired": True,
                 "role": "secondscreen",
-                "pairedClientId": pairing["pairedClientId"],
+                "pairedUser": pairing["pairedUser"],
                 "pairedAt": pairing["pairedAt"],
             })
 
-        # Check if this client has any second screens paired to it
-        screens = [
-            {"clientId": scid, **info}
-            for scid, info in _second_screen_pairings.items()
-            if info["pairedClientId"] == client_id
-        ]
-        if screens:
-            return web.json_response({"paired": True, "role": "primary", "screens": screens})
+        # Check if the requesting user has any second screens paired
+        username = request.get("auth_user")
+        if username:
+            screens = [
+                {"clientId": scid, **info}
+                for scid, info in _second_screen_pairings.items()
+                if info.get("pairedUser") == username
+            ]
+            if screens:
+                return web.json_response({"paired": True, "role": "primary", "screens": screens})
 
         return web.json_response({"paired": False})
 
@@ -1278,11 +1329,10 @@ def create_routes(
             _save_pairings()
 
             # Notify Ring0
-            if ring0_manager and ring0_manager.is_enabled:
-                await ws_bridge.submit_user_message(
-                    ring0_manager.session_id,
-                    f"[event second_screen_unpaired] clientId={client_id[:8]}"
-                )
+            from server.ring0_events import Ring0Event
+            await ws_bridge.emit_ring0_event(Ring0Event(
+                fields={"type": "second_screen_unpaired", "clientId": client_id[:8]},
+            ))
 
             logger.info(f"[second-screen] Unpaired {client_id[:8]}")
         return web.json_response({"ok": True})
@@ -1293,13 +1343,17 @@ def create_routes(
         screens = []
         for scid, info in _second_screen_pairings.items():
             online = scid in ws_bridge._ws_by_client and not ws_bridge._ws_by_client[scid].closed
-            screens.append({
+            entry: dict[str, Any] = {
                 "clientId": scid,
-                "pairedClientId": info["pairedClientId"],
+                "pairedUser": info.get("pairedUser", "default"),
                 "pairedAt": info["pairedAt"],
                 "enabled": info.get("enabled", True),
                 "online": online,
-            })
+            }
+            meta = ws_bridge.get_client_metadata(scid)
+            if meta and meta.get("name"):
+                entry["name"] = meta["name"]
+            screens.append(entry)
         return web.json_response(screens)
 
     @routes.post("/api/second-screen/toggle")
@@ -1319,12 +1373,11 @@ def create_routes(
         _save_pairings()
 
         # Notify Ring0
-        if ring0_manager and ring0_manager.is_enabled:
-            action = "enabled" if enabled else "disabled"
-            await ws_bridge.submit_user_message(
-                ring0_manager.session_id,
-                f"[event second_screen_{action}] clientId={client_id[:8]}"
-            )
+        from server.ring0_events import Ring0Event
+        action = "enabled" if enabled else "disabled"
+        await ws_bridge.emit_ring0_event(Ring0Event(
+            fields={"type": f"second_screen_{action}", "clientId": client_id[:8]},
+        ))
 
         logger.info(f"[second-screen] {'Enabled' if enabled else 'Disabled'} {client_id[:8]}")
         return web.json_response({"ok": True, "enabled": bool(enabled)})

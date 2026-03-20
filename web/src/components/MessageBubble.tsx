@@ -1,7 +1,7 @@
 import { useState, useMemo, type ComponentProps } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage, ContentBlock } from "../types.js";
+import type { ChatMessage, ContentBlock, EventMeta } from "../types.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
@@ -18,6 +18,11 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
   }
 
   if (message.role === "user") {
+    const meta = message.eventMeta;
+    if (meta?.ui === "hidden") return null;
+    if (meta?.ui === "collapsed") return <CollapsedEvent message={message} meta={meta} />;
+    if (meta) return <VisibleEvent message={message} meta={meta} />;
+
     return (
       <div className="flex justify-end animate-[fadeSlideIn_0.2s_ease-out]">
         <div className="max-w-[85%] sm:max-w-[80%] px-3 sm:px-4 py-2.5 rounded-[14px] rounded-br-[4px] bg-cc-user-bubble text-cc-fg">
@@ -297,6 +302,47 @@ function ToolGroupBlock({ name, items }: { name: string; items: ToolGroupItem[] 
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VisibleEvent({ message, meta }: { message: ChatMessage; meta: EventMeta }) {
+  return (
+    <div className="flex items-center gap-3 py-1">
+      <div className="flex-1 h-px bg-cc-border" />
+      <span className="text-[11px] text-cc-muted italic font-mono-code shrink-0 px-1">
+        {meta.summary || message.content}
+      </span>
+      <div className="flex-1 h-px bg-cc-border" />
+    </div>
+  );
+}
+
+function CollapsedEvent({ message, meta }: { message: ChatMessage; meta: EventMeta }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="border border-cc-border rounded-[10px] overflow-hidden">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-cc-muted hover:bg-cc-hover transition-colors cursor-pointer"
+      >
+        <svg
+          viewBox="0 0 16 16"
+          fill="currentColor"
+          className={`w-3 h-3 transition-transform ${open ? "rotate-90" : ""}`}
+        >
+          <path d="M6 4l4 4-4 4" />
+        </svg>
+        <span className="font-medium">{meta.summary || meta.eventType}</span>
+      </button>
+      {open && (
+        <div className="px-3 pb-3 pt-0">
+          <pre className="text-xs text-cc-muted font-mono-code whitespace-pre-wrap leading-relaxed max-h-60 overflow-y-auto">
+            {message.content}
+          </pre>
         </div>
       )}
     </div>

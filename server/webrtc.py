@@ -455,13 +455,8 @@ class WebRTCManager:
                             if ring0_sid:
                                 await self._ws_bridge.submit_user_message(ring0_sid, result, source_client_id=client_id)
                                 if isinstance(mode, NoteMode):
-                                    await self._ws_bridge.submit_user_message(
-                                        ring0_sid,
-                                        "[note_mode ended] Review what happened during note mode. "
-                                        "If any sessions finished, failed, or need user action, "
-                                        "give a brief spoken summary. If nothing needs attention, "
-                                        "say nothing.",
-                                    )
+                                    from server.ring0_events import Ring0Event
+                                    await self._ws_bridge.emit_ring0_event(Ring0Event(fields={"type": "note_mode_ended"}))
                                 return
                         await self._ws_bridge.submit_user_message(session_id, result, source_client_id=client_id)
                         return

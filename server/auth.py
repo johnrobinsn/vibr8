@@ -37,7 +37,7 @@ PUBLIC_PREFIXES = (
     "/api/auth/me",
     "/api/ring0/",
     "/api/second-screen/",
-    "/api/clients/",
+    "/api/clients",
     "/assets/",
     "/sw.js",
     "/manifest.json",
@@ -141,8 +141,13 @@ async def auth_middleware(
 
     path = request.path
 
-    # Public routes
+    # Public routes — still extract user from cookie if available (non-blocking)
     if any(path.startswith(p) for p in PUBLIC_PREFIXES):
+        token = request.cookies.get("vibr8_session")
+        if token:
+            username = auth_mgr.validate_session(token)
+            if username:
+                request["auth_user"] = username
         return await handler(request)
 
     # Non-API, non-WS routes (SPA static files) — always serve so login page works

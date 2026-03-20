@@ -1,0 +1,81 @@
+{
+  // Ring0 Event Configuration
+  //
+  // Rules are evaluated first-match-wins. Each rule needs a "match" object.
+  // Match fields: all keys use glob patterns (fnmatch). "type" is just a conventional key.
+  //
+  // Rule options:
+  //   suppress: true          — drop the event entirely (Ring0 never sees it)
+  //   template: "..."         — text the LLM sees (default: "[event {type}] {json}")
+  //   summary: "..."          — short label for collapsed UI mode
+  //   ui: "visible"           — render as a system-message-style divider (default)
+  //   ui: "collapsed"         — render as a disclosure triangle (twisty)
+  //   ui: "hidden"            — event reaches Ring0 but is hidden from the browser UI
+  //
+  // Template interpolation:
+  //   ${evt.fieldName}  — value of a specific field (empty string if missing)
+  //   ${evt.type}       — the event type
+  //   ${evt}            — full event as JSON object
+  //
+  // ─── Event Types ───────────────────────────────────────────────────────
+  //
+  // session_state_change
+  //   Fields: session, sessionId, transition, detail
+  //   Example: { session: "Agent", sessionId: "abc123", transition: "idle->running" }
+  //
+  // second_screen_connected
+  //   Fields: clientId
+  //
+  // second_screen_disconnected
+  //   Fields: clientId
+  //
+  // second_screen_paired
+  //   Fields: clientId, user
+  //
+  // second_screen_unpaired
+  //   Fields: clientId
+  //
+  // second_screen_enabled
+  //   Fields: clientId
+  //
+  // second_screen_disabled
+  //   Fields: clientId
+  //
+  // note_mode_ended
+  //   Fields: (none)
+  //   Fired when voice note mode exits via "vibr8 done"
+  //
+
+  "rules": [
+    // ── Suppress noisy events ──────────────────────────────────────────
+    // { "match": { "type": "second_screen_*" }, "suppress": true },
+
+    // ── Custom template for state changes ──────────────────────────────
+    // {
+    //   "match": { "type": "session_state_change" },
+    //   "template": "Session ${evt.session} changed: ${evt.transition}",
+    //   "summary": "${evt.session}: ${evt.transition}",
+    //   "ui": "collapsed"
+    // },
+
+    // ── Only match a specific transition ───────────────────────────────
+    // {
+    //   "match": { "type": "session_state_change", "transition": "idle->running" },
+    //   "template": "Session ${evt.session} started running",
+    //   "ui": "visible"
+    // },
+
+    // ── Hide second screen events from UI but still send to Ring0 ─────
+    // {
+    //   "match": { "type": "second_screen_*" },
+    //   "template": "Second screen event: ${evt}",
+    //   "ui": "hidden"
+    // },
+
+    // ── Catch-all: suppress everything ─────────────────────────────────
+    { "match": { "type": "*" }, "suppress": true }
+
+    // ── Catch-all: pass everything through with default formatting ─────
+    // { "match": { "type": "*" } }
+  ]
+}

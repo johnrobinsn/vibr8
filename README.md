@@ -155,6 +155,42 @@ The guard word check is independent of command matching — "check the vibr8 ses
 
 When Ring0 is enabled, all voice routes to Ring0 instead of the active session. Ring0 can list/create/interrupt sessions, send messages, switch the UI, manage permissions, and control second screen displays. Ring0's TTS is automatically muted during note mode.
 
+### Ring0 Event Configuration
+
+Events sent to Ring0 (session state changes, second screen connect/disconnect/pair) are structured JSON objects routed through a configurable rules engine. Configure via `~/.vibr8/ring0-events.json5`:
+
+```json5
+{
+  "rules": [
+    // Suppress all second screen events
+    { "match": { "type": "second_screen_*" }, "suppress": true },
+
+    // Custom template for state changes, collapsed in UI
+    {
+      "match": { "type": "session_state_change" },
+      "template": "Session ${evt.session} changed: ${evt.transition}",
+      "summary": "${evt.session}: ${evt.transition}",
+      "ui": "collapsed"
+    },
+
+    // Catch-all: pass everything else through
+    { "match": { "type": "*" } }
+  ]
+}
+```
+
+**Rules** are first-match-wins. Each rule has a `match` object — events are flat key/value dicts and all match keys use glob patterns (`fnmatch`).
+
+**Rule options:**
+- `suppress: true` — drop the event (Ring0 never sees it)
+- `template` — text the LLM sees (`${evt.fieldName}` for fields, `${evt}` for full JSON)
+- `summary` — short label for collapsed UI mode (also supports interpolation)
+- `ui` — `"visible"` (default, system-message divider), `"collapsed"` (disclosure triangle), or `"hidden"` (sent to Ring0 but not shown in browser)
+
+**Event types:** `session_state_change` (fields: `session`, `sessionId`, `transition`, `detail`), `second_screen_connected` / `second_screen_disconnected` / `second_screen_paired` / `second_screen_unpaired` / `second_screen_enabled` / `second_screen_disabled` (fields: `clientId`, plus `user` for paired), `note_mode_ended` (no fields).
+
+See `ring0-events.example.json5` for a fully documented example config.
+
 ## Architecture
 
 ```

@@ -118,9 +118,8 @@ export const commands: Command[] = [
       }
       const code = ctx.param.trim();
       if (!code) return;
-      const clientId = useStore.getState().clientId;
       try {
-        await api.secondScreenPair(code, clientId);
+        await api.secondScreenPair(code);
       } catch (err) {
         console.error("[second-screen] Pairing failed:", err);
       }

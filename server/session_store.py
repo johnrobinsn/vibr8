@@ -9,7 +9,9 @@ import asyncio
 import json
 import logging
 import tempfile
+from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -69,6 +71,7 @@ class PersistedSession:
 # ─── Store ──────────────────────────────────────────────────────────────────
 
 DEFAULT_DIR = Path.home() / ".vibr8" / "sessions"
+ARCHIVE_DIR = Path.home() / ".vibr8" / "archives"
 
 
 class SessionStore:
@@ -187,3 +190,122 @@ class SessionStore:
     @property
     def directory(self) -> Path:
         return self._dir
+
+    # -- Archive API ----------------------------------------------------------
+
+    def archive_messages(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        """Append messages to date-organized JSONL archive files."""
+        if not messages:
+            return
+        archive_dir = ARCHIVE_DIR / session_id
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        # Group messages by date
+        by_date: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for msg in messages:
+            ts = msg.get("timestamp")
+            if ts:
+                if ts > 1e12:  # milliseconds → seconds
+                    ts = ts / 1000
+                date_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+            else:
+                date_str = datetime.now().strftime("%Y-%m-%d")
+            by_date[date_str].append(msg)
+
+        # Append to JSONL files
+        for date_str, msgs in by_date.items():
+            jsonl_path = archive_dir / f"{date_str}.jsonl"
+            with open(jsonl_path, "a", encoding="utf-8") as f:
+                for msg in msgs:
+                    f.write(json.dumps(msg, separators=(",", ":")) + "\n")
+
+        # Update metadata
+        self._update_archive_meta(session_id, messages)
+        logger.info("[session-store] Archived %d messages for session %s", len(messages), session_id[:8])
+
+    def _update_archive_meta(self, session_id: str, new_messages: List[Dict[str, Any]]) -> None:
+        meta_path = ARCHIVE_DIR / session_id / "meta.json"
+        meta: Dict[str, Any] = {}
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        prev_count = meta.get("totalArchivedMessages", 0)
+        meta["totalArchivedMessages"] = prev_count + len(new_messages)
+
+        # Track timestamp range
+        timestamps = [m.get("timestamp", 0) for m in new_messages if m.get("timestamp")]
+        if timestamps:
+            first = min(timestamps)
+            last = max(timestamps)
+            existing_first = meta.get("firstArchivedTimestamp")
+            meta["firstArchivedTimestamp"] = min(first, existing_first) if existing_first else first
+            meta["lastArchivedTimestamp"] = max(last, meta.get("lastArchivedTimestamp", 0))
+
+        # List archive files
+        archive_dir = ARCHIVE_DIR / session_id
+        meta["archiveFiles"] = sorted(f.name for f in archive_dir.glob("*.jsonl"))
+
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    def has_archive(self, session_id: str) -> bool:
+        return (ARCHIVE_DIR / session_id / "meta.json").exists()
+
+    def get_archive_meta(self, session_id: str) -> Dict[str, Any]:
+        meta_path = ARCHIVE_DIR / session_id / "meta.json"
+        if meta_path.exists():
+            try:
+                return json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {}
+
+    def load_archive(
+        self,
+        session_id: str,
+        date: Optional[str] = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Load archived messages with optional date filter and pagination.
+
+        Returns (messages, total_count).
+        """
+        archive_dir = ARCHIVE_DIR / session_id
+        if not archive_dir.exists():
+            return [], 0
+
+        if date:
+            jsonl_path = archive_dir / f"{date}.jsonl"
+            if not jsonl_path.exists():
+                return [], 0
+            lines = [l for l in jsonl_path.read_text(encoding="utf-8").strip().split("\n") if l]
+            total = len(lines)
+            selected = lines[offset:offset + limit]
+            return [json.loads(line) for line in selected], total
+
+        # Load all files in chronological order
+        all_messages: List[Dict[str, Any]] = []
+        for f in sorted(archive_dir.glob("*.jsonl")):
+            for line in f.read_text(encoding="utf-8").strip().split("\n"):
+                if line:
+                    all_messages.append(json.loads(line))
+        total = len(all_messages)
+        return all_messages[offset:offset + limit], total
+
+    def list_archive_dates(self, session_id: str) -> List[Dict[str, Any]]:
+        """List available archive dates with message counts."""
+        archive_dir = ARCHIVE_DIR / session_id
+        if not archive_dir.exists():
+            return []
+        result = []
+        for f in sorted(archive_dir.glob("*.jsonl")):
+            count = sum(1 for line in f.read_text(encoding="utf-8").strip().split("\n") if line)
+            result.append({
+                "date": f.stem,
+                "messageCount": count,
+                "sizeBytes": f.stat().st_size,
+            })
+        return result

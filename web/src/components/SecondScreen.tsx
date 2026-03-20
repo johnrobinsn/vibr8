@@ -24,8 +24,9 @@ export function SecondScreen() {
   const [clientId] = useState(getSecondScreenClientId);
   const [pairingState, setPairingState] = useState<PairingState>("checking");
   const [pairingCode, setPairingCode] = useState<string | null>(null);
-  const [pairedClientId, setPairedClientId] = useState<string | null>(null);
-  const [clientName, setClientName] = useState<string | null>(null);
+  const [pairedUser, setPairedUser] = useState<string | null>(null);
+  const [clientNameLocal, setClientNameLocal] = useState<string | null>(null);
+  const clientNameFromStore = useStore((s) => s.secondScreenClientName);
   const [renameOpen, setRenameOpen] = useState(false);
   const pushedContent = useStore((s) => s.secondScreenContent);
   const mirroredSessionId = useStore((s) => s.mirroredSessionId);
@@ -67,15 +68,17 @@ export function SecondScreen() {
   // Fetch client name on mount
   useEffect(() => {
     api.getClientMetadata(clientId).then((meta) => {
-      if (meta.name) setClientName(meta.name);
+      if (meta.name) setClientNameLocal(meta.name);
     }).catch(() => {});
   }, [clientId]);
 
+  const clientName = clientNameFromStore ?? clientNameLocal;
   const displayClientName = clientName || clientId.slice(0, 8) + "…";
 
   const handleRename = useCallback(async (newName: string) => {
     await api.updateClientMetadata(clientId, { name: newName });
-    setClientName(newName || null);
+    setClientNameLocal(newName || null);
+    useStore.getState().setSecondScreenClientName(newName || null);
     setRenameOpen(false);
   }, [clientId]);
 
@@ -88,9 +91,9 @@ export function SecondScreen() {
       try {
         const status = await api.secondScreenStatus(clientId);
         if (cancelled) return;
-        if (status.paired && status.role === "secondscreen" && status.pairedClientId) {
+        if (status.paired && status.role === "secondscreen" && status.pairedUser) {
           setPairingState("paired");
-          setPairedClientId(status.pairedClientId);
+          setPairedUser(status.pairedUser);
           return;
         }
       } catch {
@@ -223,7 +226,7 @@ export function SecondScreen() {
         const status = await api.secondScreenStatus(clientId);
         if (status.paired && status.role === "secondscreen") {
           setPairingState("paired");
-          setPairedClientId(status.pairedClientId ?? null);
+          setPairedUser(status.pairedUser ?? null);
           setPairingCode(null);
         }
       } catch {
@@ -237,7 +240,7 @@ export function SecondScreen() {
   const handleUnpair = useCallback(async () => {
     await api.secondScreenUnpair(clientId);
     setPairingState("unpaired");
-    setPairedClientId(null);
+    setPairedUser(null);
     setPairingCode(null);
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     if (mirrorWsRef.current) { mirrorWsRef.current.close(); mirrorWsRef.current = null; }

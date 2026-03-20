@@ -24,6 +24,7 @@ from server.routes import create_routes
 from server.webrtc import WebRTCManager
 from server.terminal import TerminalManager
 from server.ring0 import Ring0Manager
+from server.ring0_events import Ring0EventRouter
 import json as _json
 from server.auth import AuthManager, auth_middleware
 
@@ -290,6 +291,7 @@ def create_app() -> web.Application:
     ws_bridge.set_store(session_store)
     ws_bridge.set_webrtc_manager(webrtc_manager)
     ws_bridge.set_ring0_manager(ring0_manager)
+    ws_bridge.set_ring0_event_router(Ring0EventRouter())
     webrtc_manager.set_ws_bridge(ws_bridge)
     webrtc_manager.set_ring0_manager(ring0_manager)
     webrtc_manager.set_launcher(launcher)

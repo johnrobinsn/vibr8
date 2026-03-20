@@ -73,14 +73,14 @@ to find out what session that client is currently viewing (their default routing
 You receive automatic event notifications as messages prefixed with `[event ...]`.
 These are system-generated, not from a user. Do not treat them as voice commands.
 
-- `idle→running` — A session started working on a task.
-- `running→waiting_for_permission` — A session is blocked on a tool permission prompt.
+- `idle->running` — A session started working on a task.
+- `running->waiting_for_permission` — A session is blocked on a tool permission prompt.
   Consider using respond_to_permission to approve if appropriate.
-- `waiting_for_permission→running` — Permission approved, session resumed.
-- `waiting_for_permission→idle` — Permission denied, session stopped.
-- `running→idle` — Session finished. Use get_session_output to see what it did.
+- `waiting_for_permission->running` — Permission approved, session resumed.
+- `waiting_for_permission->idle` — Permission denied, session stopped.
+- `running->idle` — Session finished. Use get_session_output to see what it did.
 
-When a session finishes (running→idle), proactively summarize the result if audio is active.
+When a session finishes (running->idle), proactively summarize the result if audio is active.
 When a session is waiting_for_permission, consider auto-approving safe tools.
 Keep summaries very brief and suitable for voice.
 
@@ -105,9 +105,9 @@ via voice (phone in pocket) but has a larger screen nearby for viewing.
 
 ### Session Mirroring
 You can mirror any session's live chat on the second screen. The user may say:
-- "Show session X on the second screen" → `content_type="session"`, `content=sessionId`
-- "Switch second screen to session X" → same as above
-- "Second screen go home" / "Go back" → `content_type="home"`
+- "Show session X on the second screen" -> `content_type="session"`, `content=sessionId`
+- "Switch second screen to session X" -> same as above
+- "Second screen go home" / "Go back" -> `content_type="home"`
 When mirroring, the second screen shows that session's full chat with live streaming.
 
 ### Events You'll Receive

@@ -458,6 +458,13 @@ async def update_client_metadata(
     if result.get("error"):
         return f"Error: {result['error']}"
     new_name = result.get("name", "")
+    # Push name update to the client via RPC so its UI reflects the change
+    if "name" in updates:
+        await _post("/ring0/query-client", {
+            "clientId": resolved,
+            "method": "set_name",
+            "params": {"name": updates["name"]},
+        })
     return f"Updated client {resolved[:8]}" + (f' (name: "{new_name}")' if new_name else "") + "."
 
 
@@ -509,32 +516,22 @@ async def launch_app(package: str = "", url: str = "") -> str:
 
 
 @mcp.tool()
-async def pair_second_screen(code: str, primary_client_id: str = "") -> str:
+async def pair_second_screen(code: str, username: str = "") -> str:
     """Pair a second screen display using its pairing code.
 
     The second screen shows a pairing code on its display. Enter that code here
-    to complete the pairing. If primary_client_id is omitted, the first connected
-    primary client is used.
+    to complete the pairing. The second screen is paired to the user identity,
+    so any client belonging to that user can interact with it.
 
     Args:
         code: The pairing code displayed on the second screen.
-        primary_client_id: Optional primary client ID to pair with. If omitted,
-                          uses the first connected primary client.
+        username: Optional username to pair with. If omitted, uses the default user.
     """
-    if not primary_client_id:
-        # Find first connected primary client
-        clients = await _get("/ring0/clients")
-        for c in clients:
-            if c.get("online") and c.get("role") != "secondscreen":
-                primary_client_id = c["clientId"]
-                break
-        if not primary_client_id:
-            return "Error: no online primary client found. Provide a primary_client_id."
+    body: dict[str, str] = {"code": code}
+    if username:
+        body["username"] = username
 
-    result = await _post("/second-screen/pair", {
-        "code": code,
-        "clientId": primary_client_id,
-    })
+    result = await _post("/second-screen/pair", body)
     if result.get("error"):
         return f"Error: {result['error']}"
     return f"Paired successfully. Second screen {result.get('secondScreenClientId', '?')[:8]}... is now connected."
@@ -544,8 +541,8 @@ async def pair_second_screen(code: str, primary_client_id: str = "") -> str:
 async def list_second_screens() -> str:
     """List all paired second screen displays and their online/offline status.
 
-    Returns information about each paired second screen including which primary
-    client it's paired to and whether it's currently online.
+    Returns information about each paired second screen including which user
+    it's paired to and whether it's currently online.
     """
     screens = await _get("/second-screen/list")
     if not screens:
@@ -554,9 +551,11 @@ async def list_second_screens() -> str:
     for s in screens:
         status = "online" if s.get("online") else "offline"
         enabled = "enabled" if s.get("enabled", True) else "disabled"
+        name = s.get("name", "")
+        label = f'"{name}"' if name else f"Screen {s['clientId'][:8]}..."
         lines.append(
-            f"- Screen {s['clientId'][:8]}... ({status}, {enabled}, "
-            f"paired_to={s['pairedClientId'][:8]}...)"
+            f"- {label} ({s['clientId'][:8]}..., {status}, {enabled}, "
+            f"user={s.get('pairedUser', 'default')})"
         )
     return "\n".join(lines)
 
@@ -680,7 +679,9 @@ async def query_second_screen(client_id: str = "") -> str:
             results.append(f"Screen {screen['clientId'][:8]}: error — {result['error']}")
         else:
             info = result.get("result", result)
-            lines = [f"Screen {screen['clientId'][:8]}:"]
+            name = screen.get("name", "")
+            header = f'"{name}" ({screen["clientId"][:8]})' if name else f"Screen {screen['clientId'][:8]}"
+            lines = [f"{header}:"]
             for key, val in info.items():
                 lines.append(f"  {key}: {val}")
             results.append("\n".join(lines))

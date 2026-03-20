@@ -9,6 +9,12 @@ import type {
 
 export type { SessionState, PermissionRequest, ContentBlock, BrowserIncomingMessage, BrowserOutgoingMessage, BackendType };
 
+export interface EventMeta {
+  eventType: string;
+  summary?: string;
+  ui: "visible" | "collapsed" | "hidden";
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -20,6 +26,7 @@ export interface ChatMessage {
   isStreaming?: boolean;
   model?: string;
   stopReason?: string | null;
+  eventMeta?: EventMeta;
 }
 
 export interface TaskItem {

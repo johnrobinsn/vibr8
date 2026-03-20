@@ -68,6 +68,9 @@ class Session:
     pending_messages: list[str] = field(default_factory=list)
     _user_msg_counter: int = 0  # Counter for stable user message IDs
     _last_assistant_msg_id: str | None = None  # Last assistant msg_id, used as dedup key for results
+    _dedup_msg_ids: set[str] = field(default_factory=set)
+    _dedup_result_keys: set[str] = field(default_factory=set)
+    _awaiting_replay: bool = False
 
 
 # ── Bridge ───────────────────────────────────────────────────────────────────
@@ -254,6 +257,9 @@ class WsBridge:
     def set_ring0_manager(self, manager: Any) -> None:
         self._ring0_manager = manager
 
+    def set_ring0_event_router(self, router: Any) -> None:
+        self._ring0_event_router = router
+
     def cancel_tts(self, session_id: str) -> None:
         """Cancel any in-progress TTS for *session_id* (called on barge-in)."""
         tts = self._active_tts.pop(session_id, None)
@@ -329,11 +335,21 @@ class WsBridge:
                 pending_messages=list(p.pendingMessages) if p.pendingMessages else [],
             )
             session.state["backend_type"] = session.backend_type
+            # Initialize dedup sets from active history
+            session._dedup_msg_ids = {
+                e.get("msg_id") for e in session.message_history if e.get("msg_id")
+            }
+            session._dedup_result_keys = {
+                e.get("result_dedup_key") for e in session.message_history if e.get("result_dedup_key")
+            }
             self._sessions[sid] = session
             if p.name:
                 session_names.set_name(sid, p.name, unique=False)
             if session.state.get("num_turns", 0) > 0:
                 self._auto_naming_attempted.add(sid)
+            # Trim bloated sessions restored from disk
+            if len(session.message_history) > 500:
+                self._archive_and_trim(session, keep_count=500)
             count += 1
         if count > 0:
             logger.info(f"[ws-bridge] Restored {count} session(s) from disk")
@@ -352,6 +368,28 @@ class WsBridge:
             pendingPermissions=list(session.pending_permissions.items()),
             name=session_names.get_name(session.id),
         ))
+
+    def _archive_and_trim_before(self, session: Session, index: int) -> None:
+        """Archive messages before *index* and trim the active history."""
+        if index <= 0 or not self._store:
+            return
+        to_archive = session.message_history[:index]
+        session.message_history = session.message_history[index:]
+        self._store.archive_messages(session.id, to_archive)
+        self._persist_session(session)
+        logger.info("[ws-bridge] Archived %d messages (replay boundary) for session %s, keeping %d",
+                    len(to_archive), session.id[:8], len(session.message_history))
+
+    def _archive_and_trim(self, session: Session, keep_count: int) -> None:
+        """Archive oldest messages, keeping the last *keep_count*."""
+        if len(session.message_history) <= keep_count or not self._store:
+            return
+        to_archive = session.message_history[:-keep_count]
+        session.message_history = session.message_history[-keep_count:]
+        self._store.archive_messages(session.id, to_archive)
+        self._persist_session(session)
+        logger.info("[ws-bridge] Archived %d messages (count cap) for session %s, keeping %d",
+                    len(to_archive), session.id[:8], len(session.message_history))
 
     def flush_to_disk(self) -> None:
         """Immediately persist all sessions that have pending debounced saves."""
@@ -568,7 +606,8 @@ class WsBridge:
     def handle_cli_open(self, ws: web.WebSocketResponse, session_id: str) -> None:
         session = self.get_or_create_session(session_id)
         session.cli_socket = ws
-        logger.info(f"[ws-bridge] CLI connected for session {session_id}")
+        session._awaiting_replay = True
+        logger.info(f"[ws-bridge] CLI connected for session {session_id} (awaiting replay)")
         import asyncio
         asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
 
@@ -656,23 +695,22 @@ class WsBridge:
             logger.info(f"[ws-bridge] Browser connected for session {session_id} client={client_id or '(none)'} role={role} ({len(session.browser_sockets)} browsers)")
 
             # Notify Ring0 when a paired second screen connects for the first time (not reconnects)
-            if client_id and role == "secondscreen" and not was_already_connected and self._ring0_manager:
-                ring0 = self._ring0_manager
-                if ring0.is_enabled and not ring0.events_muted:
-                    await self.submit_user_message(
-                        ring0.session_id,
-                        f"[event second_screen_connected] clientId={client_id[:8]}"
-                    )
+            if client_id and role == "secondscreen" and not was_already_connected:
+                from server.ring0_events import Ring0Event
+                await self.emit_ring0_event(Ring0Event(
+                    fields={"type": "second_screen_connected", "clientId": client_id[:8]},
+                ))
 
         # Send current session state
         await self._send_to_browser(ws, {"type": "session_init", "session": session.state})
 
-        # Replay message history (limit for second screens to avoid giant payloads)
         if session.message_history:
             history = session.message_history
-            if role == "secondscreen" and len(history) > 100:
-                history = history[-100:]
-            await self._send_to_browser(ws, {"type": "message_history", "messages": history})
+            msg: dict[str, Any] = {"type": "message_history", "messages": history}
+            if self._store and self._store.has_archive(session.id):
+                meta = self._store.get_archive_meta(session.id)
+                msg["archivedMessageCount"] = meta.get("totalArchivedMessages", 0)
+            await self._send_to_browser(ws, msg)
 
         # Send pending permissions
         for perm in session.pending_permissions.values():
@@ -750,13 +788,11 @@ class WsBridge:
                     logger.info(f"[ws-bridge] Browser disconnected for session {sid} client={client_id or '(none)'} ({len(s.browser_sockets)} browsers)")
 
                     # Notify Ring0 when a paired second screen disconnects
-                    if was_second_screen and client_id and self._ring0_manager:
-                        ring0 = self._ring0_manager
-                        if ring0.is_enabled and not ring0.events_muted:
-                            await self.submit_user_message(
-                                ring0.session_id,
-                                f"[event second_screen_disconnected] clientId={client_id[:8]}"
-                            )
+                    if was_second_screen and client_id:
+                        from server.ring0_events import Ring0Event
+                        await self.emit_ring0_event(Ring0Event(
+                            fields={"type": "second_screen_disconnected", "clientId": client_id[:8]},
+                        ))
                 break
 
     # ── CLI message routing ──────────────────────────────────────────────
@@ -859,10 +895,23 @@ class WsBridge:
         msg_content = msg.get("message")
         msg_id = msg_content.get("id") if isinstance(msg_content, dict) else None
         if msg_id:
-            if any(e.get("msg_id") == msg_id for e in session.message_history):
+            if msg_id in session._dedup_msg_ids:
                 session._last_assistant_msg_id = msg_id  # Track for result dedup even on skip
+                # First dedup hit after CLI connect = start of CLI's replayed history.
+                # Archive everything in our history before this message.
+                if session._awaiting_replay:
+                    session._awaiting_replay = False
+                    idx = next((i for i, e in enumerate(session.message_history)
+                                if e.get("msg_id") == msg_id), None)
+                    if idx is not None and idx > 0:
+                        self._archive_and_trim_before(session, idx)
                 return
             session._last_assistant_msg_id = msg_id
+            session._dedup_msg_ids.add(msg_id)
+
+        # If we get a NEW message while awaiting replay, no replay happened (fresh session)
+        if session._awaiting_replay:
+            session._awaiting_replay = False
 
         # Detect idle → running transition
         if not session.state.get("is_running"):
@@ -980,8 +1029,11 @@ class WsBridge:
     async def _handle_result_message(self, session: Session, msg: dict[str, Any]) -> None:
         # Dedup by preceding assistant's msg_id — each result follows a specific assistant turn
         result_dedup_key = session._last_assistant_msg_id
-        if result_dedup_key and any(e.get("result_dedup_key") == result_dedup_key for e in session.message_history):
+        if result_dedup_key and result_dedup_key in session._dedup_result_keys:
             return
+
+        if result_dedup_key:
+            session._dedup_result_keys.add(result_dedup_key)
 
         # Detect running → idle transition
         if session.state.get("is_running"):
@@ -1015,6 +1067,10 @@ class WsBridge:
         session.message_history.append(browser_msg)
         await self._broadcast_to_browsers(session, browser_msg)
         self._persist_session(session)
+
+        # Safety net: cap active history at 500 messages
+        if len(session.message_history) > 500:
+            self._archive_and_trim(session, keep_count=500)
 
         # Refresh git ahead/behind counts (may have changed if agent committed)
         await self._refresh_git_counts(session)
@@ -1175,6 +1231,8 @@ class WsBridge:
         }
         if source_client_id:
             history_entry["sourceClientId"] = source_client_id
+        if msg.get("eventMeta"):
+            history_entry["eventMeta"] = msg["eventMeta"]
         session.message_history.append(history_entry)
 
         # If this session is Ring0, prepend client context to message content
@@ -1320,25 +1378,77 @@ class WsBridge:
 
     # ── Ring0 event notifications ────────────────────────────────────────
 
-    async def _notify_ring0_state_change(self, session: Session, transition: str) -> None:
-        """Notify Ring0 of a session state transition (e.g. idle→running)."""
+    async def emit_ring0_event(self, event: Any) -> None:
+        """Process an event through the router and submit to Ring0 if not suppressed.
+
+        ``event`` is a Ring0Event (imported lazily to avoid circular deps).
+        """
         ring0 = self._ring0_manager
         if not ring0 or not ring0.is_enabled or not ring0.session_id:
             return
         if ring0.events_muted:
             return
-        # Don't notify Ring0 about its own session
-        if session.id == ring0.session_id:
-            return
-        # Only notify if Ring0's CLI is connected
         ring0_session = self._sessions.get(ring0.session_id)
         if not ring0_session or not ring0_session.cli_socket:
             return
+
+        router = getattr(self, "_ring0_event_router", None)
+        if router:
+            processed = router.process(event)
+            if processed is None:  # suppressed
+                return
+        else:
+            # No router configured — use default text
+            import json as _json
+            evt_type = event.fields.get("type", "unknown")
+            rest = {k: v for k, v in event.fields.items() if k != "type"}
+            processed_text = f"[event {evt_type}] {_json.dumps(rest)}"
+            from server.ring0_events import ProcessedEvent
+            processed = ProcessedEvent(text=processed_text, summary=None, ui="visible", event=event)
+
+        logger.info("[ws-bridge] Ring0 event: %s", processed.text[:120])
+        await self._submit_ring0_event(ring0.session_id, processed)
+
+    async def _submit_ring0_event(self, session_id: str, processed: Any) -> None:
+        """Submit a processed event as a user message with event metadata."""
+        session = self._sessions.get(session_id)
+        if not session:
+            return
+
+        event_meta = {
+            "eventType": processed.event.fields.get("type", "unknown"),
+            "summary": processed.summary,
+            "ui": processed.ui,
+        }
+        msg = {"type": "user_message", "content": processed.text, "eventMeta": event_meta}
+        await self._handle_user_message(session, msg)
+        # Broadcast to browsers with event metadata (no thinking tone for events)
+        broadcast: dict[str, Any] = {
+            "type": "user_message",
+            "content": processed.text,
+            "source": "event",
+            "sessionId": session_id,
+            "eventMeta": event_meta,
+        }
+        await self._broadcast_to_browsers(session, broadcast)
+
+    async def _notify_ring0_state_change(self, session: Session, transition: str) -> None:
+        """Notify Ring0 of a session state transition (e.g. idle->running)."""
+        ring0 = self._ring0_manager
+        if not ring0:
+            return
+        # Don't notify Ring0 about its own session
+        if session.id == ring0.session_id:
+            return
         from server import session_names
+        from server.ring0_events import Ring0Event
         name = session_names.get_name(session.id) or session.id[:8]
-        event_text = f"[event session_state_change] session={name} (id={session.id[:8]}) transition={transition}"
-        logger.info("[ws-bridge] Ring0 event: %s", event_text)
-        await self.submit_user_message(ring0.session_id, event_text)
+        # Keep event fields ASCII-clean
+        transition = transition.replace("→", "->")
+        await self.emit_ring0_event(Ring0Event(fields={
+            "type": "session_state_change",
+            "session": name, "sessionId": session.id[:8], "transition": transition,
+        }))
 
     # ── Client RPC ────────────────────────────────────────────────────────
 

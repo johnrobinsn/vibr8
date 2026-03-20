@@ -688,6 +688,11 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         }
         store.setSecondScreenTvSafe(padding);
         response = { type: "rpc_response", id: rpcId, result: { tvSafe: padding > 0, paddingPercent: padding } };
+      } else if (method === "set_name") {
+        const params = data.params as Record<string, string> | undefined;
+        const name = params?.name ?? null;
+        store.setSecondScreenClientName(name);
+        response = { type: "rpc_response", id: rpcId, result: { name } };
       } else if (method === "get_device_info") {
         response = {
           type: "rpc_response", id: rpcId,
@@ -790,6 +795,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         role: "user",
         content: data.content,
         timestamp: Date.now(),
+        eventMeta: data.eventMeta,
       });
       break;
     }
@@ -815,6 +821,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
             role: "user",
             content: histMsg.content,
             timestamp: histMsg.timestamp,
+            eventMeta: histMsg.eventMeta,
           });
         } else if (histMsg.type === "assistant") {
           const msg = histMsg.message;
@@ -863,6 +870,9 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         if (existing.length === 0 || chatMessages.length >= existing.length) {
           store.setMessages(sessionId, chatMessages);
         }
+      }
+      if (data.archivedMessageCount) {
+        store.setArchivedCount(sessionId, data.archivedMessageCount);
       }
       break;
     }
