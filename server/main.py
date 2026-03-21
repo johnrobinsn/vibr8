@@ -98,7 +98,7 @@ async def handle_cli_ws(request: web.Request) -> web.WebSocketResponse:
 
 async def handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
     """Handle WebSocket connections from the browser UI."""
-    ws = web.WebSocketResponse(heartbeat=20)
+    ws = web.WebSocketResponse(heartbeat=45)
     await ws.prepare(request)
     session_id = request.match_info["session_id"]
 
