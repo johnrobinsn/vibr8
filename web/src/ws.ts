@@ -838,7 +838,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
             role: "assistant",
             content: textContent,
             contentBlocks: msg.content,
-            timestamp: Date.now(),
+            timestamp: histMsg.timestamp || Date.now(),
             parentToolUseId: histMsg.parent_tool_use_id,
             model: msg.model,
             stopReason: msg.stop_reason,
@@ -855,7 +855,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
               id: nextId(),
               role: "system",
               content: `Error: ${r.errors.join(", ")}`,
-              timestamp: Date.now(),
+              timestamp: histMsg.timestamp || Date.now(),
             });
           }
           // Surface result text when preceding assistant had thinking-only content

@@ -4,6 +4,42 @@ import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock, EventMeta } from "../types.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
 
+// ── Tooltip helpers ──────────────────────────────────────────────────────────
+
+function formatRelativeTime(ts: number): string {
+  const diff = Date.now() - ts;
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return "just now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
+function formatAbsoluteTime(ts: number): string {
+  return new Date(ts).toLocaleString(undefined, {
+    month: "short", day: "numeric",
+    hour: "numeric", minute: "2-digit",
+  });
+}
+
+function cleanModelName(model: string): string {
+  return model.replace(/^claude-/, "").replace(/-(\d+)-(\d+)$/, " $1.$2");
+}
+
+function MessageTooltip({ message, align }: { message: ChatMessage; align: "left" | "right" }) {
+  const model = message.role === "assistant" && message.model ? cleanModelName(message.model) : null;
+  return (
+    <div className={`absolute -top-1 ${align === "right" ? "right-0" : "left-9"} -translate-y-full pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-20 px-2.5 py-1.5 rounded-lg bg-cc-card border border-cc-border shadow-sm text-[11px] leading-snug whitespace-nowrap`}>
+      <div className="text-cc-fg">{formatRelativeTime(message.timestamp)}</div>
+      <div className="text-cc-muted">{formatAbsoluteTime(message.timestamp)}</div>
+      {model && <div className="text-cc-muted">{model}</div>}
+    </div>
+  );
+}
+
 export function MessageBubble({ message }: { message: ChatMessage }) {
   if (message.role === "system") {
     return (
@@ -24,7 +60,8 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
     if (meta) return <VisibleEvent message={message} meta={meta} />;
 
     return (
-      <div className="flex justify-end animate-[fadeSlideIn_0.2s_ease-out]">
+      <div className="group relative flex justify-end animate-[fadeSlideIn_0.2s_ease-out]">
+        <MessageTooltip message={message} align="right" />
         <div className="max-w-[85%] sm:max-w-[80%] px-3 sm:px-4 py-2.5 rounded-[14px] rounded-br-[4px] bg-cc-user-bubble text-cc-fg">
           {message.images && message.images.length > 0 && (
             <div className="flex gap-2 flex-wrap mb-2">
@@ -48,7 +85,8 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
 
   // Assistant message
   return (
-    <div className="animate-[fadeSlideIn_0.2s_ease-out]">
+    <div className="group relative animate-[fadeSlideIn_0.2s_ease-out]">
+      <MessageTooltip message={message} align="left" />
       <AssistantMessage message={message} />
     </div>
   );
