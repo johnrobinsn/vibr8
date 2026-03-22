@@ -743,6 +743,31 @@ def create_routes(
         webrtc_manager.set_tts_muted(sid, muted)
         return web.json_response({"ok": True, "muted": muted})
 
+    @routes.post("/api/sessions/{id}/pen")
+    async def set_pen(request: web.Request) -> web.Response:
+        sid = request.match_info["id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        controlled_by = body.get("controlledBy", "ring0")
+        if controlled_by not in ("ring0", "user"):
+            return web.json_response({"error": "controlledBy must be 'ring0' or 'user'"}, status=400)
+        session = ws_bridge._sessions.get(sid)
+        if not session:
+            return web.json_response({"error": "Session not found"}, status=404)
+        if controlled_by == "ring0":
+            import asyncio
+            asyncio.ensure_future(ws_bridge._release_pen(session))
+        else:
+            import time as _time
+            session.controlled_by = "user"
+            session.pen_taken_at = _time.time()
+            session.state["controlledBy"] = "user"
+            ws_bridge._schedule_pen_release(session)
+            asyncio.ensure_future(ws_bridge._broadcast_to_browsers(session, {"type": "session_update", "session": {"controlledBy": "user"}}))
+        return web.json_response({"ok": True, "controlledBy": controlled_by})
+
     @routes.get("/api/webrtc/ice-servers")
     async def get_ice_servers(request: web.Request) -> web.Response:
         if webrtc_manager is None:
@@ -795,6 +820,7 @@ def create_routes(
             if not info:
                 continue
             name = session_names.get_name(sid) or info.name or "unnamed"
+            bridge_session = ws_bridge._sessions.get(sid)
             sessions.append({
                 "sessionId": sid,
                 "name": name,
@@ -803,6 +829,7 @@ def create_routes(
                 "backendType": info.backendType,
                 "archived": info.archived,
                 "pendingPermissions": ws_bridge.get_pending_permission_count(sid),
+                "controlledBy": bridge_session.controlled_by if bridge_session else "ring0",
             })
         return web.json_response(sessions)
 
@@ -858,7 +885,9 @@ def create_routes(
         resolved = _resolve_session_id(session_id, launcher)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-        await ws_bridge.submit_user_message(resolved, message)
+        err = await ws_bridge.submit_user_message(resolved, message)
+        if err:
+            return web.json_response({"error": err, "controlledBy": "user"}, status=409)
         return web.json_response({"ok": True, "sessionId": resolved})
 
     @routes.post("/api/ring0/switch-ui")

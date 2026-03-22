@@ -71,6 +71,10 @@ class Session:
     _dedup_msg_ids: set[str] = field(default_factory=set)
     _dedup_result_keys: set[str] = field(default_factory=set)
     _awaiting_replay: bool = False
+    # "Take the Pen" — per-session ownership control
+    controlled_by: str = "ring0"  # "ring0" | "user"
+    pen_taken_at: float = 0  # time.time() when user took pen
+    _pen_timeout: Any = None  # asyncio.TimerHandle for auto-release
 
 
 # ── Bridge ───────────────────────────────────────────────────────────────────
@@ -950,6 +954,7 @@ class WsBridge:
             "type": "assistant",
             "message": text,
             "parent_tool_use_id": msg.get("parent_tool_use_id"),
+            "timestamp": int(time.time() * 1000),
         }
         if msg_id:
             browser_msg["msg_id"] = msg_id
@@ -1040,6 +1045,9 @@ class WsBridge:
             session.state["is_running"] = False
             import asyncio
             asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
+            # Restart pen timeout when session goes idle
+            if session.controlled_by == "user":
+                self._schedule_pen_release(session)
         session.state["is_waiting_for_permission"] = False
 
         # Turn finished — stop thinking tone and re-enable STT.
@@ -1061,7 +1069,7 @@ class WsBridge:
                     pct = round((usage.get("inputTokens", 0) + usage.get("outputTokens", 0)) / ctx_window * 100)
                     session.state["context_used_percent"] = max(0, min(pct, 100))
 
-        browser_msg: dict[str, Any] = {"type": "result", "data": msg}
+        browser_msg: dict[str, Any] = {"type": "result", "data": msg, "timestamp": int(time.time() * 1000)}
         if result_dedup_key:
             browser_msg["result_dedup_key"] = result_dedup_key
         session.message_history.append(browser_msg)
@@ -1142,12 +1150,13 @@ class WsBridge:
             # Fire state transition: running → waiting_for_permission
             if session.state.get("is_running") and not session.state.get("is_waiting_for_permission"):
                 session.state["is_waiting_for_permission"] = True
-                # Include permission details so Ring0 can see what's needed without a tool call
+                # Include permission details as separate field
                 tool_name = perm.get("tool_name", "?")
                 desc = perm.get("description", "")
-                inp = json.dumps(perm.get("input", {}))[:300]
-                detail = f" — {tool_name}: {desc or inp}"
-                asyncio.ensure_future(self._notify_ring0_state_change(session, "running→waiting_for_permission" + detail))
+                short_desc = desc if len(desc) <= 120 else desc[:117].rsplit(" ", 1)[0] + "..."
+                detail = f"{tool_name}: {short_desc}" if desc else tool_name
+                asyncio.ensure_future(self._notify_ring0_state_change(
+                    session, "running→waiting_for_permission", detail=detail))
 
     async def _handle_tool_progress(self, session: Session, msg: dict[str, Any]) -> None:
         # Agent is executing a tool — play thinking tone.
@@ -1216,12 +1225,23 @@ class WsBridge:
         elif msg_type == "set_permission_mode":
             self._handle_set_permission_mode(session, msg.get("mode", ""))
 
-    async def _handle_user_message(self, session: Session, msg: dict[str, Any], source_client_id: str = "") -> None:
+    async def _handle_user_message(self, session: Session, msg: dict[str, Any], source_client_id: str = "", **kwargs: Any) -> None:
         content = msg.get("content", "")
         preview = content[:80] if isinstance(content, str) else str(type(content))
         logger.info("[ws-bridge] session %s: user_message received %r", session.id, preview)
         import time
         ts = int(time.time() * 1000)
+
+        # "Take the Pen" — user typing in browser UI claims session control
+        ring0 = self._ring0_manager
+        if source_client_id and ring0 and session.id != ring0.session_id and not msg.get("eventMeta"):
+            if session.controlled_by != "user":
+                session.controlled_by = "user"
+                session.state["controlledBy"] = "user"
+                logger.info("[ws-bridge] User took the pen for session %s", session.id[:8])
+                await self._broadcast_to_browsers(session, {"type": "session_update", "session": {"controlledBy": "user"}})
+            session.pen_taken_at = time.time()
+            self._schedule_pen_release(session)
         session._user_msg_counter += 1
         history_entry: dict[str, Any] = {
             "type": "user_message",
@@ -1351,12 +1371,19 @@ class WsBridge:
 
     # ── Public API for submitting messages programmatically ────────────
 
-    async def submit_user_message(self, session_id: str, text: str, source_client_id: str = "") -> None:
-        """Submit a user message to the CLI (e.g. from STT transcript)."""
+    async def submit_user_message(self, session_id: str, text: str, source_client_id: str = "") -> str | None:
+        """Submit a user message to the CLI (e.g. from STT transcript).
+
+        Returns None on success, or an error string if blocked.
+        """
         session = self._sessions.get(session_id)
         if not session:
             logger.warning("[ws-bridge] Cannot submit message: no session %s", session_id)
-            return
+            return "Session not found"
+        # Block Ring0 sends when user has the pen (voice/STT sources are exempt)
+        if session.controlled_by == "user" and not source_client_id:
+            logger.info("[ws-bridge] Blocked Ring0 send to session %s: user has the pen", session_id[:8])
+            return "Session is under user control"
         if source_client_id:
             logger.info("[ws-bridge] Message from client=%s for session %s", source_client_id, session_id)
 
@@ -1443,7 +1470,7 @@ class WsBridge:
             }
             await self._broadcast_to_browsers(session, broadcast)
 
-    async def _notify_ring0_state_change(self, session: Session, transition: str) -> None:
+    async def _notify_ring0_state_change(self, session: Session, transition: str, *, detail: str = "") -> None:
         """Notify Ring0 of a session state transition (e.g. idle->running)."""
         ring0 = self._ring0_manager
         if not ring0:
@@ -1451,15 +1478,45 @@ class WsBridge:
         # Don't notify Ring0 about its own session
         if session.id == ring0.session_id:
             return
+        # Suppress notifications while user has the pen
+        if session.controlled_by == "user":
+            return
         from server import session_names
         from server.ring0_events import Ring0Event
         name = session_names.get_name(session.id) or session.id[:8]
         # Keep event fields ASCII-clean
         transition = transition.replace("→", "->")
-        await self.emit_ring0_event(Ring0Event(fields={
+        fields: dict[str, str] = {
             "type": "session_state_change",
             "session": name, "sessionId": session.id[:8], "transition": transition,
-        }))
+        }
+        if detail:
+            fields["detail"] = detail
+        await self.emit_ring0_event(Ring0Event(fields=fields))
+
+    # ── "Take the Pen" helpers ───────────────────────────────────────────
+
+    def _schedule_pen_release(self, session: Session) -> None:
+        """Schedule auto-release of pen after 5 minutes of idle."""
+        if session._pen_timeout:
+            session._pen_timeout.cancel()
+        loop = asyncio.get_event_loop()
+        session._pen_timeout = loop.call_later(
+            300, lambda: asyncio.ensure_future(self._release_pen(session))
+        )
+
+    async def _release_pen(self, session: Session) -> None:
+        """Release pen back to Ring0 (idempotent)."""
+        if session.controlled_by != "user":
+            return
+        session.controlled_by = "ring0"
+        session.pen_taken_at = 0
+        if session._pen_timeout:
+            session._pen_timeout.cancel()
+            session._pen_timeout = None
+        session.state["controlledBy"] = "ring0"
+        logger.info("[ws-bridge] Pen released for session %s", session.id[:8])
+        await self._broadcast_to_browsers(session, {"type": "session_update", "session": {"controlledBy": "ring0"}})
 
     # ── Client RPC ────────────────────────────────────────────────────────
 

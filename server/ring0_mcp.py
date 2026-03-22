@@ -128,7 +128,9 @@ async def list_sessions() -> str:
             continue
         pending = s.get("pendingPermissions", 0)
         perm_info = f", BLOCKED: {pending} pending permission(s)" if pending else ""
-        lines.append(f"- {name} (id={sid[:8]}, state={state}, type={backend}, cwd={cwd}{perm_info})")
+        pen = s.get("controlledBy", "ring0")
+        pen_info = ", PEN: user (do not send messages)" if pen == "user" else ""
+        lines.append(f"- {name} (id={sid[:8]}, state={state}, type={backend}, cwd={cwd}{perm_info}{pen_info})")
     return "\n".join(lines) if lines else "No active sessions."
 
 
@@ -157,6 +159,8 @@ async def send_message(session_id: str, message: str) -> str:
         message: The message text to send.
     """
     result = await _post("/ring0/send-message", {"sessionId": session_id, "message": message})
+    if result.get("error"):
+        return f"Error: {result['error']}. The user is currently working in this session. Wait for them to finish or check back later."
     return f"Message sent to session {session_id[:8]}."
 
 

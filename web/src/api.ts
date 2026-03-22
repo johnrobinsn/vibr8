@@ -432,6 +432,10 @@ export const api = {
   reportDeviceInfo: (clientId: string, info: Record<string, unknown>) =>
     post<ClientMetadata>(`/clients/${encodeURIComponent(clientId)}/device-info`, info),
 
+  // Pen control
+  setPen: (sessionId: string, controlledBy: "ring0" | "user") =>
+    post(`/sessions/${encodeURIComponent(sessionId)}/pen`, { controlledBy }),
+
   // Admin
   restartServer: () => post("/admin/restart"),
 };
