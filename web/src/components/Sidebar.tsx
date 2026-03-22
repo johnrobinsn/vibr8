@@ -35,6 +35,9 @@ export function Sidebar() {
   const newSessionRef = useRef<HTMLButtonElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTriggered = useRef(false);
+  const touchStartY = useRef<number>(0);
+  const touchMoved = useRef(false);
+  const touchHandled = useRef(false);
 
   // Focus the current session (or first session, or New Session button) when sidebar opens
   // Skip on initial mount — only focus when user actively toggles the sidebar open
@@ -326,6 +329,7 @@ export function Sidebar() {
       createdAt: sdkInfo?.createdAt ?? 0,
       archived: sdkInfo?.archived ?? false,
       backendType: sdkInfo?.backendType || bridgeState?.backend_type || "claude",
+      controlledBy: bridgeState?.controlledBy,
     };
   }).sort((a, b) => {
     // Ring0 always first
@@ -363,6 +367,8 @@ export function Sidebar() {
         <button
           data-session-id={s.id}
           onClick={(e) => {
+            // Skip synthesized click from touch — touchEnd already handled it
+            if (touchHandled.current) { touchHandled.current = false; return; }
             // Skip when renaming (space in input triggers native button click)
             if (isEditing) return;
             // Skip navigation on double-click (let onDoubleClick handle it)
@@ -374,31 +380,30 @@ export function Sidebar() {
             startRename(s.id, label);
           }}
           onTouchStart={(e) => {
-            // preventDefault on touchstart suppresses ALL native long-press behavior
-            // (text selection, context menu, magnifier). This also kills the
-            // synthesized click, so we handle tap manually in onTouchEnd.
-            e.preventDefault();
             longPressTriggered.current = false;
+            touchMoved.current = false;
+            touchStartY.current = e.touches[0].clientY;
             longPressTimer.current = setTimeout(() => {
               longPressTriggered.current = true;
               startRename(s.id, label);
             }, 500);
           }}
+          onTouchMove={(e) => {
+            if (Math.abs(e.touches[0].clientY - touchStartY.current) > 10) {
+              touchMoved.current = true;
+              if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+            }
+          }}
           onTouchEnd={() => {
             if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
-            // Short tap → navigate (since preventDefault on touchstart killed native click)
-            if (!longPressTriggered.current) {
-              if (!isEditing) handleSelectSession(s.id);
-            }
-            longPressTriggered.current = false;
+            if (longPressTriggered.current || touchMoved.current) return;
+            // Mark so the synthesized click from the browser is suppressed
+            touchHandled.current = true;
+            if (!isEditing) handleSelectSession(s.id);
           }}
           onTouchCancel={() => {
             if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
             longPressTriggered.current = false;
-          }}
-          onTouchMove={() => {
-            // Cancel long press if finger moves (scroll gesture)
-            if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
           }}
           onContextMenu={(e) => e.preventDefault()}
           onKeyDown={(e) => {
@@ -486,6 +491,20 @@ export function Sidebar() {
                 )}
                 {s.backendType === "terminal" && (
                   <span className="text-[9px] px-1 py-0.5 rounded bg-green-500/15 text-green-600 dark:text-green-400 shrink-0">term</span>
+                )}
+                {s.controlledBy === "user" && s.id !== ring0SessionId && (
+                  <button
+                    className="px-1 py-0.5 rounded bg-cc-muted/10 text-cc-muted shrink-0 hover:bg-cc-muted/20 transition-colors cursor-pointer"
+                    title="User has the pen — click to release to Ring0"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      api.setPen(s.id, "ring0");
+                    }}
+                  >
+                    <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3">
+                      <path d="M11.5 1.5a1.5 1.5 0 0 1 2.12 0l.88.88a1.5 1.5 0 0 1 0 2.12L5.62 13.38a1 1 0 0 1-.47.26l-3 .75a.5.5 0 0 1-.6-.6l.75-3a1 1 0 0 1 .26-.47L11.5 1.5z" />
+                    </svg>
+                  </button>
                 )}
               </span>
             )}
