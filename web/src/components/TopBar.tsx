@@ -198,7 +198,9 @@ export function TopBar() {
           </div>
 
           {/* Audio input device indicator — mobile only, left of guard toggle */}
-          <AudioInputIndicator label={activeAudioInputLabel} audioActive={currentAudioMode !== "off"} />
+          {currentAudioMode !== "off" && (
+            <AudioInputIndicator label={activeAudioInputLabel} audioActive={true} />
+          )}
 
           {/* Guard word toggle — only shown when audio is active */}
           {currentAudioMode !== "off" && audioSessionId && (

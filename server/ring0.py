@@ -205,9 +205,10 @@ class Ring0Manager:
             return session_id
 
         if info:
-            # Session exists but is exited — update cwd and relaunch
+            # Session exists but is exited — update config and relaunch
             info.cwd = str(work_dir)
             info.mcpConfig = str(mcp_config_path)
+            info.model = self._model
             await launcher.relaunch(session_id)
             logger.info("[ring0] Relaunched session %s", session_id)
             return session_id
