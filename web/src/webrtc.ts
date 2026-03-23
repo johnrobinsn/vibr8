@@ -24,6 +24,7 @@ export async function startWebRTC(sessionId: string): Promise<void> {
   store0.setAudioSessionId(sessionId);
   store0.setAudioMode("connecting");
 
+  // Get mic permission first (needed for enumerateDevices to return labels)
   const localStream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
@@ -112,6 +113,9 @@ export async function startWebRTC(sessionId: string): Promise<void> {
 
   // Store the session
   rtcSessions.set(sessionId, { pc, localStream, remoteAudio });
+
+  // Detect active audio input device
+  queryActiveInputDevice();
 }
 
 async function detectTransportType(
@@ -180,6 +184,7 @@ export function stopWebRTC(sessionId: string): void {
   store.setWebRTCStatus(null);
   store.setWebRTCTransport(null);
   store.setVoiceMode(null);
+  store.setActiveAudioInputLabel(null);
 }
 
 export function isWebRTCActive(sessionId: string): boolean {
@@ -192,6 +197,123 @@ export function getRemoteAudio(): HTMLAudioElement | null {
     return session.remoteAudio;
   }
   return null;
+}
+
+// ── Audio input device detection ──────────────────────────────────────────
+
+/** Query the active audio input device label and update the store.
+ *  Resolves "default" deviceId to the actual physical device name. */
+export async function queryActiveInputDevice(): Promise<void> {
+  try {
+    let track: MediaStreamTrack | undefined;
+    for (const [, session] of rtcSessions) {
+      track = session.localStream.getAudioTracks()[0];
+      break;
+    }
+    if (!track) {
+      useStore.getState().setActiveAudioInputLabel(null);
+      return;
+    }
+
+    const settings = track.getSettings();
+    const activeDeviceId = settings.deviceId;
+    const trackLabel = track.label;
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter((d) => d.kind === "audioinput");
+    let label: string | null = null;
+
+    console.log("[webrtc] queryActiveInputDevice — track:", { label: trackLabel, deviceId: activeDeviceId, groupId: settings.groupId });
+    console.log("[webrtc] queryActiveInputDevice — inputs:", inputs.map((d) => `"${d.label}" (id=${d.deviceId.slice(0, 12)}, group=${d.groupId.slice(0, 8)})`));
+
+    if (activeDeviceId && activeDeviceId !== "default") {
+      // Real device ID — direct match
+      const match = inputs.find((d) => d.deviceId === activeDeviceId);
+      label = match?.label || trackLabel || null;
+    } else {
+      // deviceId is "default" or missing — resolve to actual device
+      const trackGroupId = settings.groupId;
+
+      // Strategy 1: track's own groupId → match against enumerated devices.
+      // The track's groupId reflects the ACTUAL physical device even when
+      // deviceId is "default".
+      if (trackGroupId) {
+        const match = inputs.find(
+          (d) => d.deviceId !== "default" && d.deviceId !== "communications" && d.groupId === trackGroupId,
+        );
+        if (match?.label) {
+          label = match.label;
+          console.log("[webrtc] resolved via track groupId match:", label);
+        }
+      }
+
+      // Strategy 2: track.label (physical device name on some platforms)
+      if (!label && trackLabel && trackLabel !== "Default") {
+        label = trackLabel;
+        console.log("[webrtc] resolved via track.label:", label);
+      }
+
+      // Strategy 3: "default" entry's label may contain the real name
+      if (!label) {
+        const defaultEntry = inputs.find((d) => d.deviceId === "default");
+        if (defaultEntry?.label && defaultEntry.label !== "Default") {
+          label = defaultEntry.label;
+          console.log("[webrtc] resolved via default entry label:", label);
+        }
+
+        // Strategy 4: "default" entry's groupId → match real device
+        if (!label && defaultEntry?.groupId) {
+          const real = inputs.find(
+            (d) => d.deviceId !== "default" && d.groupId === defaultEntry.groupId,
+          );
+          if (real?.label) {
+            label = real.label;
+            console.log("[webrtc] resolved via default entry groupId:", label);
+          }
+        }
+      }
+
+      // Strategy 5: "communications" device (Windows)
+      if (!label) {
+        const commEntry = inputs.find((d) => d.deviceId === "communications");
+        if (commEntry?.label && commEntry.label !== "Default") {
+          label = commEntry.label;
+        }
+      }
+
+      // Strategy 6 (last resort): first non-synthetic device — unreliable,
+      // may pick the wrong device
+      if (!label) {
+        const firstReal = inputs.find(
+          (d) => d.deviceId !== "default" && d.deviceId !== "communications" && d.label,
+        );
+        if (firstReal?.label) {
+          label = firstReal.label;
+          console.log("[webrtc] resolved via last resort (first device):", label);
+        }
+      }
+    }
+
+    // Strip "Default - " prefix some browsers prepend
+    if (label) {
+      label = label.replace(/^Default\s*[-–—]\s*/i, "");
+    }
+
+    console.log("[webrtc] queryActiveInputDevice — resolved:", label);
+    useStore.getState().setActiveAudioInputLabel(label || null);
+  } catch {
+    useStore.getState().setActiveAudioInputLabel(null);
+  }
+}
+
+// Listen for device changes (Bluetooth connect/disconnect, etc.)
+if (typeof navigator !== "undefined" && navigator.mediaDevices) {
+  navigator.mediaDevices.addEventListener("devicechange", () => {
+    // Only re-query if audio is active
+    if (rtcSessions.size > 0) {
+      queryActiveInputDevice();
+    }
+  });
 }
 
 // ── Playground WebRTC ──────────────────────────────────────────────────────

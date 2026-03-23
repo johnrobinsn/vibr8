@@ -81,6 +81,7 @@ interface AppState {
   webrtcTransport: "direct" | "relay" | null;
   guardEnabled: boolean;
   voiceMode: string | null;
+  activeAudioInputLabel: string | null;
 
   // Focus management
   pendingFocus: "composer" | "terminal" | "home" | null;
@@ -185,6 +186,7 @@ interface AppState {
   // Guard mode actions (global)
   setGuardEnabled: (enabled: boolean) => void;
   setVoiceMode: (mode: string | null) => void;
+  setActiveAudioInputLabel: (label: string | null) => void;
 
   // Playground actions
   setPlaygroundActive: (active: boolean) => void;
@@ -250,6 +252,7 @@ export const useStore = create<AppState>((set) => ({
   webrtcTransport: null,
   guardEnabled: typeof window !== "undefined" ? localStorage.getItem("cc-guard-enabled") !== "false" : true,
   voiceMode: null,
+  activeAudioInputLabel: null,
   pendingFocus: null,
   commandPaletteOpen: false,
   secondScreenContent: (() => {
@@ -391,7 +394,7 @@ export const useStore = create<AppState>((set) => ({
       editorLoading.delete(sessionId);
       // Reset global audio state if the removed session owns the audio
       const audioReset = s.audioSessionId === sessionId
-        ? { audioSessionId: null, audioMode: "off" as const, isRecording: false, webrtcStatus: null, webrtcTransport: null, guardEnabled: true, voiceMode: null }
+        ? { audioSessionId: null, audioMode: "off" as const, isRecording: false, webrtcStatus: null, webrtcTransport: null, guardEnabled: true, voiceMode: null, activeAudioInputLabel: null }
         : {};
       return {
         sessions,
@@ -672,6 +675,7 @@ export const useStore = create<AppState>((set) => ({
     set({ guardEnabled: enabled });
   },
   setVoiceMode: (mode) => set({ voiceMode: mode }),
+  setActiveAudioInputLabel: (label) => set({ activeAudioInputLabel: label }),
 
   setPendingFocus: (target) => set({ pendingFocus: target }),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
@@ -714,6 +718,7 @@ export const useStore = create<AppState>((set) => ({
       webrtcTransport: null,
       guardEnabled: true,
       voiceMode: null,
+      activeAudioInputLabel: null,
       pendingFocus: null,
       commandPaletteOpen: false,
       secondScreenContent: null,

@@ -1,5 +1,5 @@
 import { useStore } from "./store.js";
-import { stopWebRTC, getRemoteAudio } from "./webrtc.js";
+import { stopWebRTC, getRemoteAudio, queryActiveInputDevice } from "./webrtc.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem } from "./types.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
 
@@ -607,34 +607,66 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
           }
         }
       } else if (method === "set_audio_input") {
-        const deviceId = (data.params as Record<string, string> | undefined)?.deviceId;
-        if (!deviceId) {
-          response = { type: "rpc_response", id: rpcId, error: "No deviceId param provided", errorCode: "missing_param" };
+        const params = data.params as Record<string, string> | undefined;
+        const requestedId = params?.deviceId;
+        const requestedLabel = params?.label;
+        if (!requestedId && !requestedLabel) {
+          response = { type: "rpc_response", id: rpcId, error: "No deviceId or label param provided", errorCode: "missing_param" };
         } else {
           const rtcSessions = (window as unknown as Record<string, unknown>).__v8_rtcSessions as Map<string, { pc: RTCPeerConnection; localStream: MediaStream }> | undefined;
           let found = false;
           if (rtcSessions) {
             for (const [, sess] of rtcSessions) {
               found = true;
-              navigator.mediaDevices.getUserMedia({
-                audio: { deviceId: { exact: deviceId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-              }).then(
-                async (newStream) => {
+              // Always re-enumerate to get fresh device IDs (Android Chrome
+              // rotates IDs for privacy — stale IDs cause getUserMedia to fail).
+              navigator.mediaDevices.enumerateDevices().then(async (devices) => {
+                const inputs = devices.filter((d) => d.kind === "audioinput");
+                // Match by label first (stable), then by deviceId (may be stale)
+                let target = requestedLabel
+                  ? inputs.find((d) => d.label === requestedLabel)
+                  : inputs.find((d) => d.deviceId === requestedId);
+                // Fallback: case-insensitive label match
+                if (!target && requestedLabel) {
+                  const lower = requestedLabel.toLowerCase();
+                  target = inputs.find((d) => d.label.toLowerCase() === lower);
+                }
+                // Fallback: try the requested deviceId even if not in fresh list
+                const freshId = target?.deviceId || requestedId;
+                if (!freshId) {
+                  rpcSend({ type: "rpc_response", id: rpcId, error: `Device not found: ${requestedLabel || requestedId}`, errorCode: "not_found" });
+                  return;
+                }
+
+                console.log("[ws] set_audio_input: requested:", { deviceId: requestedId, label: requestedLabel }, "→ fresh id:", freshId, "label:", target?.label);
+
+                try {
+                  let newStream: MediaStream;
+                  try {
+                    newStream = await navigator.mediaDevices.getUserMedia({
+                      audio: { deviceId: { exact: freshId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+                    });
+                  } catch {
+                    // exact failed — try ideal (Android Bluetooth workaround)
+                    newStream = await navigator.mediaDevices.getUserMedia({
+                      audio: { deviceId: { ideal: freshId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+                    });
+                  }
                   const newTrack = newStream.getAudioTracks()[0];
-                  // Replace track on RTCPeerConnection sender (no renegotiation needed)
                   const sender = sess.pc.getSenders().find((s) => s.track?.kind === "audio");
                   if (sender) await sender.replaceTrack(newTrack);
-                  // Stop old tracks and update localStream
                   sess.localStream.getAudioTracks().forEach((t) => t.stop());
                   sess.localStream.getAudioTracks().forEach((t) => sess.localStream.removeTrack(t));
                   sess.localStream.addTrack(newTrack);
                   const settings = newTrack.getSettings();
-                  rpcSend({ type: "rpc_response", id: rpcId, result: { set: true, deviceId, label: newTrack.label || settings.deviceId || "" } });
-                },
-                (err: Error) => {
-                  rpcSend({ type: "rpc_response", id: rpcId, error: `getUserMedia error: ${err.message}` });
-                },
-              );
+                  rpcSend({ type: "rpc_response", id: rpcId, result: { set: true, deviceId: settings.deviceId, label: newTrack.label || target?.label || settings.deviceId || "" } });
+                  queryActiveInputDevice();
+                } catch (err: unknown) {
+                  rpcSend({ type: "rpc_response", id: rpcId, error: `getUserMedia error: ${(err as Error).message}` });
+                }
+              }).catch((err) => {
+                rpcSend({ type: "rpc_response", id: rpcId, error: `enumerateDevices error: ${(err as Error).message}` });
+              });
               break; // only one session
             }
           }

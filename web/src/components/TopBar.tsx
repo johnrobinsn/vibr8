@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
 import { startWebRTC, stopWebRTC, setAudioInOnly, toggleGuard } from "../webrtc.js";
@@ -28,6 +28,7 @@ export function TopBar() {
   const voiceMode = useStore((s) => s.voiceMode);
   const sdkSessions = useStore((s) => s.sdkSessions);
   const sessionNames = useStore((s) => s.sessionNames);
+  const activeAudioInputLabel = useStore((s) => s.activeAudioInputLabel);
 
   const isTerminalSession = currentSessionId
     ? sdkSessions.find((x) => x.sessionId === currentSessionId)?.backendType === "terminal"
@@ -41,6 +42,10 @@ export function TopBar() {
   const currentAudioMode = audioMode;
   const isRelay = webrtcTransport === "relay";
   const sessionName = currentSessionId ? (sessionNames.get(currentSessionId) ?? null) : null;
+
+  // Derive mobile status line state
+  const isDisconnected = !isConnected && !isReconnecting && !isCliDisconnected;
+  const isTroubled = isCliDisconnected || isReconnecting || (isDisconnected && !hasGaveUp && connStatus !== "disconnected");
 
   async function handleAudioCycle() {
     if (!currentSessionId) return;
@@ -68,36 +73,37 @@ export function TopBar() {
 
   return (
     <header className="relative shrink-0 flex items-center justify-between px-2 sm:px-4 py-2 sm:py-2.5 bg-cc-card border-b border-cc-border">
-      <div className="flex items-center gap-3">
+      {/* ── Left side ── */}
+      <div className="flex items-center gap-2 sm:gap-3 min-w-0">
         {/* Sidebar toggle */}
         <button
           onClick={() => setSidebarOpen(!sidebarOpen)}
           aria-label={sidebarOpen ? "Close sidebar (Ctrl+Alt+S)" : "Open sidebar (Ctrl+Alt+S)"}
           title="Toggle sidebar (Ctrl+Alt+S)"
-          className="flex items-center justify-center w-7 h-7 rounded-lg text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+          className="flex items-center justify-center w-7 h-7 rounded-lg text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer shrink-0"
         >
           <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
             <path fillRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 10a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM3 15a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
           </svg>
         </button>
 
-        {/* Connection status (not shown for terminal sessions) */}
+        {/* Connection status — desktop: dot + text, mobile: handled by bottom line */}
         {currentSessionId && !isTerminalSession && (
-          <div className="flex items-center gap-1.5">
+          <div className="hidden sm:flex items-center gap-1.5">
             {isConnected ? (
               <>
                 <span className="w-1.5 h-1.5 rounded-full bg-cc-success" />
-                <span className="text-[11px] text-cc-muted hidden sm:inline">Connected</span>
+                <span className="text-[11px] text-cc-muted">Connected</span>
               </>
             ) : isCliDisconnected ? (
               <>
                 <span className="w-1.5 h-1.5 rounded-full bg-cc-warning animate-pulse" />
-                <span className="text-[11px] text-cc-warning font-medium hidden sm:inline">Waiting for CLI…</span>
+                <span className="text-[11px] text-cc-warning font-medium">Waiting for CLI…</span>
               </>
             ) : isReconnecting ? (
               <>
                 <span className="w-1.5 h-1.5 rounded-full bg-cc-warning animate-pulse" />
-                <span className="text-[11px] text-cc-warning font-medium hidden sm:inline">Reconnecting…</span>
+                <span className="text-[11px] text-cc-warning font-medium">Reconnecting…</span>
                 <button
                   onClick={() => cancelReconnect(currentSessionId)}
                   className="w-4 h-4 flex items-center justify-center rounded text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
@@ -113,7 +119,7 @@ export function TopBar() {
                 <span className="w-1.5 h-1.5 rounded-full bg-cc-muted opacity-40" />
                 <button
                   onClick={() => manualReconnect(currentSessionId)}
-                  className="text-[11px] text-cc-warning hover:text-cc-warning/80 font-medium cursor-pointer hidden sm:inline"
+                  className="text-[11px] text-cc-warning hover:text-cc-warning/80 font-medium cursor-pointer"
                 >
                   Reconnect
                 </button>
@@ -121,31 +127,24 @@ export function TopBar() {
             )}
           </div>
         )}
+
+        {/* Session name — inline on mobile (avoids camera notch), hidden on desktop (centered instead) */}
+        {currentSessionId && sessionName && (
+          <span className="sm:hidden text-sm text-cc-fg font-semibold truncate max-w-[35vw]">
+            {sessionName}
+          </span>
+        )}
       </div>
 
-      {/* Center — session name / thinking status (alternate on small screens) */}
+      {/* ── Center — session name (desktop only) ── */}
       {currentSessionId && (
-        <div className="absolute left-1/2 -translate-x-1/2 max-w-[50%] sm:max-w-[40%] pointer-events-none">
+        <div className="hidden sm:block absolute left-1/2 -translate-x-1/2 max-w-[40%] pointer-events-none">
           {status === "running" || status === "compacting" ? (
-            <>
-              {/* Small screens: show status instead of name */}
-              <div className="sm:hidden flex items-center justify-center gap-1.5">
-                {status === "compacting" ? (
-                  <span className="text-[12px] text-cc-warning font-medium animate-pulse">Compacting...</span>
-                ) : (
-                  <>
-                    <span className="w-1.5 h-1.5 rounded-full bg-cc-primary animate-[pulse-dot_1s_ease-in-out_infinite]" />
-                    <span className="text-[12px] text-cc-primary font-medium">Thinking</span>
-                  </>
-                )}
-              </div>
-              {/* Large screens: show name as usual */}
-              {sessionName && (
-                <span className="hidden sm:block text-sm text-cc-fg font-semibold truncate">
-                  {sessionName}
-                </span>
-              )}
-            </>
+            sessionName && (
+              <span className="text-sm text-cc-fg font-semibold truncate block">
+                {sessionName}
+              </span>
+            )
           ) : (
             sessionName && (
               <span className="text-sm text-cc-fg font-semibold truncate block">
@@ -156,9 +155,9 @@ export function TopBar() {
         </div>
       )}
 
-      {/* Right side (not shown for terminal sessions) */}
+      {/* ── Right side ── */}
       {currentSessionId && !isTerminalSession && (
-        <div className="flex items-center gap-1.5 sm:gap-3 text-[12px] text-cc-muted">
+        <div className="flex items-center gap-1.5 sm:gap-3 text-[12px] text-cc-muted pr-5 sm:pr-0">
           {status === "compacting" && (
             <span className="text-cc-warning font-medium animate-pulse hidden sm:inline">Compacting...</span>
           )}
@@ -174,27 +173,33 @@ export function TopBar() {
           <div className="flex items-center bg-cc-hover rounded-lg p-0.5">
             <button
               onClick={() => setActiveTab("chat")}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer ${
+              className={`px-1.5 sm:px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer ${
                 activeTab === "chat"
                   ? "bg-cc-card text-cc-fg shadow-sm"
                   : "text-cc-muted hover:text-cc-fg"
               }`}
             >
-              Chat
+              <span className="sm:hidden font-mono-code text-[10px]">&gt;_</span>
+              <span className="hidden sm:inline">Chat</span>
             </button>
             <button
               onClick={() => setActiveTab("editor")}
-              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer ${
+              className={`px-1.5 sm:px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer ${
                 activeTab === "editor"
                   ? "bg-cc-card text-cc-fg shadow-sm"
                   : "text-cc-muted hover:text-cc-fg"
               }`}
             >
-              Editor
+              <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 sm:hidden">
+                <path d="M4 1.5A1.5 1.5 0 002.5 3v10A1.5 1.5 0 004 14.5h8a1.5 1.5 0 001.5-1.5V5.621a1.5 1.5 0 00-.44-1.06l-2.12-2.122A1.5 1.5 0 009.878 2H4z" />
+              </svg>
+              <span className="hidden sm:inline">Editor</span>
             </button>
           </div>
 
-          {/* Ring0 meta-agent toggle */}
+          {/* Audio input device indicator — mobile only, left of guard toggle */}
+          <AudioInputIndicator label={activeAudioInputLabel} audioActive={currentAudioMode !== "off"} />
+
           {/* Guard word toggle — only shown when audio is active */}
           {currentAudioMode !== "off" && audioSessionId && (
             <button
@@ -278,9 +283,10 @@ export function TopBar() {
             )}
           </button>
 
+          {/* Session panel toggle — desktop only */}
           <button
             onClick={() => setTaskPanelOpen(!taskPanelOpen)}
-            className={`flex items-center justify-center w-7 h-7 rounded-lg transition-colors cursor-pointer ${
+            className={`hidden sm:flex items-center justify-center w-7 h-7 rounded-lg transition-colors cursor-pointer ${
               taskPanelOpen
                 ? "text-cc-primary bg-cc-active"
                 : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
@@ -294,11 +300,75 @@ export function TopBar() {
           </button>
         </div>
       )}
+
+      {/* ── Mobile status line (bottom edge) ── */}
+      {currentSessionId && !isTerminalSession && (
+        <MobileStatusLine
+          isConnected={isConnected}
+          isThinking={status === "running"}
+          isCompacting={status === "compacting"}
+          isDisconnected={isCliDisconnected || isReconnecting || hasGaveUp || connStatus === "disconnected"}
+        />
+      )}
+
       {audioError && (
         <span className="absolute right-4 top-full mt-1 text-[11px] text-cc-error bg-cc-card border border-cc-error/30 rounded-md px-2 py-1 shadow-lg z-50 max-w-xs truncate">
           {audioError}
         </span>
       )}
     </header>
+  );
+}
+
+// ── Mobile status line ───────────────────────────────────────────────────────
+
+function MobileStatusLine({ isConnected, isThinking, isCompacting, isDisconnected }: {
+  isConnected: boolean;
+  isThinking: boolean;
+  isCompacting: boolean;
+  isDisconnected: boolean;
+}) {
+  // Priority: disconnected > compacting > thinking > connected
+  if (isDisconnected) {
+    return <div className="sm:hidden absolute bottom-0 left-0 right-0 h-0.5 bg-cc-error opacity-70 animate-pulse" />;
+  }
+  if (isCompacting) {
+    return <div className="sm:hidden absolute bottom-0 left-0 right-0 h-0.5 bg-cc-warning opacity-60 animate-pulse" />;
+  }
+  if (isThinking) {
+    return <div className="sm:hidden absolute bottom-0 left-0 right-0 h-0.5 bg-blue-400 opacity-50 animate-[pulse-dot_1.5s_ease-in-out_infinite]" />;
+  }
+  if (isConnected) {
+    return <div className="sm:hidden absolute bottom-0 left-0 right-0 h-0.5 bg-cc-success opacity-40" />;
+  }
+  return null;
+}
+
+// ── Audio input device indicator ─────────────────────────────────────────────
+
+function classifyAudioDevice(label: string): "bluetooth" | "headset" | "speaker" | "phone" {
+  const l = label.toLowerCase();
+  if (l.includes("bluetooth") || l.includes("hands-free") || l.includes("handsfree")) return "bluetooth";
+  if (l.includes("headset") || l.includes("headphone")) return "headset";
+  if (l.includes("speakerphone") || l.includes("speaker phone")) return "speaker";
+  return "phone";
+}
+
+const audioDeviceText: Record<ReturnType<typeof classifyAudioDevice>, string> = {
+  bluetooth: "BT",
+  headset: "HD",
+  speaker: "Spkr",
+  phone: "Mic",
+};
+
+function AudioInputIndicator({ label, audioActive }: { label: string | null; audioActive: boolean }) {
+  const type = label ? classifyAudioDevice(label) : "phone";
+  return (
+    <div
+      className={`sm:hidden flex items-center gap-0.5 px-1 h-5 rounded ${audioActive ? "text-cc-fg" : "text-cc-muted opacity-50"}`}
+      title={label || "Audio input"}
+    >
+      <span className="text-[9px] font-semibold font-mono-code leading-none">{audioDeviceText[type]}</span>
+    </div>
   );
 }

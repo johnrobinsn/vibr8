@@ -409,7 +409,7 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
             - "open_url" — open a URL in a new tab/window. params: {"url": "..."}
             - "list_audio_devices" — list available audio input/output devices. No params.
             - "set_audio_output" — set the audio output device. params: {"deviceId": "..."}
-            - "set_audio_input" — switch microphone input device. params: {"deviceId": "..."}
+            - "set_audio_input" — switch microphone input device. params: {"label": "Bluetooth headset"} (preferred — stable across ID rotations) or {"deviceId": "..."}. Always call list_audio_devices first to see available device labels.
             - "bring_to_foreground" — bring the vibr8 app to front (Android native). No params.
             - "launch_app" — launch an app on Android. params: {"package": "com.example.app"} or {"url": "https://..."} or {"url": "tel:+1234567890"}
             - "capture_screenshot" — capture a screenshot of the client's current view. params: {"format": "png"|"jpeg", "quality": 0.0-1.0}. Use the capture_screen tool instead for a higher-level interface.

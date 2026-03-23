@@ -659,7 +659,10 @@ class WsBridge:
             return
 
         session.cli_socket = None
-        logger.info(f"[ws-bridge] CLI disconnected for session {session_id}")
+        pending_perms = list(session.pending_permissions.keys())
+        is_running = session.state.get("is_running")
+        is_waiting = session.state.get("is_waiting_for_permission")
+        logger.info(f"[ws-bridge] CLI disconnected for session {session_id} is_running={is_running} is_waiting={is_waiting} pending_perms={len(pending_perms)}")
         await self._broadcast_to_browsers(session, {"type": "cli_disconnected"})
 
         for req_id in list(session.pending_permissions):
@@ -803,6 +806,14 @@ class WsBridge:
 
     async def _route_cli_message(self, session: Session, msg: dict[str, Any]) -> None:
         msg_type = msg.get("type")
+        if msg_type not in ("stream_event", "keep_alive"):
+            extra = ""
+            if msg_type == "control_request":
+                req = msg.get("request", {})
+                extra = f" subtype={req.get('subtype')} tool={req.get('tool_name')} req_id={msg.get('request_id', '')[:8]}"
+            elif msg_type == "rate_limit_event":
+                extra = f" data={json.dumps(msg)[:200]}"
+            logger.info("[ws-bridge] CLI msg type=%s session=%s%s", msg_type, session.id[:8], extra)
         if msg_type == "system":
             await self._handle_system_message(session, msg)
         elif msg_type == "assistant":
@@ -958,7 +969,15 @@ class WsBridge:
         }
         if msg_id:
             browser_msg["msg_id"] = msg_id
+        # Log tool uses in assistant messages for debugging
+        if isinstance(text, dict):
+            content_blocks = text.get("content", [])
+            if isinstance(content_blocks, list):
+                tool_uses = [b.get("name") for b in content_blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+                if tool_uses:
+                    logger.info("[ws-bridge] Assistant has tool_use blocks: %s session=%s", tool_uses, session.id[:8])
         session.message_history.append(browser_msg)
+        logger.info("[ws-bridge] Broadcasting assistant to %d browsers for session %s", len(session.browser_sockets), session.id[:8])
         await self._broadcast_to_browsers(session, browser_msg)
         self._persist_session(session)
 
@@ -1152,7 +1171,7 @@ class WsBridge:
                 session.state["is_waiting_for_permission"] = True
                 # Include permission details as separate field
                 tool_name = perm.get("tool_name", "?")
-                desc = perm.get("description", "")
+                desc = perm.get("description") or ""
                 short_desc = desc if len(desc) <= 120 else desc[:117].rsplit(" ", 1)[0] + "..."
                 detail = f"{tool_name}: {short_desc}" if desc else tool_name
                 asyncio.ensure_future(self._notify_ring0_state_change(

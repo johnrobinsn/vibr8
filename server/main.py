@@ -87,10 +87,14 @@ async def handle_cli_ws(request: web.Request) -> web.WebSocketResponse:
     try:
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
-                await bridge.handle_cli_message(ws, msg.data)
+                try:
+                    await bridge.handle_cli_message(ws, msg.data)
+                except Exception:
+                    logger.exception("[ws] Exception handling CLI message for session %s", session_id)
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 logger.error(f"[ws] CLI ws error: {ws.exception()}")
     finally:
+        logger.info("[ws] CLI ws closed for session %s close_code=%s exception=%s", session_id, ws.close_code, ws.exception())
         await bridge.handle_cli_close(ws)
 
     return ws
