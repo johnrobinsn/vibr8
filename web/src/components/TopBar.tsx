@@ -87,22 +87,11 @@ export function TopBar() {
           </svg>
         </button>
 
-        {/* Connection status — desktop: dot + text, mobile: handled by bottom line */}
+        {/* Desktop reconnect controls (no dot/text — status line handles visual) */}
         {currentSessionId && !isTerminalSession && (
           <div className="hidden sm:flex items-center gap-1.5">
-            {isConnected ? (
+            {isReconnecting ? (
               <>
-                <span className="w-1.5 h-1.5 rounded-full bg-cc-success" />
-                <span className="text-[11px] text-cc-muted">Connected</span>
-              </>
-            ) : isCliDisconnected ? (
-              <>
-                <span className="w-1.5 h-1.5 rounded-full bg-cc-warning animate-pulse" />
-                <span className="text-[11px] text-cc-warning font-medium">Waiting for CLI…</span>
-              </>
-            ) : isReconnecting ? (
-              <>
-                <span className="w-1.5 h-1.5 rounded-full bg-cc-warning animate-pulse" />
                 <span className="text-[11px] text-cc-warning font-medium">Reconnecting…</span>
                 <button
                   onClick={() => cancelReconnect(currentSessionId)}
@@ -114,17 +103,14 @@ export function TopBar() {
                   </svg>
                 </button>
               </>
-            ) : (
-              <>
-                <span className="w-1.5 h-1.5 rounded-full bg-cc-muted opacity-40" />
-                <button
-                  onClick={() => manualReconnect(currentSessionId)}
-                  className="text-[11px] text-cc-warning hover:text-cc-warning/80 font-medium cursor-pointer"
-                >
-                  Reconnect
-                </button>
-              </>
-            )}
+            ) : (!isConnected && !isCliDisconnected) ? (
+              <button
+                onClick={() => manualReconnect(currentSessionId)}
+                className="text-[11px] text-cc-warning hover:text-cc-warning/80 font-medium cursor-pointer"
+              >
+                Reconnect
+              </button>
+            ) : null}
           </div>
         )}
 
@@ -158,17 +144,6 @@ export function TopBar() {
       {/* ── Right side ── */}
       {currentSessionId && !isTerminalSession && (
         <div className="flex items-center gap-1.5 sm:gap-3 text-[12px] text-cc-muted pr-5 sm:pr-0">
-          {status === "compacting" && (
-            <span className="text-cc-warning font-medium animate-pulse hidden sm:inline">Compacting...</span>
-          )}
-
-          {status === "running" && (
-            <div className="hidden sm:flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-cc-primary animate-[pulse-dot_1s_ease-in-out_infinite]" />
-              <span className="text-cc-primary font-medium">Thinking</span>
-            </div>
-          )}
-
           {/* Chat / Editor tab toggle */}
           <div className="flex items-center bg-cc-hover rounded-lg p-0.5">
             <button
@@ -303,9 +278,9 @@ export function TopBar() {
         </div>
       )}
 
-      {/* ── Mobile status line (bottom edge) ── */}
+      {/* ── Status line (bottom edge) ── */}
       {currentSessionId && !isTerminalSession && (
-        <MobileStatusLine
+        <StatusLine
           isConnected={isConnected}
           isThinking={status === "running"}
           isCompacting={status === "compacting"}
@@ -322,9 +297,9 @@ export function TopBar() {
   );
 }
 
-// ── Mobile status line ───────────────────────────────────────────────────────
+// ── Status line (bottom edge of top bar) ─────────────────────────────────────
 
-function MobileStatusLine({ isConnected, isThinking, isCompacting, isDisconnected }: {
+function StatusLine({ isConnected, isThinking, isCompacting, isDisconnected }: {
   isConnected: boolean;
   isThinking: boolean;
   isCompacting: boolean;
@@ -332,16 +307,16 @@ function MobileStatusLine({ isConnected, isThinking, isCompacting, isDisconnecte
 }) {
   // Priority: disconnected > compacting > thinking > connected
   if (isDisconnected) {
-    return <div className="sm:hidden absolute bottom-0 left-0 right-0 h-0.5 bg-cc-error opacity-70 animate-pulse" />;
+    return <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-cc-error opacity-70 animate-pulse" />;
   }
   if (isCompacting) {
-    return <div className="sm:hidden absolute bottom-0 left-0 right-0 h-0.5 bg-cc-warning opacity-60 animate-pulse" />;
+    return <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-cc-warning opacity-60 animate-pulse" />;
   }
   if (isThinking) {
-    return <div className="sm:hidden absolute bottom-0 left-0 right-0 h-0.5 bg-blue-400 opacity-50 animate-[pulse-dot_1.5s_ease-in-out_infinite]" />;
+    return <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-400 opacity-50 animate-[pulse-dot_1.5s_ease-in-out_infinite]" />;
   }
   if (isConnected) {
-    return <div className="sm:hidden absolute bottom-0 left-0 right-0 h-0.5 bg-cc-success opacity-40" />;
+    return <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-cc-success opacity-40" />;
   }
   return null;
 }

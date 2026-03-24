@@ -24,10 +24,18 @@ export async function startWebRTC(sessionId: string): Promise<void> {
   store0.setAudioSessionId(sessionId);
   store0.setAudioMode("connecting");
 
-  // Get mic permission first (needed for enumerateDevices to return labels)
-  const localStream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
+  // Get mic permission — restore saved device preference if available
+  const audioConstraints: MediaTrackConstraints = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  const savedInputLabel = localStorage.getItem("cc-audio-input-label");
+  if (savedInputLabel) {
+    // Get fresh device list and match by label (deviceIds rotate on Android)
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const match = devices.find((d) => d.kind === "audioinput" && d.label === savedInputLabel);
+      if (match) audioConstraints.deviceId = { exact: match.deviceId };
+    } catch { /* fall through to default */ }
+  }
+  const localStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
 
   // Fetch ICE servers from backend (STUN/TURN config)
   let iceServers: RTCIceServer[] = [];
