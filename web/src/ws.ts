@@ -638,7 +638,8 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
                   return;
                 }
 
-                console.log("[ws] set_audio_input: requested:", { deviceId: requestedId, label: requestedLabel }, "→ fresh id:", freshId, "label:", target?.label);
+                const targetLabel = target?.label;
+                console.log("[ws] set_audio_input: requested:", { deviceId: requestedId, label: requestedLabel }, "→ fresh id:", freshId, "label:", targetLabel);
 
                 try {
                   let newStream: MediaStream;
@@ -651,6 +652,14 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
                     newStream = await navigator.mediaDevices.getUserMedia({
                       audio: { deviceId: { ideal: freshId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
                     });
+                    // Verify ideal actually gave us the right device, not the default
+                    const gotTrack = newStream.getAudioTracks()[0];
+                    const gotSettings = gotTrack.getSettings();
+                    if (gotSettings.deviceId !== freshId && gotTrack.label !== targetLabel) {
+                      gotTrack.stop();
+                      rpcSend({ type: "rpc_response", id: rpcId, error: `Device not available (got ${gotTrack.label || gotSettings.deviceId} instead)`, errorCode: "wrong_device" });
+                      return;
+                    }
                   }
                   const newTrack = newStream.getAudioTracks()[0];
                   const sender = sess.pc.getSenders().find((s) => s.track?.kind === "audio");
@@ -659,7 +668,10 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
                   sess.localStream.getAudioTracks().forEach((t) => sess.localStream.removeTrack(t));
                   sess.localStream.addTrack(newTrack);
                   const settings = newTrack.getSettings();
-                  rpcSend({ type: "rpc_response", id: rpcId, result: { set: true, deviceId: settings.deviceId, label: newTrack.label || target?.label || settings.deviceId || "" } });
+                  const resolvedLabel = newTrack.label || targetLabel || settings.deviceId || "";
+                  // Persist preference so startWebRTC can restore it
+                  try { localStorage.setItem("cc-audio-input-label", resolvedLabel); } catch {}
+                  rpcSend({ type: "rpc_response", id: rpcId, result: { set: true, deviceId: settings.deviceId, label: resolvedLabel } });
                   queryActiveInputDevice();
                 } catch (err: unknown) {
                   rpcSend({ type: "rpc_response", id: rpcId, error: `getUserMedia error: ${(err as Error).message}` });
@@ -1029,6 +1041,14 @@ export function cancelReconnect(sessionId: string) {
 
 export function manualReconnect(sessionId: string) {
   clearReconnectState(sessionId);
+  // Force-close and remove any stale socket so connectSession doesn't bail
+  const old = sockets.get(sessionId);
+  if (old) {
+    old.onclose = null;
+    old.onerror = null;
+    old.close();
+    sockets.delete(sessionId);
+  }
   reconnectStartTimes.set(sessionId, Date.now());
   useStore.getState().setReconnecting(sessionId, true);
   connectSession(sessionId);
