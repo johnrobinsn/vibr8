@@ -339,6 +339,9 @@ class WsBridge:
                 pending_messages=list(p.pendingMessages) if p.pendingMessages else [],
             )
             session.state["backend_type"] = session.backend_type
+            # Restore pen state from persisted session
+            if state.get("controlledBy") == "user":
+                session.controlled_by = "user"
             # Initialize dedup sets from active history
             session._dedup_msg_ids = {
                 e.get("msg_id") for e in session.message_history if e.get("msg_id")
@@ -1340,12 +1343,25 @@ class WsBridge:
         self._send_to_cli(session, ndjson)
         # Fire state transition based on permission response
         if session.state.get("is_waiting_for_permission"):
-            session.state["is_waiting_for_permission"] = False
-            if msg.get("behavior") == "allow":
-                asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→running"))
+            if session.pending_permissions:
+                # More permissions still pending — stay in waiting state and
+                # re-notify Ring0 so it can approve the next one.
+                next_perm = next(iter(session.pending_permissions.values()))
+                tool_name = next_perm.get("tool_name", "?")
+                desc = next_perm.get("description") or ""
+                short_desc = desc if len(desc) <= 120 else desc[:117].rsplit(" ", 1)[0] + "..."
+                detail = f"{tool_name}: {short_desc}" if desc else tool_name
+                remaining = len(session.pending_permissions)
+                detail = f"{detail} ({remaining} pending)"
+                asyncio.ensure_future(self._notify_ring0_state_change(
+                    session, "waiting_for_permission (next)", detail=detail))
             else:
-                session.state["is_running"] = False
-                asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→idle"))
+                session.state["is_waiting_for_permission"] = False
+                if msg.get("behavior") == "allow":
+                    asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→running"))
+                else:
+                    session.state["is_running"] = False
+                    asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→idle"))
         self._persist_session(session)
         # Notify all browsers so other devices dismiss the banner.
         await self._broadcast_to_browsers(session, {
@@ -1778,12 +1794,25 @@ class WsBridge:
         self._send_to_cli(session, ndjson)
         # Fire state transition based on permission response
         if session.state.get("is_waiting_for_permission"):
-            session.state["is_waiting_for_permission"] = False
-            if behavior == "allow":
-                asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→running"))
+            if session.pending_permissions:
+                # More permissions still pending — stay in waiting state and
+                # re-notify Ring0 so it can approve the next one.
+                next_perm = next(iter(session.pending_permissions.values()))
+                tool_name = next_perm.get("tool_name", "?")
+                desc = next_perm.get("description") or ""
+                short_desc = desc if len(desc) <= 120 else desc[:117].rsplit(" ", 1)[0] + "..."
+                detail = f"{tool_name}: {short_desc}" if desc else tool_name
+                remaining = len(session.pending_permissions)
+                detail = f"{detail} ({remaining} pending)"
+                asyncio.ensure_future(self._notify_ring0_state_change(
+                    session, "waiting_for_permission (next)", detail=detail))
             else:
-                session.state["is_running"] = False
-                asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→idle"))
+                session.state["is_waiting_for_permission"] = False
+                if behavior == "allow":
+                    asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→running"))
+                else:
+                    session.state["is_running"] = False
+                    asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→idle"))
         self._persist_session(session)
         await self._broadcast_to_browsers(session, {
             "type": "permission_cancelled",
