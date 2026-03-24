@@ -35,6 +35,7 @@ class PersistedSession:
     pendingPermissions: List[Tuple[str, PermissionRequest]]
     archived: Optional[bool] = None
     name: Optional[str] = None
+    lastPromptedAt: Optional[float] = None  # ms since epoch
 
     # -- Serialization helpers ------------------------------------------------
 
@@ -50,6 +51,8 @@ class PersistedSession:
             d["archived"] = self.archived
         if self.name is not None:
             d["name"] = self.name
+        if self.lastPromptedAt is not None:
+            d["lastPromptedAt"] = self.lastPromptedAt
         return d
 
     @classmethod
@@ -65,6 +68,7 @@ class PersistedSession:
             ],
             archived=data.get("archived"),
             name=data.get("name"),
+            lastPromptedAt=data.get("lastPromptedAt"),
         )
 
 

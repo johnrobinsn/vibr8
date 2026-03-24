@@ -327,6 +327,7 @@ export function Sidebar() {
       status: sessionStatus.get(id) ?? null,
       sdkState: sdkInfo?.state ?? null,
       createdAt: sdkInfo?.createdAt ?? 0,
+      lastPromptedAt: sdkInfo?.lastPromptedAt ?? 0,
       archived: sdkInfo?.archived ?? false,
       backendType: sdkInfo?.backendType || bridgeState?.backend_type || "claude",
       controlledBy: bridgeState?.controlledBy,
@@ -336,7 +337,10 @@ export function Sidebar() {
     const ring0Id = ring0SessionId;
     if (a.id === ring0Id) return -1;
     if (b.id === ring0Id) return 1;
-    return b.createdAt - a.createdAt;
+    // MRU order, fallback to createdAt
+    const aTime = a.lastPromptedAt || a.createdAt;
+    const bTime = b.lastPromptedAt || b.createdAt;
+    return bTime - aTime;
   });
 
   const activeSessions = allSessionList.filter((s) => !s.archived);

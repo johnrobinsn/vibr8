@@ -75,6 +75,7 @@ class Session:
     controlled_by: str = "ring0"  # "ring0" | "user"
     pen_taken_at: float = 0  # time.time() when user took pen
     _pen_timeout: Any = None  # asyncio.TimerHandle for auto-release
+    last_prompted_at: float = 0  # ms since epoch, updated on every user prompt
 
 
 # ── Bridge ───────────────────────────────────────────────────────────────────
@@ -339,6 +340,9 @@ class WsBridge:
                 pending_messages=list(p.pendingMessages) if p.pendingMessages else [],
             )
             session.state["backend_type"] = session.backend_type
+            # Restore MRU timestamp
+            if p.lastPromptedAt:
+                session.last_prompted_at = p.lastPromptedAt
             # Restore pen state from persisted session
             if state.get("controlledBy") == "user":
                 session.controlled_by = "user"
@@ -362,6 +366,11 @@ class WsBridge:
             logger.info(f"[ws-bridge] Restored {count} session(s) from disk")
         return count
 
+    def get_last_prompted_at(self, session_id: str) -> float:
+        """Return last_prompted_at (ms) for a session, or 0 if unknown."""
+        session = self._sessions.get(session_id)
+        return session.last_prompted_at if session else 0
+
     def _persist_session(self, session: Session) -> None:
         if not self._store:
             return
@@ -374,6 +383,7 @@ class WsBridge:
             pendingMessages=session.pending_messages,
             pendingPermissions=list(session.pending_permissions.items()),
             name=session_names.get_name(session.id),
+            lastPromptedAt=session.last_prompted_at or None,
         ))
 
     def _archive_and_trim_before(self, session: Session, index: int) -> None:
@@ -1270,6 +1280,10 @@ class WsBridge:
                 await self._broadcast_to_browsers(session, {"type": "session_update", "session": {"controlledBy": "user"}})
             session.pen_taken_at = time.time()
             self._schedule_pen_release(session)
+        # Track last prompt time for MRU session ordering (skip Ring0 events)
+        if not msg.get("eventMeta"):
+            session.last_prompted_at = float(ts)
+
         session._user_msg_counter += 1
         history_entry: dict[str, Any] = {
             "type": "user_message",

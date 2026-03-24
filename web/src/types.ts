@@ -55,4 +55,5 @@ export interface SdkSessionInfo {
   actualBranch?: string;
   name?: string;
   backendType?: BackendType;
+  lastPromptedAt?: number;
 }

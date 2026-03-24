@@ -234,7 +234,12 @@ def create_routes(
         enriched = []
         for s in sessions:
             s_dict = s.to_dict() if hasattr(s, "to_dict") else (s if isinstance(s, dict) else s.__dict__)
-            s_dict["name"] = names.get(s_dict.get("sessionId", ""), s_dict.get("name"))
+            sid = s_dict.get("sessionId", "")
+            s_dict["name"] = names.get(sid, s_dict.get("name"))
+            # Enrich with MRU timestamp from WsBridge
+            lpa = ws_bridge.get_last_prompted_at(sid)
+            if lpa:
+                s_dict["lastPromptedAt"] = lpa
             enriched.append(s_dict)
         # Include terminal sessions
         if terminal_manager:
@@ -250,6 +255,14 @@ def create_routes(
                         "name": names.get(sid),
                         "createdAt": time.time() * 1000,
                     })
+        # Sort: Ring0 pinned first, then MRU (fallback to createdAt)
+        r0_id = ring0_manager.session_id if ring0_manager else None
+        enriched.sort(
+            key=lambda s: (
+                0 if s.get("sessionId") == r0_id else 1,
+                -(s.get("lastPromptedAt") or s.get("createdAt") or 0),
+            )
+        )
         return web.json_response(enriched)
 
     @routes.get("/api/sessions/{id}")
