@@ -1169,7 +1169,7 @@ class WsBridge:
             session.pending_permissions[msg.get("request_id", "")] = perm
             await self._broadcast_to_browsers(session, {"type": "permission_request", "request": perm})
             self._persist_session(session)
-            # Fire state transition: running → waiting_for_permission
+            # Notify Ring0 of every permission request — not just the first.
             tool_name = perm.get("tool_name", "?")
             desc = perm.get("description") or ""
             short_desc = desc if len(desc) <= 120 else desc[:117].rsplit(" ", 1)[0] + "..."
@@ -1177,10 +1177,14 @@ class WsBridge:
             pending_count = len(session.pending_permissions)
             if pending_count > 1:
                 detail = f"{detail} ({pending_count} pending)"
-            if session.state.get("is_running") and not session.state.get("is_waiting_for_permission"):
+            if not session.state.get("is_waiting_for_permission"):
                 session.state["is_waiting_for_permission"] = True
                 asyncio.ensure_future(self._notify_ring0_state_change(
                     session, "running→waiting_for_permission", detail=detail))
+            else:
+                # Already waiting — still notify Ring0 about the new permission
+                asyncio.ensure_future(self._notify_ring0_state_change(
+                    session, "waiting_for_permission", detail=detail))
 
     async def _handle_tool_progress(self, session: Session, msg: dict[str, Any]) -> None:
         # Agent is executing a tool — play thinking tone.
