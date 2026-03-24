@@ -1170,13 +1170,15 @@ class WsBridge:
             await self._broadcast_to_browsers(session, {"type": "permission_request", "request": perm})
             self._persist_session(session)
             # Fire state transition: running → waiting_for_permission
+            tool_name = perm.get("tool_name", "?")
+            desc = perm.get("description") or ""
+            short_desc = desc if len(desc) <= 120 else desc[:117].rsplit(" ", 1)[0] + "..."
+            detail = f"{tool_name}: {short_desc}" if desc else tool_name
+            pending_count = len(session.pending_permissions)
+            if pending_count > 1:
+                detail = f"{detail} ({pending_count} pending)"
             if session.state.get("is_running") and not session.state.get("is_waiting_for_permission"):
                 session.state["is_waiting_for_permission"] = True
-                # Include permission details as separate field
-                tool_name = perm.get("tool_name", "?")
-                desc = perm.get("description") or ""
-                short_desc = desc if len(desc) <= 120 else desc[:117].rsplit(" ", 1)[0] + "..."
-                detail = f"{tool_name}: {short_desc}" if desc else tool_name
                 asyncio.ensure_future(self._notify_ring0_state_change(
                     session, "running→waiting_for_permission", detail=detail))
 
@@ -1354,7 +1356,7 @@ class WsBridge:
                 remaining = len(session.pending_permissions)
                 detail = f"{detail} ({remaining} pending)"
                 asyncio.ensure_future(self._notify_ring0_state_change(
-                    session, "waiting_for_permission (next)", detail=detail))
+                    session, "waiting_for_permission", detail=detail))
             else:
                 session.state["is_waiting_for_permission"] = False
                 if msg.get("behavior") == "allow":
@@ -1805,7 +1807,7 @@ class WsBridge:
                 remaining = len(session.pending_permissions)
                 detail = f"{detail} ({remaining} pending)"
                 asyncio.ensure_future(self._notify_ring0_state_change(
-                    session, "waiting_for_permission (next)", detail=detail))
+                    session, "waiting_for_permission", detail=detail))
             else:
                 session.state["is_waiting_for_permission"] = False
                 if behavior == "allow":
