@@ -1080,6 +1080,49 @@ def create_routes(
             logger.exception(f"[routes] Ring0 create session failed: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    _ALLOWED_SESSION_MODES = {"plan", "acceptEdits"}
+
+    @routes.post("/api/ring0/set-session-mode")
+    async def ring0_set_session_mode(request: web.Request) -> web.Response:
+        """Set a session's permission mode (used by Ring0 MCP, auth-exempt)."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        session_id = body.get("sessionId", "")
+        mode = body.get("mode", "")
+        if not session_id:
+            return web.json_response({"error": "sessionId required"}, status=400)
+        if mode not in _ALLOWED_SESSION_MODES:
+            return web.json_response({"error": f"mode must be one of: {', '.join(sorted(_ALLOWED_SESSION_MODES))}"}, status=400)
+        resolved = _resolve_session_id(session_id, launcher)
+        if not resolved:
+            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+        session = ws_bridge.get_session(resolved)
+        if not session:
+            return web.json_response({"error": f"Session not found in bridge: {session_id}"}, status=404)
+        # Forward to CLI
+        ws_bridge._handle_set_permission_mode(session, mode)
+        # Update state and broadcast to browsers immediately
+        session.state["permissionMode"] = mode
+        await ws_bridge._broadcast_to_browsers(session, {"type": "session_update", "session": {"permissionMode": mode}})
+        return web.json_response({"ok": True, "sessionId": resolved, "mode": mode})
+
+    @routes.get("/api/ring0/get-session-mode")
+    async def ring0_get_session_mode(request: web.Request) -> web.Response:
+        """Get a session's current permission mode (used by Ring0 MCP, auth-exempt)."""
+        session_id = request.query.get("sessionId", "")
+        if not session_id:
+            return web.json_response({"error": "sessionId query param required"}, status=400)
+        resolved = _resolve_session_id(session_id, launcher)
+        if not resolved:
+            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+        session = ws_bridge.get_session(resolved)
+        if not session:
+            return web.json_response({"error": f"Session not found in bridge: {session_id}"}, status=404)
+        mode = session.state.get("permissionMode", "default")
+        return web.json_response({"sessionId": resolved, "mode": mode})
+
     # ── Voice Profiles ──────────────────────────────────────────────────
 
     def _get_username(request: web.Request) -> str:

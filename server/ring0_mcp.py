@@ -941,5 +941,41 @@ async def capture_screen(
     )
 
 
+@mcp.tool()
+async def set_session_mode(session_id: str, mode: str) -> str:
+    """Set a session's permission mode.
+
+    Use "plan" to put a session into plan-only mode where it must propose
+    a plan before implementing anything. Use "acceptEdits" to return it to
+    normal mode where file edits are auto-allowed.
+
+    Args:
+        session_id: The session ID (full or prefix).
+        mode: "plan" or "acceptEdits".
+    """
+    if mode not in ("plan", "acceptEdits"):
+        return "Error: mode must be 'plan' or 'acceptEdits'."
+    result = await _post("/ring0/set-session-mode", {
+        "sessionId": session_id,
+        "mode": mode,
+    })
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    return f"Session {session_id[:8]} mode set to '{mode}'."
+
+
+@mcp.tool()
+async def get_session_mode(session_id: str) -> str:
+    """Query the current permission mode of a session.
+
+    Args:
+        session_id: The session ID (full or prefix).
+    """
+    result = await _get(f"/ring0/get-session-mode?sessionId={session_id}")
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    return f"Session {session_id[:8]} is in '{result['mode']}' mode."
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")
