@@ -1123,6 +1123,25 @@ def create_routes(
         mode = session.state.get("permissionMode", "default")
         return web.json_response({"sessionId": resolved, "mode": mode})
 
+    @routes.post("/api/ring0/set-guard")
+    async def ring0_set_guard(request: web.Request) -> web.Response:
+        """Toggle guard mode for a session (used by Ring0 MCP, auth-exempt)."""
+        if webrtc_manager is None:
+            return web.json_response({"error": "WebRTC not available"}, status=501)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        session_id = body.get("sessionId", "")
+        if not session_id:
+            return web.json_response({"error": "sessionId required"}, status=400)
+        resolved = _resolve_session_id(session_id, launcher)
+        if not resolved:
+            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+        enabled = bool(body.get("enabled", False))
+        webrtc_manager.set_guard_enabled(resolved, enabled)
+        return web.json_response({"ok": True, "sessionId": resolved, "enabled": enabled})
+
     # ── Voice Profiles ──────────────────────────────────────────────────
 
     def _get_username(request: web.Request) -> str:

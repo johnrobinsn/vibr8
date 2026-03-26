@@ -977,5 +977,27 @@ async def get_session_mode(session_id: str) -> str:
     return f"Session {session_id[:8]} is in '{result['mode']}' mode."
 
 
+@mcp.tool()
+async def set_guard_mode(session_id: str, enabled: bool) -> str:
+    """Enable or disable voice guard mode for a session.
+
+    When guard mode is on (default), voice input is only processed when
+    preceded by the guard word "vibr8". When off, all speech is passed
+    through directly.
+
+    Args:
+        session_id: The session ID (full or prefix).
+        enabled: True to enable guard mode, False to disable it.
+    """
+    result = await _post("/ring0/set-guard", {
+        "sessionId": session_id,
+        "enabled": enabled,
+    })
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    state = "enabled" if enabled else "disabled"
+    return f"Guard mode {state} for session {session_id[:8]}."
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")
