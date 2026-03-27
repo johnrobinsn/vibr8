@@ -109,14 +109,21 @@ export function Sidebar() {
           // On first load, validate/restore the current session
           if (isFirstPoll) {
             const activeSessions = list.filter((s) => !s.archived);
-            const currentId = store.currentSessionId;
+            // Try per-node saved session first, then fall back to global
+            const savedForNode = localStorage.getItem(`cc-node-session-${activeNodeId}`);
+            const currentId = (savedForNode && activeSessions.some((s) => s.sessionId === savedForNode))
+              ? savedForNode
+              : store.currentSessionId;
             // Check if the eagerly-restored session still exists and is active
             const currentValid = currentId && activeSessions.some((s) => s.sessionId === currentId);
 
             if (currentValid) {
-              // Session exists — just connect it
+              // Session exists — restore and connect it
               const target = activeSessions.find((s) => s.sessionId === currentId)!;
               const isTerminal = target.backendType === "terminal";
+              if (currentId !== store.currentSessionId) {
+                store.setCurrentSession(currentId);
+              }
               store.setPendingFocus(isTerminal ? "terminal" : "composer");
               store.setSidebarOpen(false);
               if (!isTerminal) {
@@ -194,9 +201,11 @@ export function Sidebar() {
 
   async function handleNodeSwitch(nodeId: string) {
     if (nodeId === activeNodeId) return;
-    // Disconnect all current sessions
+    // Disconnect current session
     const s = useStore.getState();
     if (s.currentSessionId) {
+      // Save current session for this node before switching
+      localStorage.setItem(`cc-node-session-${activeNodeId}`, s.currentSessionId);
       const oldSdk = s.sdkSessions.find((x) => x.sessionId === s.currentSessionId);
       if (oldSdk?.backendType !== "terminal") {
         disconnectSession(s.currentSessionId);

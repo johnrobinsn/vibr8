@@ -552,13 +552,15 @@ class WsBridge:
     def get_session(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
 
-    async def broadcast_guard_state(self, session_id: str, enabled: bool) -> None:
+    async def broadcast_guard_state(self, session_id: str, enabled: bool, *, client_id: str | None = None) -> None:
         """Broadcast guard mode state change to browser clients."""
-        session = self._sessions.get(session_id)
-        if session:
-            await self._broadcast_to_browsers(
-                session, {"type": "guard_state", "enabled": enabled}
-            )
+        msg = {"type": "guard_state", "enabled": enabled}
+        if client_id:
+            await self._send_to_client(client_id, msg)
+        else:
+            session = self._sessions.get(session_id)
+            if session:
+                await self._broadcast_to_browsers(session, msg)
 
     async def broadcast_audio_off(self, session_id: str) -> None:
         """Tell browser to disconnect WebRTC audio."""
@@ -568,21 +570,25 @@ class WsBridge:
                 session, {"type": "audio_off"}
             )
 
-    async def broadcast_tts_muted(self, session_id: str, muted: bool) -> None:
+    async def broadcast_tts_muted(self, session_id: str, muted: bool, *, client_id: str | None = None) -> None:
         """Broadcast TTS mute state change to browser clients."""
-        session = self._sessions.get(session_id)
-        if session:
-            await self._broadcast_to_browsers(
-                session, {"type": "tts_muted", "muted": muted}
-            )
+        msg = {"type": "tts_muted", "muted": muted}
+        if client_id:
+            await self._send_to_client(client_id, msg)
+        else:
+            session = self._sessions.get(session_id)
+            if session:
+                await self._broadcast_to_browsers(session, msg)
 
-    async def broadcast_voice_mode(self, session_id: str, mode: str | None) -> None:
+    async def broadcast_voice_mode(self, session_id: str, mode: str | None, *, client_id: str | None = None) -> None:
         """Broadcast voice mode change to browser clients."""
-        session = self._sessions.get(session_id)
-        if session:
-            await self._broadcast_to_browsers(
-                session, {"type": "voice_mode", "mode": mode}
-            )
+        msg = {"type": "voice_mode", "mode": mode}
+        if client_id:
+            await self._send_to_client(client_id, msg)
+        else:
+            session = self._sessions.get(session_id)
+            if session:
+                await self._broadcast_to_browsers(session, msg)
 
     async def broadcast_node_switch(self, node_id: str, node_name: str | None = None) -> None:
         """Broadcast node_switch to all connected browsers (e.g. from voice command)."""
@@ -876,13 +882,19 @@ class WsBridge:
             node_id, _ = self.parse_qualified_id(session_id)
             node = self._node_registry.get_node(node_id) if self._node_registry and node_id else None
             backend_connected = bool(node and node.tunnel and node.tunnel.connected)
+            logger.info(f"[ws-bridge] Backend check for remote session {session_id[:8]}: node={node_id[:8] if node_id else '?'} "
+                        f"node_found={node is not None} tunnel={node.tunnel is not None if node else False} "
+                        f"tunnel_connected={node.tunnel.connected if node and node.tunnel else False} → {backend_connected}")
         else:
             backend_connected = (
                 (session.codex_adapter and session.codex_adapter.is_connected())
                 if session.backend_type == "codex"
                 else session.cli_socket is not None
             )
+            logger.info(f"[ws-bridge] Backend check for local session {session_id[:8]}: "
+                        f"cli_socket={'yes' if session.cli_socket else 'no'} → {backend_connected}")
         if not backend_connected:
+            logger.warning(f"[ws-bridge] Sending cli_disconnected to browser for session {session_id[:8]} (backend not connected)")
             await self._send_to_browser(ws, {"type": "cli_disconnected"})
             if not self._is_remote_session(session_id) and self._on_cli_relaunch_needed:
                 logger.info(f"[ws-bridge] Browser connected but backend is dead for session {session_id}, requesting relaunch")
@@ -2086,6 +2098,15 @@ class WsBridge:
             if client_id:
                 self._client_sessions.pop(client_id, None)
                 self._ws_by_client.pop(client_id, None)
+
+    async def _send_to_client(self, client_id: str, msg: dict[str, Any]) -> None:
+        """Send a message to a specific client's current browser WebSocket."""
+        ws = self._ws_by_client.get(client_id)
+        if ws and not ws.closed:
+            try:
+                await ws.send_str(json.dumps(msg))
+            except Exception:
+                pass
 
     async def _send_to_browser(self, ws: web.WebSocketResponse, msg: dict[str, Any]) -> None:
         try:

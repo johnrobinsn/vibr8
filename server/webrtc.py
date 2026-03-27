@@ -222,7 +222,7 @@ class WebRTCManager:
         # Broadcast to browser so UI stays in sync
         if self._ws_bridge:
             asyncio.ensure_future(
-                self._ws_bridge.broadcast_guard_state(session_id, enabled)
+                self._ws_bridge.broadcast_guard_state(session_id, enabled, client_id=self._client_ids.get(session_id))
             )
 
     def is_tts_muted(self, session_id: str) -> bool:
@@ -235,7 +235,7 @@ class WebRTCManager:
         logger.info("[webrtc] session %s: TTS %s", session_id, "muted" if muted else "unmuted")
         if self._ws_bridge:
             asyncio.ensure_future(
-                self._ws_bridge.broadcast_tts_muted(session_id, muted)
+                self._ws_bridge.broadcast_tts_muted(session_id, muted, client_id=self._client_ids.get(session_id))
             )
 
     def get_voice_mode(self, session_id: str) -> VoiceMode | None:
@@ -256,7 +256,7 @@ class WebRTCManager:
         if self._ws_bridge:
             mode_name = mode.name if mode else None
             asyncio.ensure_future(
-                self._ws_bridge.broadcast_voice_mode(session_id, mode_name)
+                self._ws_bridge.broadcast_voice_mode(session_id, mode_name, client_id=self._client_ids.get(session_id))
             )
             if self._ring0_manager and self._ring0_manager.is_enabled:
                 ring0_sid = self._ring0_manager.session_id
@@ -426,7 +426,7 @@ class WebRTCManager:
                             active_nid = self._node_registry.active_node_id
                             node = self._node_registry.get_node(active_nid)
                             if node and node.tunnel and node.status == "online":
-                                    node.tunnel.send_fire_and_forget({
+                                    await node.tunnel.send_fire_and_forget({
                                         "type": "ring0_input",
                                         "text": text,
                                         "sourceClientId": client_id,

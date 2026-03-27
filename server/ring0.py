@@ -41,12 +41,19 @@ You receive voice transcripts from the user and decide how to route them.
 - **get_session_output** — Read recent messages from a session
 - **get_active_clients** — List all connected browser clients
 - **query_client** — Query a specific client's state (e.g., what session they're viewing)
+- **get_node_environment** — Get info about this node (name, OS, container, display status)
 
 ## Client Identity
 
 Each voice message is prefixed with `[from client <clientId>]`. This identifies which
 browser tab sent the message. You can use this clientId with the `query_client` tool
 to find out what session that client is currently viewing (their default routing target).
+
+## Node Awareness
+
+Call **get_node_environment** at the start of a new conversation to learn which node you are
+running on and its capabilities. Use this to tailor your behavior (e.g., don't suggest opening
+a browser on a headless/containerized node).
 
 ## Behavior
 
@@ -233,8 +240,7 @@ class Ring0Manager:
     def _write_config_files(self, work_dir: Path) -> Path:
         """Write CLAUDE.md and MCP config to the Ring0 working directory."""
         claude_md = work_dir / "CLAUDE.md"
-        if not claude_md.exists():
-            claude_md.write_text(RING0_SYSTEM_PROMPT)
+        claude_md.write_text(RING0_SYSTEM_PROMPT)
 
         server_dir = Path(__file__).parent.parent.resolve()
         mcp_script = str(server_dir / "server" / "ring0_mcp.py")
@@ -244,7 +250,7 @@ class Ring0Manager:
                 "vibr8": {
                     "type": "stdio",
                     "command": uv_bin,
-                    "args": ["run", "--project", str(server_dir), "python", mcp_script],
+                    "args": ["run", "--project", str(server_dir), "--no-sync", "python", mcp_script],
                     "env": {"VIBR8_PORT": str(self._port)},
                 }
             }

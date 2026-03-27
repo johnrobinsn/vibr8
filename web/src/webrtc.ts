@@ -154,6 +154,7 @@ async function detectTransportType(
 
 export function toggleGuard(sessionId: string): void {
   const current = useStore.getState().guardEnabled;
+  useStore.getState().setGuardEnabled(!current);
   api.setGuard(sessionId, !current).catch(() => {});
 }
 

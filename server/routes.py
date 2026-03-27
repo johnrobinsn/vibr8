@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import platform as plat
 import secrets
 import subprocess
 import time
@@ -938,6 +939,19 @@ def create_routes(
                 entry["isRing0"] = True
             sessions.append(entry)
         return web.json_response(sessions)
+
+    @routes.get("/api/ring0/node-environment")
+    async def ring0_node_environment(request: web.Request) -> web.Response:
+        """Return environment metadata for the node this Ring0 runs on."""
+        info = {
+            "nodeName": node_registry.hub_name if node_registry else "local",
+            "platform": plat.system().lower(),
+            "arch": plat.machine(),
+            "hostname": plat.node(),
+            "containerized": Path("/.dockerenv").exists(),
+            "display": bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")),
+        }
+        return web.json_response(info)
 
     @routes.get("/api/ring0/status")
     async def ring0_status(request: web.Request) -> web.Response:

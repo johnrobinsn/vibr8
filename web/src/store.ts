@@ -227,7 +227,7 @@ export const useStore = create<AppState>((set) => ({
   clientRole: "primary",
   sessions: new Map(),
   sdkSessions: [],
-  currentSessionId: typeof window !== "undefined" ? localStorage.getItem("cc-last-session") : null,
+  currentSessionId: typeof window !== "undefined" ? (localStorage.getItem("cc-node-session-local") ?? localStorage.getItem("cc-last-session")) : null,
   sessionsLoaded: false,
   messages: new Map(),
   archivedCount: new Map(),
@@ -344,8 +344,10 @@ export const useStore = create<AppState>((set) => ({
   },
 
   setCurrentSession: (id) => {
+    const nodeId = useStore.getState().activeNodeId;
     if (id) {
       localStorage.setItem("cc-last-session", id);
+      localStorage.setItem(`cc-node-session-${nodeId}`, id);
     }
     set({ currentSessionId: id });
   },

@@ -999,5 +999,23 @@ async def set_guard_mode(session_id: str, enabled: bool) -> str:
     return f"Guard mode {state} for session {session_id[:8]}."
 
 
+@mcp.tool()
+async def get_node_environment() -> str:
+    """Get information about the node this Ring0 is running on.
+
+    Returns the node name, platform, architecture, whether it's containerized,
+    and whether a display is available.
+    """
+    info = await _get("/ring0/node-environment")
+    lines = [
+        f"Node: {info['nodeName']}",
+        f"Platform: {info['platform']} ({info['arch']})",
+        f"Hostname: {info['hostname']}",
+        f"Containerized: {'yes (Docker)' if info['containerized'] else 'no'}",
+        f"Display: {'available' if info['display'] else 'headless'}",
+    ]
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

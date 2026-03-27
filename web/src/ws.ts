@@ -388,8 +388,9 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
       // Hub notifies that the active node changed (e.g., via voice command)
       const newNodeId = data.nodeId as string;
       if (newNodeId && newNodeId !== store.activeNodeId) {
-        // Disconnect current session
+        // Save current session for this node before switching
         if (store.currentSessionId) {
+          localStorage.setItem(`cc-node-session-${store.activeNodeId}`, store.currentSessionId);
           const oldSdk = store.sdkSessions.find((x) => x.sessionId === store.currentSessionId);
           if (oldSdk?.backendType !== "terminal") {
             disconnectSession(store.currentSessionId);
