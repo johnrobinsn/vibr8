@@ -1,0 +1,532 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── vibr8-node: Docker lifecycle manager for vibr8 remote nodes ─────────────
+#
+# Usage: vibr8-node <command> [args]
+#
+# Commands:
+#   create <name>   Create a new node container
+#   start <name>    Start a stopped node
+#   stop <name>     Stop a running node
+#   restart <name>  Restart a node
+#   logs <name>     Tail node logs
+#   status [name]   Show node status
+#   list            List all managed nodes
+#   update [name]   Rebuild image and recreate node(s)
+#   shell <name>    Open a shell in a running node
+#   destroy <name>  Remove a node and optionally its data
+
+VIBR8_DIR="$HOME/.vibr8"
+NODES_DIR="$VIBR8_DIR/docker-nodes"
+IMAGE_NAME="vibr8-node"
+IMAGE_TAG="latest"
+CONTAINER_PREFIX="vibr8-node-"
+DEFAULT_HUB_URL="wss://vibr8.ringzero.ai"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+_die()  { echo "Error: $*" >&2; exit 1; }
+_info() { echo "==> $*"; }
+_warn() { echo "Warning: $*" >&2; }
+
+_container_name() { echo "${CONTAINER_PREFIX}$1"; }
+
+_node_dir() { echo "$NODES_DIR/$1"; }
+
+_node_exists() { [ -d "$(_node_dir "$1")" ]; }
+
+_container_exists() {
+    docker container inspect "$(_container_name "$1")" >/dev/null 2>&1
+}
+
+_container_running() {
+    [ "$(docker container inspect -f '{{.State.Running}}' "$(_container_name "$1")" 2>/dev/null)" = "true" ]
+}
+
+_read_config() {
+    local dir
+    dir="$(_node_dir "$1")"
+    [ -f "$dir/config.env" ] || _die "No config found for node '$1'"
+    # shellcheck disable=SC1090
+    source "$dir/config.env"
+}
+
+_validate_name() {
+    [[ "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || \
+        _die "Invalid node name '$1'. Use alphanumeric, hyphens, dots, underscores."
+}
+
+_require_docker() {
+    command -v docker >/dev/null 2>&1 || _die "Docker is not installed"
+    docker info >/dev/null 2>&1 || _die "Cannot connect to Docker. Is the daemon running? Do you have permission?"
+}
+
+_mint_auth_token() {
+    # Mint a vibr8 session token using local hub credentials.
+    # Token format: username:timestamp:hmac_sha256
+    local secret_file="$VIBR8_DIR/secret.key"
+    local users_file="$VIBR8_DIR/users.json"
+
+    [ -f "$secret_file" ] || return 1
+    [ -f "$users_file" ] || return 1
+
+    local secret username ts payload sig
+    secret="$(cat "$secret_file")"
+    # Pick the first username from users.json (format: {"users": {"name": "hash"}})
+    username="$(python3 -c "
+import json
+d = json.load(open('$users_file'))
+users = d.get('users', d)  # handle both {users: {}} and flat {}
+print(list(users.keys())[0])
+" 2>/dev/null)" || return 1
+    ts="$(date +%s)"
+    payload="${username}:${ts}"
+    sig="$(echo -n "$payload" | openssl dgst -sha256 -hmac "$secret" -hex 2>/dev/null | awk '{print $NF}')" || return 1
+
+    echo "${payload}:${sig}"
+}
+
+_auto_generate_key() {
+    # Try to generate an API key by calling the hub's generate-key endpoint
+    # using a locally minted auth token.
+    local hub_url="$1"
+    local node_name="$2"
+    local http_url="${hub_url/wss:\/\//https:\/\/}"
+    http_url="${http_url/ws:\/\//http:\/\/}"
+
+    local token
+    token="$(_mint_auth_token)" || return 1
+
+    local resp
+    resp="$(curl -s -X POST "${http_url}/api/nodes/generate-key" \
+        -H "Cookie: vibr8_session=${token}" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\": \"$node_name\"}" \
+        -w "\n%{http_code}" 2>/dev/null)" || return 1
+
+    local body http_code
+    http_code="$(echo "$resp" | tail -1)"
+    body="$(echo "$resp" | head -n -1)"
+
+    [ "$http_code" = "200" ] || return 1
+
+    local key
+    key="$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin)['apiKey'])" 2>/dev/null)" || return 1
+    [ -n "$key" ] || return 1
+
+    _info "Auto-generated API key from local hub credentials" >&2
+    echo "$key"
+}
+
+_build_image() {
+    _info "Building Docker image $IMAGE_NAME:$IMAGE_TAG ..."
+    docker build \
+        -f "$REPO_ROOT/Dockerfile.node" \
+        -t "$IMAGE_NAME:$IMAGE_TAG" \
+        "$REPO_ROOT"
+}
+
+_build_image_if_needed() {
+    if ! docker image inspect "$IMAGE_NAME:$IMAGE_TAG" >/dev/null 2>&1; then
+        _build_image
+    fi
+}
+
+_create_container() {
+    local name="$1"
+    local dir
+    dir="$(_node_dir "$name")"
+
+    # Source config
+    _read_config "$name"
+
+    local args=(
+        --name "$(_container_name "$name")"
+        --restart unless-stopped
+        --add-host=host.docker.internal:host-gateway
+        --env-file "$dir/config.env"
+        -v "$dir/vibr8-data:/home/vibr8/.vibr8"
+        -v "$dir/vibr8-node-data:/home/vibr8/.vibr8-node"
+    )
+
+    # Mount code directory
+    if [ -n "${HOST_CODE_DIR:-}" ]; then
+        args+=(-v "$HOST_CODE_DIR:/code")
+    fi
+
+    # Mount Claude CLI state (seeded from host on create)
+    if [ -d "$dir/claude-config" ]; then
+        args+=(-v "$dir/claude-config:/home/vibr8/.claude")
+    fi
+
+    # Bind-mount host credentials (read-only) so OAuth tokens stay fresh
+    for f in .credentials.json credentials.json; do
+        if [ -f "$HOME/.claude/$f" ]; then
+            args+=(-v "$HOME/.claude/$f:/home/vibr8/.claude/$f:ro")
+        fi
+    done
+
+    # Pass ANTHROPIC_API_KEY if set
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        args+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+    fi
+
+    docker create "${args[@]}" "$IMAGE_NAME:$IMAGE_TAG"
+}
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+
+cmd_create() {
+    local name="" hub_url="" api_key="" code_dir=""
+    local anthropic_key="" port="3457"
+
+    # Parse flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --hub)       hub_url="$2"; shift 2 ;;
+            --api-key)   api_key="$2"; shift 2 ;;
+            --code-dir)  code_dir="$2"; shift 2 ;;
+            --port)      port="$2"; shift 2 ;;
+            --anthropic-api-key) anthropic_key="$2"; shift 2 ;;
+            -*)          _die "Unknown flag: $1" ;;
+            *)
+                [ -z "$name" ] && name="$1" && shift || _die "Unexpected arg: $1"
+                ;;
+        esac
+    done
+
+    [ -n "$name" ] || _die "Usage: vibr8-node create <name> [--hub URL] [--api-key KEY] [--code-dir PATH] [--ring0]"
+    _validate_name "$name"
+    _node_exists "$name" && _die "Node '$name' already exists. Use 'destroy' first."
+    _require_docker
+
+    # Interactive prompts for missing values
+    if [ -z "$hub_url" ]; then
+        read -rp "Hub URL [$DEFAULT_HUB_URL]: " hub_url
+        hub_url="${hub_url:-$DEFAULT_HUB_URL}"
+    fi
+
+    if [ -z "$api_key" ]; then
+        # Try to auto-generate by minting an auth token from local hub credentials
+        api_key="$(_auto_generate_key "$hub_url" "$name")" || true
+        if [ -z "$api_key" ]; then
+            local ui_url="${hub_url/wss:\/\//https:\/\/}"
+            ui_url="${ui_url/ws:\/\//http:\/\/}"
+            echo ""
+            echo "Could not auto-generate API key (hub credentials not found locally)."
+            echo ""
+            echo "Generate one in the web UI (use name \"$name\"):"
+            echo "  ${ui_url}/#/settings/api-keys"
+            echo ""
+            read -rp "Paste API key: " api_key
+            [ -n "$api_key" ] || _die "API key is required"
+        fi
+    fi
+
+    if [ -z "$code_dir" ]; then
+        read -rp "Code directory to mount [$(pwd)]: " code_dir
+        code_dir="${code_dir:-$(pwd)}"
+    fi
+    # Resolve to absolute path
+    code_dir="$(cd "$code_dir" 2>/dev/null && pwd)" || _die "Code directory '$code_dir' does not exist"
+
+    # Create node directory structure
+    local dir
+    dir="$(_node_dir "$name")"
+    mkdir -p "$dir/vibr8-data" "$dir/vibr8-node-data"
+
+    # Write config
+    cat > "$dir/config.env" <<EOF
+HUB_URL=$hub_url
+API_KEY=$api_key
+NODE_NAME=$name
+NODE_PORT=$port
+WORK_DIR=/code
+HOST_CODE_DIR=$code_dir
+EOF
+
+    if [ -n "$anthropic_key" ]; then
+        echo "ANTHROPIC_API_KEY=$anthropic_key" >> "$dir/config.env"
+    fi
+
+    # Enable Ring0 by default — the whole point of a remote node
+    # Each node gets a unique ring0 session ID to avoid collision with the hub
+    local ring0_sid="ring0-${name}-$(head -c8 /dev/urandom | xxd -p)"
+    cat > "$dir/vibr8-data/ring0.json" <<RING0
+{"enabled": true, "sessionId": "$ring0_sid"}
+RING0
+
+    # Seed Claude CLI auth from host
+    if [ -d "$HOME/.claude" ]; then
+        mkdir -p "$dir/claude-config"
+        # Copy credentials (not sessions/caches)
+        for f in .credentials.json credentials.json; do
+            [ -f "$HOME/.claude/$f" ] && cp "$HOME/.claude/$f" "$dir/claude-config/"
+        done
+    fi
+
+    # Build image if needed
+    _build_image_if_needed
+
+    # Create container
+    _info "Creating container $(_container_name "$name") ..."
+    _create_container "$name"
+
+    # Check Claude auth
+    if [ ! -d "$HOME/.claude" ] && [ -z "$anthropic_key" ]; then
+        _warn "No ~/.claude/ directory found and no --anthropic-api-key provided."
+        _warn "Claude Code CLI may not be authenticated inside the container."
+        _warn "Either run 'claude login' on the host or pass --anthropic-api-key."
+    fi
+
+    echo ""
+    _info "Node '$name' created successfully!"
+    echo "  Hub:       $hub_url"
+    echo "  Code dir:  $code_dir"
+    echo "  Ring0:     enabled"
+    echo ""
+    echo "Start it with:  vibr8-node start $name"
+    echo "View logs with: vibr8-node logs $name -f"
+}
+
+cmd_start() {
+    local name="${1:?Usage: vibr8-node start <name>}"
+    _node_exists "$name" || _die "Node '$name' not found. Run 'vibr8-node create $name' first."
+    _container_exists "$name" || _die "Container not found. Run 'vibr8-node create $name' to recreate."
+
+    if _container_running "$name"; then
+        _info "Node '$name' is already running."
+        return
+    fi
+
+    _info "Starting node '$name' ..."
+    docker start "$(_container_name "$name")"
+    _info "Started. Use 'vibr8-node logs $name -f' to follow."
+}
+
+cmd_stop() {
+    local name="${1:?Usage: vibr8-node stop <name>}"
+    _container_exists "$name" || _die "Container for '$name' not found."
+
+    if ! _container_running "$name"; then
+        _info "Node '$name' is not running."
+        return
+    fi
+
+    _info "Stopping node '$name' ..."
+    docker stop "$(_container_name "$name")"
+    _info "Stopped."
+}
+
+cmd_restart() {
+    local name="${1:?Usage: vibr8-node restart <name>}"
+    _container_exists "$name" || _die "Container for '$name' not found."
+    _info "Restarting node '$name' ..."
+    docker restart "$(_container_name "$name")"
+    _info "Restarted."
+}
+
+cmd_logs() {
+    local name="${1:?Usage: vibr8-node logs <name> [-f]}"
+    shift
+    _container_exists "$name" || _die "Container for '$name' not found."
+
+    local follow=""
+    [[ "${1:-}" == "-f" || "${1:-}" == "--follow" ]] && follow="-f"
+
+    docker logs "$(_container_name "$name")" --tail 200 $follow
+}
+
+cmd_status() {
+    local name="${1:-}"
+
+    if [ -n "$name" ]; then
+        _node_exists "$name" || _die "Node '$name' not found."
+        _read_config "$name"
+
+        local state="not created" uptime=""
+        if _container_exists "$name"; then
+            state="$(docker container inspect -f '{{.State.Status}}' "$(_container_name "$name")" 2>/dev/null)"
+            if [ "$state" = "running" ]; then
+                uptime="$(docker container inspect -f '{{.State.StartedAt}}' "$(_container_name "$name")" 2>/dev/null)"
+            fi
+        fi
+
+        echo "Node: $name"
+        echo "  Status:    $state"
+        [ -n "$uptime" ] && echo "  Started:   $uptime"
+        echo "  Hub:       ${HUB_URL:-unknown}"
+        echo "  Code dir:  ${HOST_CODE_DIR:-none}"
+        local ring0_status="disabled"
+        local ring0_json="$(_node_dir "$name")/vibr8-data/ring0.json"
+        if [ -f "$ring0_json" ] && python3 -c "import json; exit(0 if json.load(open('$ring0_json')).get('enabled') else 1)" 2>/dev/null; then
+            ring0_status="enabled"
+        fi
+        echo "  Ring0:     $ring0_status"
+        return
+    fi
+
+    # List all nodes
+    cmd_list
+}
+
+cmd_list() {
+    if [ ! -d "$NODES_DIR" ] || [ -z "$(ls -A "$NODES_DIR" 2>/dev/null)" ]; then
+        echo "No nodes configured. Create one with: vibr8-node create <name>"
+        return
+    fi
+
+    printf "%-20s %-12s %-35s %s\n" "NAME" "STATUS" "HUB" "CODE DIR"
+    printf "%-20s %-12s %-35s %s\n" "----" "------" "---" "--------"
+
+    for dir in "$NODES_DIR"/*/; do
+        [ -d "$dir" ] || continue
+        local name
+        name="$(basename "$dir")"
+
+        local state="no container"
+        if _container_exists "$name"; then
+            state="$(docker container inspect -f '{{.State.Status}}' "$(_container_name "$name")" 2>/dev/null || echo "unknown")"
+        fi
+
+        local hub="?" code_dir="?"
+        if [ -f "$dir/config.env" ]; then
+            hub="$(grep '^HUB_URL=' "$dir/config.env" 2>/dev/null | cut -d= -f2- || echo "?")"
+            code_dir="$(grep '^HOST_CODE_DIR=' "$dir/config.env" 2>/dev/null | cut -d= -f2- || echo "?")"
+        fi
+
+        printf "%-20s %-12s %-35s %s\n" "$name" "$state" "$hub" "$code_dir"
+    done
+}
+
+cmd_update() {
+    local name="${1:-}"
+    _require_docker
+
+    # Rebuild image
+    _build_image
+
+    # Determine which nodes to update
+    local nodes=()
+    if [ -n "$name" ]; then
+        _node_exists "$name" || _die "Node '$name' not found."
+        nodes=("$name")
+    else
+        if [ -d "$NODES_DIR" ]; then
+            for dir in "$NODES_DIR"/*/; do
+                [ -d "$dir" ] || continue
+                nodes+=("$(basename "$dir")")
+            done
+        fi
+        [ ${#nodes[@]} -gt 0 ] || { _info "No nodes to update."; return; }
+    fi
+
+    for n in "${nodes[@]}"; do
+        local was_running=false
+        if _container_running "$n"; then
+            was_running=true
+            _info "Stopping $n ..."
+            docker stop "$(_container_name "$n")" >/dev/null
+        fi
+
+        if _container_exists "$n"; then
+            _info "Removing old container for $n ..."
+            docker rm "$(_container_name "$n")" >/dev/null
+        fi
+
+        _info "Recreating container for $n ..."
+        _create_container "$n" >/dev/null
+
+        if $was_running; then
+            _info "Starting $n ..."
+            docker start "$(_container_name "$n")" >/dev/null
+        fi
+
+        _info "Updated $n."
+    done
+}
+
+cmd_shell() {
+    local name="${1:?Usage: vibr8-node shell <name>}"
+    _container_running "$name" || _die "Node '$name' is not running."
+    docker exec -it "$(_container_name "$name")" /bin/bash
+}
+
+cmd_destroy() {
+    local name="${1:?Usage: vibr8-node destroy <name> [--keep-data]}"
+    shift
+    local keep_data=false
+    [[ "${1:-}" == "--keep-data" ]] && keep_data=true
+
+    _node_exists "$name" || _die "Node '$name' not found."
+
+    # Stop and remove container
+    if _container_running "$name"; then
+        _info "Stopping $name ..."
+        docker stop "$(_container_name "$name")" >/dev/null
+    fi
+    if _container_exists "$name"; then
+        _info "Removing container ..."
+        docker rm "$(_container_name "$name")" >/dev/null
+    fi
+
+    if $keep_data; then
+        _info "Container removed. Data kept at $(_node_dir "$name")"
+    else
+        _info "Removing data ..."
+        rm -rf "$(_node_dir "$name")"
+        _info "Node '$name' destroyed."
+    fi
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+_usage() {
+    cat <<'EOF'
+Usage: vibr8-node <command> [args]
+
+Commands:
+  create <name>   Create a new node container
+  start <name>    Start a stopped node
+  stop <name>     Stop a running node
+  restart <name>  Restart a node
+  logs <name>     Tail node logs (-f to follow)
+  status [name]   Show node status (or all nodes)
+  list            List all managed nodes
+  update [name]   Rebuild image and recreate node(s)
+  shell <name>    Open a shell in a running node
+  destroy <name>  Remove a node (--keep-data to preserve data)
+
+Examples:
+  vibr8-node create my-node --code-dir ~/projects/myrepo
+  vibr8-node start my-node
+  vibr8-node logs my-node -f
+  vibr8-node update
+  vibr8-node destroy my-node
+EOF
+}
+
+main() {
+    local cmd="${1:-}"
+    [ -n "$cmd" ] || { _usage; exit 1; }
+    shift
+
+    case "$cmd" in
+        create)  cmd_create "$@" ;;
+        start)   cmd_start "$@" ;;
+        stop)    cmd_stop "$@" ;;
+        restart) cmd_restart "$@" ;;
+        logs)    cmd_logs "$@" ;;
+        status)  cmd_status "$@" ;;
+        list)    cmd_list "$@" ;;
+        update)  cmd_update "$@" ;;
+        shell)   cmd_shell "$@" ;;
+        destroy) cmd_destroy "$@" ;;
+        help|-h|--help) _usage ;;
+        *)       _die "Unknown command: $cmd. Run 'vibr8-node help' for usage." ;;
+    esac
+}
+
+main "$@"

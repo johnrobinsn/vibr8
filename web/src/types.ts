@@ -56,4 +56,15 @@ export interface SdkSessionInfo {
   name?: string;
   backendType?: BackendType;
   lastPromptedAt?: number;
+  isRing0?: boolean;
+}
+
+export interface NodeInfo {
+  id: string;
+  name: string;
+  status: "online" | "offline";
+  platform: string;
+  hostname: string;
+  sessionCount: number;
+  ring0Enabled: boolean;
 }

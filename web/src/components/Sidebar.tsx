@@ -31,6 +31,8 @@ export function Sidebar() {
   const recentlyRenamed = useStore((s) => s.recentlyRenamed);
   const pendingPermissions = useStore((s) => s.pendingPermissions);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
+  const nodes = useStore((s) => s.nodes);
+  const activeNodeId = useStore((s) => s.activeNodeId);
   const sidebarListRef = useRef<HTMLDivElement>(null);
   const newSessionRef = useRef<HTMLButtonElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -71,20 +73,24 @@ export function Sidebar() {
     }).catch(() => {});
   }, []);
 
-  // Poll for SDK sessions on mount
+  // Poll for SDK sessions on mount and when active node changes
   useEffect(() => {
     let active = true;
     let isFirstPoll = true;
     async function poll() {
       try {
-        const [list, ring0Status] = await Promise.all([
-          api.listSessions(),
+        const [list, ring0Status, nodeList] = await Promise.all([
+          api.listSessions(activeNodeId),
           api.getRing0Status().catch(() => ({ enabled: false, eventsMuted: false, sessionId: null })),
+          api.listNodes().catch(() => []),
         ]);
         if (active) {
           setRing0SessionId(ring0Status.sessionId ?? null);
           setRing0EventsMuted(ring0Status.eventsMuted ?? false);
           useStore.getState().setSdkSessions(list);
+          if (nodeList.length > 0) {
+            useStore.getState().setNodes(nodeList);
+          }
           // Hydrate session names from server (server is source of truth for auto-generated names)
           const store = useStore.getState();
           for (const s of list) {
@@ -144,7 +150,7 @@ export function Sidebar() {
       active = false;
       clearInterval(interval);
     };
-  }, []);
+  }, [activeNodeId]);
 
   function handleSelectSession(sessionId: string) {
     const s = useStore.getState();
@@ -183,6 +189,27 @@ export function Sidebar() {
     useStore.getState().setPendingFocus("home");
     if (window.innerWidth < 768) {
       useStore.getState().setSidebarOpen(false);
+    }
+  }
+
+  async function handleNodeSwitch(nodeId: string) {
+    if (nodeId === activeNodeId) return;
+    // Disconnect all current sessions
+    const s = useStore.getState();
+    if (s.currentSessionId) {
+      const oldSdk = s.sdkSessions.find((x) => x.sessionId === s.currentSessionId);
+      if (oldSdk?.backendType !== "terminal") {
+        disconnectSession(s.currentSessionId);
+      }
+    }
+    s.setCurrentSession(null);
+    s.clearSessionState();
+    s.setActiveNode(nodeId);
+    try {
+      await api.activateNode(nodeId);
+    } catch {
+      // revert on failure
+      s.setActiveNode(activeNodeId);
     }
   }
 
@@ -253,12 +280,12 @@ export function Sidebar() {
     }
     // Refresh session list
     try {
-      const list = await api.listSessions();
+      const list = await api.listSessions(activeNodeId);
       useStore.getState().setSdkSessions(list);
     } catch {
       // best-effort
     }
-  }, [removeSession]);
+  }, [removeSession, activeNodeId]);
 
   const doArchive = useCallback(async (sessionId: string, force?: boolean) => {
     try {
@@ -272,12 +299,12 @@ export function Sidebar() {
       useStore.getState().newSession();
     }
     try {
-      const list = await api.listSessions();
+      const list = await api.listSessions(activeNodeId);
       useStore.getState().setSdkSessions(list);
     } catch {
       // best-effort
     }
-  }, []);
+  }, [activeNodeId]);
 
   const confirmArchive = useCallback(() => {
     if (confirmArchiveId) {
@@ -298,45 +325,41 @@ export function Sidebar() {
       // best-effort
     }
     try {
-      const list = await api.listSessions();
+      const list = await api.listSessions(activeNodeId);
       useStore.getState().setSdkSessions(list);
     } catch {
       // best-effort
     }
-  }, []);
+  }, [activeNodeId]);
 
-  // Combine sessions from WsBridge state + SDK sessions list
-  const allSessionIds = new Set<string>();
-  for (const id of sessions.keys()) allSessionIds.add(id);
-  for (const s of sdkSessions) allSessionIds.add(s.sessionId);
-
-  const allSessionList = Array.from(allSessionIds).map((id) => {
-    const bridgeState = sessions.get(id);
-    const sdkInfo = sdkSessions.find((s) => s.sessionId === id);
+  // Combine sessions: SDK list is source of truth (filtered by active node),
+  // enriched with live bridge state where available
+  const allSessionList = sdkSessions.map((s) => {
+    const bridgeState = sessions.get(s.sessionId);
     return {
-      id,
-      model: bridgeState?.model || sdkInfo?.model || "",
-      cwd: bridgeState?.cwd || sdkInfo?.cwd || "",
+      id: s.sessionId,
+      isRing0: s.isRing0 ?? false,
+      model: bridgeState?.model || s.model || "",
+      cwd: bridgeState?.cwd || s.cwd || "",
       gitBranch: bridgeState?.git_branch || "",
-      isWorktree: bridgeState?.is_worktree || sdkInfo?.isWorktree || false,
+      isWorktree: bridgeState?.is_worktree || s.isWorktree || false,
       gitAhead: bridgeState?.git_ahead || 0,
       gitBehind: bridgeState?.git_behind || 0,
       linesAdded: bridgeState?.total_lines_added || 0,
       linesRemoved: bridgeState?.total_lines_removed || 0,
-      isConnected: cliConnected.get(id) ?? false,
-      status: sessionStatus.get(id) ?? null,
-      sdkState: sdkInfo?.state ?? null,
-      createdAt: sdkInfo?.createdAt ?? 0,
-      lastPromptedAt: sdkInfo?.lastPromptedAt ?? 0,
-      archived: sdkInfo?.archived ?? false,
-      backendType: sdkInfo?.backendType || bridgeState?.backend_type || "claude",
+      isConnected: cliConnected.get(s.sessionId) ?? false,
+      status: sessionStatus.get(s.sessionId) ?? null,
+      sdkState: s.state ?? null,
+      createdAt: s.createdAt ?? 0,
+      lastPromptedAt: s.lastPromptedAt ?? 0,
+      archived: s.archived ?? false,
+      backendType: s.backendType || bridgeState?.backend_type || "claude",
       controlledBy: bridgeState?.controlledBy,
     };
   }).sort((a, b) => {
     // Ring0 always first
-    const ring0Id = ring0SessionId;
-    if (a.id === ring0Id) return -1;
-    if (b.id === ring0Id) return 1;
+    if (a.isRing0) return -1;
+    if (b.isRing0) return 1;
     // MRU order, fallback to createdAt
     const aTime = a.lastPromptedAt || a.createdAt;
     const bTime = b.lastPromptedAt || b.createdAt;
@@ -349,7 +372,8 @@ export function Sidebar() {
   const logoSrc = currentSession?.backendType === "codex" ? "/logo-codex.svg" : "/logo.svg";
 
   function startRename(id: string, currentLabel: string) {
-    if (id === ring0SessionId) return; // Ring0 cannot be renamed
+    const session = allSessionList.find((s) => s.id === id);
+    if (session?.isRing0) return; // Ring0 cannot be renamed
     setEditingSessionId(id);
     setEditingName(currentLabel);
   }
@@ -487,7 +511,7 @@ export function Sidebar() {
                 onAnimationEnd={() => useStore.getState().clearRecentlyRenamed(s.id)}
               >
                 <span className="truncate">{label}</span>
-                {s.id === ring0SessionId && (
+                {s.isRing0 && (
                   <span className="text-[9px] px-1 py-0.5 rounded bg-purple-500/15 text-purple-600 dark:text-purple-400 shrink-0">R0</span>
                 )}
                 {s.backendType === "codex" && (
@@ -496,7 +520,7 @@ export function Sidebar() {
                 {s.backendType === "terminal" && (
                   <span className="text-[9px] px-1 py-0.5 rounded bg-green-500/15 text-green-600 dark:text-green-400 shrink-0">term</span>
                 )}
-                {s.controlledBy === "user" && s.id !== ring0SessionId && (
+                {s.controlledBy === "user" && !s.isRing0 && (
                   <button
                     className="px-1 py-0.5 rounded bg-cc-muted/10 text-cc-muted shrink-0 hover:bg-cc-muted/20 transition-colors cursor-pointer"
                     title="User has the pen — click to release to Ring0"
@@ -648,6 +672,22 @@ export function Sidebar() {
       {/* Session list */}
       <div className="flex-1 overflow-hidden relative">
         <div ref={sidebarListRef} className="h-full overflow-y-auto px-2 pb-14" data-session-list>
+          {/* Node switcher — only shown when remote nodes exist */}
+          {nodes.length > 1 && (
+            <div className="px-3 pt-2 pb-1">
+              <select
+                value={activeNodeId}
+                onChange={(e) => handleNodeSwitch(e.target.value)}
+                className="w-full px-2 py-1.5 text-xs rounded-lg bg-cc-bg border border-cc-border text-cc-fg cursor-pointer focus:outline-none focus:ring-1 focus:ring-cc-primary"
+              >
+                {nodes.map((n) => (
+                  <option key={n.id} value={n.id} disabled={n.status === "offline"}>
+                    {n.name} {n.status === "offline" ? "(offline)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="px-3 pt-1 pb-1.5 text-[10px] uppercase tracking-wider text-cc-muted font-medium">
             Sessions
           </div>

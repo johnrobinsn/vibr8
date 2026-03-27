@@ -53,8 +53,30 @@ def create_routes(
     terminal_manager: TerminalManager | None = None,
     auth_manager: AuthManager | None = None,
     ring0_manager: Ring0Manager | None = None,
+    node_registry: Any | None = None,
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
+
+    async def _forward_to_remote(session_id: str, command_type: str, extra: dict | None = None) -> web.Response | None:
+        """If session_id belongs to a remote node, forward the command via tunnel.
+        Returns a Response if forwarded, or None if the session is local.
+        Strips the node prefix so the remote node receives its raw session ID."""
+        node_id = ws_bridge.get_session_node_id(session_id)
+        if not node_id or not ws_bridge._is_remote_session(session_id):
+            return None
+        if not node_registry:
+            return web.json_response({"error": "Node registry unavailable"}, status=503)
+        node = node_registry.get_node(node_id)
+        if not node or not node.tunnel or not node.tunnel.connected:
+            return web.json_response({"error": "Remote node unavailable"}, status=503)
+        raw_id = ws_bridge._raw_session_id(session_id)
+        cmd: dict[str, Any] = {"type": command_type, "sessionId": raw_id}
+        if extra:
+            cmd.update(extra)
+        result = await node.tunnel.send_command(cmd)
+        if result.get("error"):
+            return web.json_response({"error": result["error"]}, status=500)
+        return web.json_response(result)
 
     # ── Auth ─────────────────────────────────────────────────────────────
 
@@ -126,6 +148,24 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
+
+        # Remote node — forward create request via tunnel
+        target_node = body.get("nodeId", "")
+        if target_node and node_registry:
+            node = node_registry.get_node(target_node)
+            if node and node.tunnel and node.tunnel.connected:
+                result = await node.tunnel.send_command({
+                    "type": "create_session",
+                    "options": {k: v for k, v in body.items() if k != "nodeId"},
+                })
+                if result.get("error"):
+                    return web.json_response({"error": result["error"]}, status=500)
+                # Qualify the returned session ID at the hub boundary
+                raw_sid = result.get("sessionId")
+                if raw_sid:
+                    from server.ws_bridge import WsBridge
+                    result["sessionId"] = WsBridge.qualify_session_id(target_node, raw_sid)
+                return web.json_response(result)
 
         try:
             backend = body.get("backend", "claude")
@@ -229,8 +269,37 @@ def create_routes(
 
     @routes.get("/api/sessions")
     async def list_sessions(request: web.Request) -> web.Response:
+        requested_node = request.rel_url.query.get("nodeId", "")
+
+        # Remote node — fetch sessions via tunnel
+        if requested_node and node_registry:
+            node = node_registry.get_node(requested_node)
+            if node and node.tunnel and node.tunnel.connected:
+                result = await node.tunnel.send_command({"type": "list_sessions"})
+                remote_sessions = result.get("sessions", [])
+                # Qualify session IDs at the hub boundary
+                from server.ws_bridge import WsBridge
+                for s in remote_sessions:
+                    raw_id = s.get("sessionId", "")
+                    if raw_id:
+                        s["sessionId"] = WsBridge.qualify_session_id(requested_node, raw_id)
+                # Sort: Ring0 pinned first, then MRU
+                remote_sessions.sort(
+                    key=lambda s: (
+                        0 if s.get("isRing0") else 1,
+                        -(s.get("lastPromptedAt") or s.get("createdAt") or 0),
+                    )
+                )
+                return web.json_response(remote_sessions)
+            elif node and node.tunnel is None:
+                pass  # Local node — fall through to local handling
+            else:
+                return web.json_response([])  # Offline remote node
+
+        # Local node — existing logic
         sessions = launcher.list_sessions()
         names = session_names.get_all_names()
+        r0_id = ring0_manager.session_id if ring0_manager else None
         enriched = []
         for s in sessions:
             s_dict = s.to_dict() if hasattr(s, "to_dict") else (s if isinstance(s, dict) else s.__dict__)
@@ -240,6 +309,8 @@ def create_routes(
             lpa = ws_bridge.get_last_prompted_at(sid)
             if lpa:
                 s_dict["lastPromptedAt"] = lpa
+            if r0_id and sid == r0_id:
+                s_dict["isRing0"] = True
             enriched.append(s_dict)
         # Include terminal sessions
         if terminal_manager:
@@ -256,7 +327,6 @@ def create_routes(
                         "createdAt": time.time() * 1000,
                     })
         # Sort: Ring0 pinned first, then MRU (fallback to createdAt)
-        r0_id = ring0_manager.session_id if ring0_manager else None
         enriched.sort(
             key=lambda s: (
                 0 if s.get("sessionId") == r0_id else 1,
@@ -283,6 +353,9 @@ def create_routes(
         name = body.get("name", "").strip()
         if not name:
             return web.json_response({"error": "name is required"}, status=400)
+        remote = await _forward_to_remote(sid, "rename_session", {"name": name})
+        if remote:
+            return remote
         if ring0_manager and ring0_manager.session_id == sid:
             return web.json_response({"error": "Ring0 session cannot be renamed"}, status=403)
         session_names.set_name(sid, name, unique=False)
@@ -293,6 +366,9 @@ def create_routes(
     @routes.post("/api/sessions/{id}/kill")
     async def kill_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
+        remote = await _forward_to_remote(sid, "kill_session")
+        if remote:
+            return remote
         killed = await launcher.kill(sid)
         if not killed:
             return web.json_response({"error": "Session not found or already exited"}, status=404)
@@ -301,6 +377,9 @@ def create_routes(
     @routes.post("/api/sessions/{id}/relaunch")
     async def relaunch_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
+        remote = await _forward_to_remote(sid, "relaunch_session")
+        if remote:
+            return remote
         ok = await launcher.relaunch(sid)
         if not ok:
             return web.json_response({"error": "Session not found"}, status=404)
@@ -309,6 +388,10 @@ def create_routes(
     @routes.delete("/api/sessions/{id}")
     async def delete_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
+        remote = await _forward_to_remote(sid, "delete_session")
+        if remote:
+            await ws_bridge.close_session(sid)
+            return remote
         # Close terminal session if it exists
         if terminal_manager:
             terminal_manager.close(sid)
@@ -327,6 +410,9 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
+        remote = await _forward_to_remote(sid, "archive_session", {"force": body.get("force", False)})
+        if remote:
+            return remote
         await launcher.kill(sid)
         if webrtc_manager:
             await webrtc_manager.close_connection(sid)
@@ -338,6 +424,9 @@ def create_routes(
     @routes.post("/api/sessions/{id}/unarchive")
     async def unarchive_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
+        remote = await _forward_to_remote(sid, "unarchive_session")
+        if remote:
+            return remote
         launcher.set_archived(sid, False)
         session_store.set_archived(sid, False)
         return web.json_response({"ok": True})
@@ -827,6 +916,7 @@ def create_routes(
     @routes.get("/api/ring0/sessions")
     async def ring0_sessions(request: web.Request) -> web.Response:
         """List sessions — proxied for Ring0 MCP server (auth-exempt)."""
+        r0_id = ring0_manager.session_id if ring0_manager else None
         sessions = []
         for sid in launcher.get_all_session_ids():
             info = launcher.get_session(sid)
@@ -834,7 +924,7 @@ def create_routes(
                 continue
             name = session_names.get_name(sid) or info.name or "unnamed"
             bridge_session = ws_bridge._sessions.get(sid)
-            sessions.append({
+            entry = {
                 "sessionId": sid,
                 "name": name,
                 "state": info.state,
@@ -843,7 +933,10 @@ def create_routes(
                 "archived": info.archived,
                 "pendingPermissions": ws_bridge.get_pending_permission_count(sid),
                 "controlledBy": bridge_session.controlled_by if bridge_session else "ring0",
-            })
+            }
+            if r0_id and sid == r0_id:
+                entry["isRing0"] = True
+            sessions.append(entry)
         return web.json_response(sessions)
 
     @routes.get("/api/ring0/status")
@@ -1485,6 +1578,116 @@ def create_routes(
 
         logger.info(f"[second-screen] {'Enabled' if enabled else 'Disabled'} {client_id[:8]}")
         return web.json_response({"ok": True, "enabled": bool(enabled)})
+
+    # ── Nodes ─────────────────────────────────────────────────────────────
+
+    @routes.post("/api/nodes/register")
+    async def register_node(request: web.Request) -> web.Response:
+        """Register a remote node (API-key auth, not cookie auth)."""
+        if node_registry is None:
+            return web.json_response({"error": "Node registry not available"}, status=503)
+        body = await request.json()
+        name = body.get("name", "").strip()
+        api_key = body.get("apiKey", "")
+        capabilities = body.get("capabilities", {})
+        if not name or not api_key:
+            return web.json_response({"error": "name and apiKey required"}, status=400)
+        try:
+            node = node_registry.register(name, api_key, capabilities)
+        except PermissionError as e:
+            return web.json_response({"error": str(e)}, status=403)
+        return web.json_response({"ok": True, "nodeId": node.id})
+
+    @routes.get("/api/nodes")
+    async def list_nodes(request: web.Request) -> web.Response:
+        """List all registered nodes (including the local node)."""
+        if node_registry is None:
+            import platform as _platform
+            hub_name = _platform.node() or "Local"
+            return web.json_response([{"id": "local", "name": hub_name, "status": "online", "platform": "", "hostname": "", "sessionCount": len(launcher.list_sessions()), "ring0Enabled": ring0_manager.is_enabled if ring0_manager else False}])
+        # Update local node's dynamic fields before serializing
+        local = node_registry.local_node
+        local.session_ids = [s.sessionId for s in launcher.list_sessions()]
+        local.ring0_enabled = ring0_manager.is_enabled if ring0_manager else False
+        nodes = [n.to_api_dict() for n in node_registry.get_all_nodes()]
+        return web.json_response(nodes)
+
+    @routes.delete("/api/nodes/{node_id}")
+    async def delete_node(request: web.Request) -> web.Response:
+        """Remove a registered node."""
+        if node_registry is None:
+            return web.json_response({"error": "Node registry not available"}, status=503)
+        node_id = request.match_info["node_id"]
+        removed = node_registry.unregister(node_id)
+        if not removed:
+            return web.json_response({"error": "Node not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    @routes.post("/api/nodes/{node_id}/activate")
+    async def activate_node(request: web.Request) -> web.Response:
+        """Switch the active node."""
+        if node_registry is None:
+            return web.json_response({"error": "Node registry not available"}, status=503)
+        node_id = request.match_info["node_id"]
+        try:
+            node_registry.active_node_id = node_id
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=404)
+        node = node_registry.get_node(node_id)
+        name = node.name if node else node_id
+        logger.info("[nodes] Active node switched to %r (%s)", name, node_id[:8])
+        return web.json_response({"ok": True, "nodeId": node_id, "name": name})
+
+    @routes.get("/api/nodes/active")
+    async def get_active_node(request: web.Request) -> web.Response:
+        """Get the currently active node."""
+        if node_registry is None:
+            return web.json_response({"nodeId": "local", "name": "Local", "status": "online"})
+        node_id = node_registry.active_node_id
+        node = node_registry.get_node(node_id)
+        if not node:
+            node = node_registry.local_node
+        return web.json_response({"nodeId": node.id, "name": node.name, "status": node.status})
+
+    @routes.post("/api/nodes/hub-name")
+    async def set_hub_name(request: web.Request) -> web.Response:
+        """Rename the hub node."""
+        if node_registry is None:
+            return web.json_response({"error": "Node registry not available"}, status=503)
+        body = await request.json()
+        name = body.get("name", "").strip()
+        if not name:
+            return web.json_response({"error": "name required"}, status=400)
+        node_registry.hub_name = name
+        return web.json_response({"ok": True, "name": node_registry.hub_name})
+
+    @routes.post("/api/nodes/generate-key")
+    async def generate_node_key(request: web.Request) -> web.Response:
+        """Generate a new API key for node registration."""
+        if node_registry is None:
+            return web.json_response({"error": "Node registry not available"}, status=503)
+        body = await request.json() if request.content_length else {}
+        name = body.get("name", "")
+        raw_key, entry = node_registry.generate_api_key(name)
+        return web.json_response({"apiKey": raw_key, **entry.to_api_dict()})
+
+    @routes.get("/api/nodes/keys")
+    async def list_node_keys(request: web.Request) -> web.Response:
+        """List all issued API keys (no raw keys)."""
+        if node_registry is None:
+            return web.json_response({"error": "Node registry not available"}, status=503)
+        keys = node_registry.list_api_keys()
+        return web.json_response([k.to_api_dict() for k in keys])
+
+    @routes.delete("/api/nodes/keys/{key_id}")
+    async def revoke_node_key(request: web.Request) -> web.Response:
+        """Revoke an API key."""
+        if node_registry is None:
+            return web.json_response({"error": "Node registry not available"}, status=503)
+        key_id = request.match_info["key_id"]
+        if node_registry.revoke_api_key(key_id):
+            return web.json_response({"ok": True})
+        return web.json_response({"error": "Key not found"}, status=404)
 
     return routes
 

@@ -71,6 +71,7 @@ class Session:
     _dedup_msg_ids: set[str] = field(default_factory=set)
     _dedup_result_keys: set[str] = field(default_factory=set)
     _awaiting_replay: bool = False
+    _replay_archived: bool = False
     # "Take the Pen" — per-session ownership control
     controlled_by: str = "ring0"  # "ring0" | "user"
     pen_taken_at: float = 0  # time.time() when user took pen
@@ -86,6 +87,11 @@ class WsBridge:
         self._store: SessionStore | None = None
         self._webrtc_manager: WebRTCManager | None = None
         self._ring0_manager: Any = None  # Ring0Manager (avoid circular import)
+        self._node_registry: Any = None  # NodeRegistry (set via setter)
+        # _session_node_map removed: node identity is embedded in qualified session IDs
+        # Format: "{node_id}:{raw_session_id}" for remote, raw id for local
+        # Hook for vibr8-node: intercepts _broadcast_to_browsers for remote forwarding
+        self._broadcast_hook: Callable[..., Awaitable[None]] | None = None
         self._active_tts: dict[str, Any] = {}  # session_id → TTS_OpenAI instance
         self._thinking_timers: dict[str, asyncio.TimerHandle] = {}
         self._on_cli_session_id: Callable[[str, str], None] | None = None
@@ -264,6 +270,103 @@ class WsBridge:
 
     def set_ring0_event_router(self, router: Any) -> None:
         self._ring0_event_router = router
+
+    def set_node_registry(self, registry: Any) -> None:
+        self._node_registry = registry
+
+    # ── Remote node session management ────────────────────────────────────
+    # Node identity is embedded in the session ID: "{node_id}:{raw_id}" for remote.
+
+    @staticmethod
+    def qualify_session_id(node_id: str, raw_id: str) -> str:
+        """Prefix a raw session ID with the node identity."""
+        return f"{node_id}:{raw_id}"
+
+    @staticmethod
+    def parse_qualified_id(qid: str) -> tuple[str, str]:
+        """(node_id, raw_id) — for local sessions, node_id is ''."""
+        return tuple(qid.split(":", 1)) if ":" in qid else ("", qid)  # type: ignore[return-value]
+
+    def _is_remote_session(self, session_id: str) -> bool:
+        """Check if a session belongs to a remote node."""
+        return ":" in session_id
+
+    def get_session_node_id(self, session_id: str) -> str:
+        """Return the node_id for a session ('local' for hub sessions)."""
+        node_id, _ = self.parse_qualified_id(session_id)
+        return node_id or "local"
+
+    def _raw_session_id(self, qid: str) -> str:
+        """Strip node prefix to get the raw ID the node uses internally."""
+        return qid.split(":", 1)[-1]
+
+    def update_remote_sessions(
+        self, node_id: str, sessions: list[dict[str, Any]]
+    ) -> None:
+        """Clean up stale proxy sessions when a node reports its session list.
+        Session IDs in the list are already qualified by the caller (main.py)."""
+        prefix = f"{node_id}:"
+        current_ids = {
+            s.get("sessionId", s.get("id", ""))
+            for s in sessions
+        }
+        # Remove proxy sessions that no longer exist on the node
+        stale = [sid for sid in self._sessions if sid.startswith(prefix) and sid not in current_ids]
+        for sid in stale:
+            self._sessions.pop(sid, None)
+
+    async def handle_remote_session_message(
+        self, session_id: str, message: dict[str, Any]
+    ) -> None:
+        """Forward a message from a remote node's CLI to connected browsers.
+
+        Also triggers TTS for assistant messages from remote Ring0 sessions,
+        since audio is always processed centrally on the hub.
+        """
+        session = self._sessions.get(session_id)
+        if not session:
+            # Create a lightweight proxy session so messages are buffered
+            session = self.get_or_create_session(session_id)
+
+        # Buffer messages so reconnecting browsers get history
+        msg_type = message.get("type", "")
+        if msg_type in ("assistant", "result", "user_message"):
+            session.message_history.append(message)
+
+        # Track permission requests so browsers connecting later get them
+        if msg_type == "permission_request":
+            req = message.get("request", {})
+            req_id = req.get("request_id", "")
+            if req_id:
+                session.pending_permissions[req_id] = req
+        elif msg_type == "permission_response":
+            req_id = message.get("request_id", "")
+            session.pending_permissions.pop(req_id, None)
+
+        # Track session state updates from remote node
+        if msg_type == "session_update":
+            remote_state = message.get("session", {})
+            if remote_state:
+                session.state.update(remote_state)
+
+        # TTS for remote Ring0 assistant responses
+        if msg_type == "assistant" and self._webrtc_manager:
+            text = message.get("message")
+            if text:
+                track = self._webrtc_manager.get_any_outgoing_track()
+                if track:
+                    audio_session_id, audio_track = track
+                    if not self._webrtc_manager.is_tts_muted(audio_session_id):
+                        asyncio.ensure_future(self._speak_text(session_id, text, audio_track))
+
+        await self._broadcast_to_browsers(session, message)
+
+    def remove_remote_node_sessions(self, node_id: str) -> None:
+        """Clean up all proxy sessions when a node goes offline."""
+        prefix = f"{node_id}:"
+        to_remove = [sid for sid in self._sessions if sid.startswith(prefix)]
+        for sid in to_remove:
+            self._sessions.pop(sid, None)
 
     def cancel_tts(self, session_id: str) -> None:
         """Cancel any in-progress TTS for *session_id* (called on barge-in)."""
@@ -481,6 +584,19 @@ class WsBridge:
                 session, {"type": "voice_mode", "mode": mode}
             )
 
+    async def broadcast_node_switch(self, node_id: str, node_name: str | None = None) -> None:
+        """Broadcast node_switch to all connected browsers (e.g. from voice command)."""
+        msg: dict[str, Any] = {"type": "node_switch", "nodeId": node_id}
+        if node_name:
+            msg["nodeName"] = node_name
+        data = json.dumps(msg)
+        for session in self._sessions.values():
+            for ws in list(session.browser_sockets):
+                try:
+                    await ws.send_str(data)
+                except Exception:
+                    pass
+
     def get_all_sessions(self) -> list[dict[str, Any]]:
         return [s.state for s in self._sessions.values()]
 
@@ -624,6 +740,7 @@ class WsBridge:
         session = self.get_or_create_session(session_id)
         session.cli_socket = ws
         session._awaiting_replay = True
+        session._replay_archived = False
         logger.info(f"[ws-bridge] CLI connected for session {session_id} (awaiting replay)")
         import asyncio
         asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
@@ -724,6 +841,23 @@ class WsBridge:
         # Send current session state
         await self._send_to_browser(ws, {"type": "session_init", "session": session.state})
 
+        # For remote sessions with no buffered history, fetch from the node
+        if not session.message_history and self._is_remote_session(session_id):
+            node_id, raw_id = self.parse_qualified_id(session_id)
+            node = self._node_registry.get_node(node_id) if self._node_registry and node_id else None
+            if node and node.tunnel and node.tunnel.connected:
+                try:
+                    resp = await node.tunnel.send_command({
+                        "type": "get_session_output",
+                        "sessionId": raw_id,
+                    })
+                    remote_messages = resp.get("messages", [])
+                    if remote_messages:
+                        session.message_history = remote_messages
+                        logger.info("[ws-bridge] Fetched %d messages from remote node for session %s", len(remote_messages), session_id[:8])
+                except Exception:
+                    logger.warning("[ws-bridge] Failed to fetch remote history for session %s", session_id[:8])
+
         if session.message_history:
             history = session.message_history
             msg: dict[str, Any] = {"type": "message_history", "messages": history}
@@ -737,14 +871,20 @@ class WsBridge:
             await self._send_to_browser(ws, {"type": "permission_request", "request": perm})
 
         # Check backend connectivity
-        backend_connected = (
-            (session.codex_adapter and session.codex_adapter.is_connected())
-            if session.backend_type == "codex"
-            else session.cli_socket is not None
-        )
+        if self._is_remote_session(session_id):
+            # Remote sessions: check if the node tunnel is connected
+            node_id, _ = self.parse_qualified_id(session_id)
+            node = self._node_registry.get_node(node_id) if self._node_registry and node_id else None
+            backend_connected = bool(node and node.tunnel and node.tunnel.connected)
+        else:
+            backend_connected = (
+                (session.codex_adapter and session.codex_adapter.is_connected())
+                if session.backend_type == "codex"
+                else session.cli_socket is not None
+            )
         if not backend_connected:
             await self._send_to_browser(ws, {"type": "cli_disconnected"})
-            if self._on_cli_relaunch_needed:
+            if not self._is_remote_session(session_id) and self._on_cli_relaunch_needed:
                 logger.info(f"[ws-bridge] Browser connected but backend is dead for session {session_id}, requesting relaunch")
                 self._on_cli_relaunch_needed(session_id)
 
@@ -922,20 +1062,27 @@ class WsBridge:
         # Dedup by Anthropic message ID — skip replayed messages we already have
         msg_content = msg.get("message")
         msg_id = msg_content.get("id") if isinstance(msg_content, dict) else None
+        is_update = False
         if msg_id:
             if msg_id in session._dedup_msg_ids:
                 session._last_assistant_msg_id = msg_id  # Track for result dedup even on skip
-                # First dedup hit after CLI connect = start of CLI's replayed history.
-                # Archive everything in our history before this message.
                 if session._awaiting_replay:
-                    session._awaiting_replay = False
-                    idx = next((i for i, e in enumerate(session.message_history)
-                                if e.get("msg_id") == msg_id), None)
-                    if idx is not None and idx > 0:
-                        self._archive_and_trim_before(session, idx)
-                return
+                    # Still replaying — archive on first hit, drop all replayed messages.
+                    # _awaiting_replay stays True until a NEW msg_id arrives.
+                    if not session._replay_archived:
+                        session._replay_archived = True
+                        idx = next((i for i, e in enumerate(session.message_history)
+                                    if e.get("msg_id") == msg_id), None)
+                        if idx is not None and idx > 0:
+                            self._archive_and_trim_before(session, idx)
+                    return
+                # Not replay — this is a streaming update (same msg_id with
+                # new content blocks, e.g. thinking → text).  Let it through
+                # so the browser gets the updated content.
+                is_update = True
+            else:
+                session._dedup_msg_ids.add(msg_id)
             session._last_assistant_msg_id = msg_id
-            session._dedup_msg_ids.add(msg_id)
 
         # If we get a NEW message while awaiting replay, no replay happened (fresh session)
         if session._awaiting_replay:
@@ -989,7 +1136,16 @@ class WsBridge:
                 tool_uses = [b.get("name") for b in content_blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
                 if tool_uses:
                     logger.info("[ws-bridge] Assistant has tool_use blocks: %s session=%s", tool_uses, session.id[:8])
-        session.message_history.append(browser_msg)
+        if is_update and msg_id:
+            # Replace existing history entry with updated content
+            for i in range(len(session.message_history) - 1, -1, -1):
+                if session.message_history[i].get("msg_id") == msg_id:
+                    session.message_history[i] = browser_msg
+                    break
+            else:
+                session.message_history.append(browser_msg)
+        else:
+            session.message_history.append(browser_msg)
         logger.info("[ws-bridge] Broadcasting assistant to %d browsers for session %s", len(session.browser_sockets), session.id[:8])
         await self._broadcast_to_browsers(session, browser_msg)
         self._persist_session(session)
@@ -1224,6 +1380,23 @@ class WsBridge:
     # ── Browser message routing ──────────────────────────────────────────
 
     async def _route_browser_message(self, session: Session, msg: dict[str, Any], ws: web.WebSocketResponse | None = None) -> None:
+        # Remote session — forward to node via tunnel
+        if self._is_remote_session(session.id):
+            node_id, raw_id = self.parse_qualified_id(session.id)
+            if self._node_registry:
+                node = self._node_registry.get_node(node_id)
+                if node and node.tunnel and node.tunnel.connected:
+                    source_client_id = session.browser_sockets.get(ws, "") if ws else ""
+                    await node.tunnel.send_fire_and_forget({
+                        "type": "browser_message",
+                        "sessionId": raw_id,
+                        "message": msg,
+                        "sourceClientId": source_client_id,
+                    })
+                    return
+            logger.warning("[ws-bridge] Cannot route to remote node %s", node_id[:8])
+            return
+
         # For Codex sessions, delegate to the adapter
         if session.backend_type == "codex":
             if msg.get("type") == "user_message":
@@ -1397,6 +1570,20 @@ class WsBridge:
 
         Returns True if the session was found and interrupt sent.
         """
+        # Remote session — forward interrupt through tunnel
+        if self._is_remote_session(session_id):
+            node_id, raw_id = self.parse_qualified_id(session_id)
+            if self._node_registry:
+                node = self._node_registry.get_node(node_id)
+                if node and node.tunnel and node.tunnel.connected:
+                    import asyncio as _asyncio
+                    _asyncio.ensure_future(node.tunnel.send_fire_and_forget({
+                        "type": "interrupt",
+                        "sessionId": raw_id,
+                    }))
+                    return True
+            return False
+
         session = self._sessions.get(session_id)
         if not session:
             return False
@@ -1431,6 +1618,21 @@ class WsBridge:
 
         Returns None on success, or an error string if blocked.
         """
+        # Remote session — forward through node tunnel
+        if self._is_remote_session(session_id):
+            node_id, raw_id = self.parse_qualified_id(session_id)
+            if self._node_registry:
+                node = self._node_registry.get_node(node_id)
+                if node and node.tunnel and node.tunnel.connected:
+                    await node.tunnel.send_fire_and_forget({
+                        "type": "submit_message",
+                        "sessionId": raw_id,
+                        "content": text,
+                        "sourceClientId": source_client_id,
+                    })
+                    return None
+            return "Remote node unavailable"
+
         session = self._sessions.get(session_id)
         if not session:
             logger.warning("[ws-bridge] Cannot submit message: no session %s", session_id)
@@ -1532,6 +1734,9 @@ class WsBridge:
             return
         # Don't notify Ring0 about its own session
         if session.id == ring0.session_id:
+            return
+        # Don't notify hub Ring0 about remote node sessions (they handle their own)
+        if self._is_remote_session(session.id):
             return
         # Suppress notifications while user has the pen
         if session.controlled_by == "user":
@@ -1684,6 +1889,23 @@ class WsBridge:
     # ── Transport helpers ────────────────────────────────────────────────
 
     def _send_to_cli(self, session: Session, ndjson: str) -> None:
+        # Remote session — forward through node tunnel
+        if self._is_remote_session(session.id):
+            node_id, raw_id = self.parse_qualified_id(session.id)
+            if self._node_registry:
+                node = self._node_registry.get_node(node_id)
+                if node and node.tunnel and node.tunnel.connected:
+                    msg = json.loads(ndjson)
+                    import asyncio as _asyncio
+                    _asyncio.ensure_future(node.tunnel.send_fire_and_forget({
+                        "type": "cli_input",
+                        "sessionId": raw_id,
+                        "message": msg,
+                    }))
+                    return
+            logger.warning("[ws-bridge] Cannot forward to remote node %s — tunnel unavailable", node_id[:8])
+            return
+
         if not session.cli_socket:
             logger.info(f"[ws-bridge] CLI not yet connected for session {session.id}, queuing message")
             session.pending_messages.append(ndjson)
@@ -1841,6 +2063,11 @@ class WsBridge:
         return True
 
     async def _broadcast_to_browsers(self, session: Session, msg: dict[str, Any]) -> None:
+        # On vibr8-node: forward to hub tunnel instead of local browsers
+        if self._broadcast_hook:
+            await self._broadcast_hook(session.id, msg)
+            return
+
         msg_type = msg.get("type")
         if msg_type in ("assistant", "result", "user_message"):
             logger.info(
