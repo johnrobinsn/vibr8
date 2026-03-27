@@ -397,8 +397,6 @@ def create_routes(
         if terminal_manager:
             terminal_manager.close(sid)
         await launcher.kill(sid)
-        if webrtc_manager:
-            await webrtc_manager.close_connection(sid)
         worktree_result = _cleanup_worktree(sid, worktree_tracker, force=True)
         launcher.remove_session(sid)
         await ws_bridge.close_session(sid)
@@ -415,8 +413,6 @@ def create_routes(
         if remote:
             return remote
         await launcher.kill(sid)
-        if webrtc_manager:
-            await webrtc_manager.close_connection(sid)
         worktree_result = _cleanup_worktree(sid, worktree_tracker, force=body.get("force"))
         launcher.set_archived(sid, True)
         session_store.set_archived(sid, True)
@@ -812,38 +808,82 @@ def create_routes(
 
     # ── WebRTC ────────────────────────────────────────────────────────────
 
-    @routes.get("/api/sessions/{id}/guard")
-    async def get_guard(request: web.Request) -> web.Response:
+    # ── Client-scoped audio control ──────────────────────────────────
+
+    @routes.get("/api/clients/{clientId}/guard")
+    async def get_guard_by_client(request: web.Request) -> web.Response:
         if webrtc_manager is None:
             return web.json_response({"error": "WebRTC not available"}, status=501)
-        sid = request.match_info["id"]
-        enabled = webrtc_manager.is_guard_enabled(sid)
+        client_id = request.match_info["clientId"]
+        enabled = webrtc_manager.is_guard_enabled(client_id)
         return web.json_response({"enabled": enabled})
 
-    @routes.post("/api/sessions/{id}/guard")
-    async def set_guard(request: web.Request) -> web.Response:
+    @routes.post("/api/clients/{clientId}/guard")
+    async def set_guard_by_client(request: web.Request) -> web.Response:
         if webrtc_manager is None:
             return web.json_response({"error": "WebRTC not available"}, status=501)
-        sid = request.match_info["id"]
+        client_id = request.match_info["clientId"]
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
         enabled = bool(body.get("enabled", False))
-        webrtc_manager.set_guard_enabled(sid, enabled)
+        webrtc_manager.set_guard_enabled(client_id, enabled)
         return web.json_response({"ok": True, "enabled": enabled})
 
-    @routes.post("/api/sessions/{id}/tts-mute")
-    async def set_tts_muted(request: web.Request) -> web.Response:
+    @routes.post("/api/clients/{clientId}/tts-mute")
+    async def set_tts_muted_by_client(request: web.Request) -> web.Response:
         if webrtc_manager is None:
             return web.json_response({"error": "WebRTC not available"}, status=501)
-        sid = request.match_info["id"]
+        client_id = request.match_info["clientId"]
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
         muted = bool(body.get("muted", False))
-        webrtc_manager.set_tts_muted(sid, muted)
+        webrtc_manager.set_tts_muted(client_id, muted)
+        return web.json_response({"ok": True, "muted": muted})
+
+    # ── Session-scoped guard/tts-mute (backward compat wrappers) ──
+
+    @routes.get("/api/sessions/{id}/guard")
+    async def get_guard(request: web.Request) -> web.Response:
+        """Backward-compat wrapper — looks up client_id from active connection."""
+        if webrtc_manager is None:
+            return web.json_response({"error": "WebRTC not available"}, status=501)
+        pair = webrtc_manager.get_any_outgoing_track()
+        client_id = pair[0] if pair else ""
+        enabled = webrtc_manager.is_guard_enabled(client_id)
+        return web.json_response({"enabled": enabled})
+
+    @routes.post("/api/sessions/{id}/guard")
+    async def set_guard(request: web.Request) -> web.Response:
+        """Backward-compat wrapper — looks up client_id from active connection."""
+        if webrtc_manager is None:
+            return web.json_response({"error": "WebRTC not available"}, status=501)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        enabled = bool(body.get("enabled", False))
+        pair = webrtc_manager.get_any_outgoing_track()
+        client_id = pair[0] if pair else ""
+        webrtc_manager.set_guard_enabled(client_id, enabled)
+        return web.json_response({"ok": True, "enabled": enabled})
+
+    @routes.post("/api/sessions/{id}/tts-mute")
+    async def set_tts_muted(request: web.Request) -> web.Response:
+        """Backward-compat wrapper — looks up client_id from active connection."""
+        if webrtc_manager is None:
+            return web.json_response({"error": "WebRTC not available"}, status=501)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        muted = bool(body.get("muted", False))
+        pair = webrtc_manager.get_any_outgoing_track()
+        client_id = pair[0] if pair else ""
+        webrtc_manager.set_tts_muted(client_id, muted)
         return web.json_response({"ok": True, "muted": muted})
 
     @routes.post("/api/sessions/{id}/pen")
@@ -886,23 +926,23 @@ def create_routes(
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
 
-        session_id = body.get("sessionId")
+        client_id = body.get("clientId", "")
         sdp = body.get("sdp")
         sdp_type = body.get("type", "offer")
-        client_id = body.get("clientId", "")
+        session_id = body.get("sessionId", "")
         playground = bool(body.get("playground", False))
         profile_id = body.get("profileId")
         username = _get_username(request)
 
-        if not session_id or not sdp:
+        if not client_id or not sdp:
             return web.json_response(
-                {"error": "sessionId and sdp required"}, status=400
+                {"error": "clientId and sdp required"}, status=400
             )
 
         try:
             answer = await webrtc_manager.handle_offer(
-                session_id, sdp, sdp_type,
-                client_id=client_id,
+                client_id, sdp, sdp_type,
+                session_id=session_id,
                 playground=playground,
                 profile_id=profile_id,
                 username=username,
@@ -1232,22 +1272,24 @@ def create_routes(
 
     @routes.post("/api/ring0/set-guard")
     async def ring0_set_guard(request: web.Request) -> web.Response:
-        """Toggle guard mode for a session (used by Ring0 MCP, auth-exempt)."""
+        """Toggle guard mode (used by Ring0 MCP, auth-exempt).
+
+        Uses the active WebRTC client.  Accepts optional ``clientId``
+        in the body; falls back to whatever connection is active.
+        """
         if webrtc_manager is None:
             return web.json_response({"error": "WebRTC not available"}, status=501)
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
-        session_id = body.get("sessionId", "")
-        if not session_id:
-            return web.json_response({"error": "sessionId required"}, status=400)
-        resolved = _resolve_session_id(session_id, launcher)
-        if not resolved:
-            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         enabled = bool(body.get("enabled", False))
-        webrtc_manager.set_guard_enabled(resolved, enabled)
-        return web.json_response({"ok": True, "sessionId": resolved, "enabled": enabled})
+        client_id = body.get("clientId", "")
+        if not client_id:
+            pair = webrtc_manager.get_any_outgoing_track()
+            client_id = pair[0] if pair else ""
+        webrtc_manager.set_guard_enabled(client_id, enabled)
+        return web.json_response({"ok": True, "clientId": client_id, "enabled": enabled})
 
     # ── Voice Profiles ──────────────────────────────────────────────────
 

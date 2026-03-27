@@ -253,7 +253,7 @@ export function Sidebar() {
   const handleDeleteSession = useCallback(async (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
     try {
-      stopWebRTC(sessionId);
+      stopWebRTC();
       disconnectSession(sessionId);
       await api.deleteSession(sessionId);
     } catch {
@@ -298,7 +298,7 @@ export function Sidebar() {
 
   const doArchive = useCallback(async (sessionId: string, force?: boolean) => {
     try {
-      stopWebRTC(sessionId);
+      stopWebRTC();
       disconnectSession(sessionId);
       await api.archiveSession(sessionId, force ? { force: true } : undefined);
     } catch {

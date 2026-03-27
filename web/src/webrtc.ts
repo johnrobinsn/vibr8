@@ -11,17 +11,20 @@ export interface WebRTCSession {
 const _w = window as unknown as Record<string, unknown>;
 const rtcSessions = (_w.__v8_rtcSessions ??= new Map<string, WebRTCSession>()) as Map<string, WebRTCSession>;
 
-export async function startWebRTC(sessionId: string): Promise<void> {
-  if (rtcSessions.has(sessionId)) return;
+export async function startWebRTC(): Promise<void> {
+  const store0 = useStore.getState();
+  const clientId = store0.clientId;
+
+  if (rtcSessions.has(clientId)) return;
 
   // Only one WebRTC session at a time — close any existing one first.
   for (const [existingId] of rtcSessions) {
-    stopWebRTC(existingId);
+    stopWebRTC();
+    break;
   }
 
   // Show blinking "connecting" state immediately
-  const store0 = useStore.getState();
-  store0.setAudioSessionId(sessionId);
+  store0.setAudioActive(true);
   store0.setAudioMode("connecting");
 
   // Get mic permission — restore saved device preference if available
@@ -79,9 +82,9 @@ export async function startWebRTC(sessionId: string): Promise<void> {
       store.setIsRecording(true);
       // Restore persisted guard state (defaults to true for fresh sessions)
       const guard = store.guardEnabled;
-      api.setGuard(sessionId, guard).catch(() => {});
+      api.setGuardByClient(clientId, guard).catch(() => {});
     } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-      stopWebRTC(sessionId);
+      stopWebRTC();
     }
   };
 
@@ -104,11 +107,10 @@ export async function startWebRTC(sessionId: string): Promise<void> {
     });
   }
 
-  // Exchange SDP with the backend (now includes all candidates)
+  // Exchange SDP with the backend — clientId is the primary key
   const answer = await api.webrtcOffer(
-    sessionId,
+    clientId,
     { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
-    useStore.getState().clientId,
   );
 
   // Set the remote answer
@@ -119,8 +121,8 @@ export async function startWebRTC(sessionId: string): Promise<void> {
     }),
   );
 
-  // Store the session
-  rtcSessions.set(sessionId, { pc, localStream, remoteAudio });
+  // Store the session keyed by clientId
+  rtcSessions.set(clientId, { pc, localStream, remoteAudio });
 
   // Detect active audio input device
   queryActiveInputDevice();
@@ -152,27 +154,31 @@ async function detectTransportType(
   }
 }
 
-export function toggleGuard(sessionId: string): void {
-  const current = useStore.getState().guardEnabled;
-  useStore.getState().setGuardEnabled(!current);
-  api.setGuard(sessionId, !current).catch(() => {});
+export function toggleGuard(): void {
+  const store = useStore.getState();
+  const current = store.guardEnabled;
+  store.setGuardEnabled(!current);
+  api.setGuardByClient(store.clientId, !current).catch(() => {});
 }
 
-export function setAudioInOnly(sessionId: string): void {
-  api.setTtsMuted(sessionId, true).catch(() => {});
-  useStore.getState().setAudioMode("in_only");
+export function setAudioInOnly(): void {
+  const store = useStore.getState();
+  api.setTtsMutedByClient(store.clientId, true).catch(() => {});
+  store.setAudioMode("in_only");
 }
 
-export function setAudioInOut(sessionId: string): void {
-  api.setTtsMuted(sessionId, false).catch(() => {});
-  useStore.getState().setAudioMode("in_out");
+export function setAudioInOut(): void {
+  const store = useStore.getState();
+  api.setTtsMutedByClient(store.clientId, false).catch(() => {});
+  store.setAudioMode("in_out");
 }
 
-export function stopWebRTC(sessionId: string): void {
-  const session = rtcSessions.get(sessionId);
+export function stopWebRTC(): void {
+  const clientId = useStore.getState().clientId;
+  const session = rtcSessions.get(clientId);
   if (!session) return;
 
-  rtcSessions.delete(sessionId);
+  rtcSessions.delete(clientId);
 
   // Stop all local media tracks
   for (const track of session.localStream.getTracks()) {
@@ -187,7 +193,7 @@ export function stopWebRTC(sessionId: string): void {
 
   // Update store
   const store = useStore.getState();
-  store.setAudioSessionId(null);
+  store.setAudioActive(false);
   store.setAudioMode("off");
   store.setIsRecording(false);
   store.setWebRTCStatus(null);
@@ -196,8 +202,9 @@ export function stopWebRTC(sessionId: string): void {
   store.setActiveAudioInputLabel(null);
 }
 
-export function isWebRTCActive(sessionId: string): boolean {
-  return rtcSessions.has(sessionId);
+export function isWebRTCActive(): boolean {
+  const clientId = useStore.getState().clientId;
+  return rtcSessions.has(clientId);
 }
 
 /** Return the active remote audio element (for setSinkId, etc.), or null. */
@@ -331,7 +338,7 @@ interface PlaygroundSession {
   pc: RTCPeerConnection;
   localStream: MediaStream;
   ws: WebSocket;
-  sessionId: string;
+  clientId: string;
 }
 
 const _pw = window as unknown as Record<string, unknown>;
@@ -344,10 +351,10 @@ export async function startPlaygroundWebRTC(profileId?: string): Promise<string>
 
   const store = useStore.getState();
   const clientId = store.clientId;
-  const sessionId = `playground-${clientId}`;
+  const playgroundClientId = `playground-${clientId}`;
 
   store.setPlaygroundActive(true);
-  store.setPlaygroundSessionId(sessionId);
+  store.setPlaygroundSessionId(playgroundClientId);
   store.clearPlaygroundSegments();
 
   const localStream = await navigator.mediaDevices.getUserMedia({
@@ -396,7 +403,7 @@ export async function startPlaygroundWebRTC(profileId?: string): Promise<string>
   };
 
   ws.onclose = () => {
-    if (playgroundSession?.sessionId === sessionId) {
+    if (playgroundSession?.clientId === playgroundClientId) {
       stopPlaygroundWebRTC();
     }
   };
@@ -425,9 +432,8 @@ export async function startPlaygroundWebRTC(profileId?: string): Promise<string>
   }
 
   const answer = await api.webrtcOffer(
-    sessionId,
+    playgroundClientId,
     { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
-    clientId,
     { playground: true, profileId },
   );
 
@@ -435,7 +441,7 @@ export async function startPlaygroundWebRTC(profileId?: string): Promise<string>
     new RTCSessionDescription({ sdp: answer.sdp, type: answer.type as RTCSdpType }),
   );
 
-  playgroundSession = { pc, localStream, ws, sessionId };
+  playgroundSession = { pc, localStream, ws, clientId: playgroundClientId };
   (_pw.__v8_playground as unknown) = playgroundSession;
 
   // Mute main session(s) so playground testing doesn't reach the agent
@@ -445,14 +451,13 @@ export async function startPlaygroundWebRTC(profileId?: string): Promise<string>
     }
   }
 
-  return sessionId;
+  return playgroundClientId;
 }
 
 export function sendPlaygroundParams(params: Record<string, number | string>) {
   if (!playgroundSession) return;
   const msg = JSON.stringify({
     type: "update_params",
-    sessionId: playgroundSession.sessionId,
     ...params,
   });
   if (playgroundSession.ws.readyState === WebSocket.OPEN) {

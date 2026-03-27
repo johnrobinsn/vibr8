@@ -349,17 +349,17 @@ export const api = {
   // Usage limits
   getUsageLimits: () => get<UsageLimits>("/usage-limits"),
 
-  // Guard mode
-  setGuard: (sessionId: string, enabled: boolean) =>
+  // Guard mode (client-scoped)
+  setGuardByClient: (clientId: string, enabled: boolean) =>
     post<{ ok: boolean; enabled: boolean }>(
-      `/sessions/${encodeURIComponent(sessionId)}/guard`,
+      `/clients/${encodeURIComponent(clientId)}/guard`,
       { enabled },
     ),
 
-  // TTS mute (audio in-only mode)
-  setTtsMuted: (sessionId: string, muted: boolean) =>
+  // TTS mute (client-scoped)
+  setTtsMutedByClient: (clientId: string, muted: boolean) =>
     post<{ ok: boolean; muted: boolean }>(
-      `/sessions/${encodeURIComponent(sessionId)}/tts-mute`,
+      `/clients/${encodeURIComponent(clientId)}/tts-mute`,
       { muted },
     ),
 
@@ -380,12 +380,11 @@ export const api = {
   getIceServers: () =>
     get<{ iceServers: RTCIceServer[] }>("/webrtc/ice-servers"),
 
-  webrtcOffer: (sessionId: string, offer: { sdp: string; type: string }, clientId?: string, opts?: { playground?: boolean; profileId?: string }) =>
+  webrtcOffer: (clientId: string, offer: { sdp: string; type: string }, opts?: { playground?: boolean; profileId?: string }) =>
     post<{ sdp: string; type: string }>("/webrtc/offer", {
-      sessionId,
+      clientId,
       sdp: offer.sdp,
       type: offer.type,
-      ...(clientId ? { clientId } : {}),
       ...(opts?.playground ? { playground: true } : {}),
       ...(opts?.profileId ? { profileId: opts.profileId } : {}),
     }),

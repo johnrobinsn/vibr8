@@ -21,7 +21,7 @@ export function TopBar() {
   const reconnecting = useStore((s) => s.reconnecting);
   const reconnectGaveUp = useStore((s) => s.reconnectGaveUp);
   const audioMode = useStore((s) => s.audioMode);
-  const audioSessionId = useStore((s) => s.audioSessionId);
+  const audioActive = useStore((s) => s.audioActive);
   const webrtcStatus = useStore((s) => s.webrtcStatus);
   const webrtcTransport = useStore((s) => s.webrtcTransport);
   const guardEnabled = useStore((s) => s.guardEnabled);
@@ -48,26 +48,23 @@ export function TopBar() {
   const isTroubled = isCliDisconnected || isReconnecting || (isDisconnected && !hasGaveUp && connStatus !== "disconnected");
 
   async function handleAudioCycle() {
-    if (!currentSessionId) return;
     setAudioError(null);
-    // Use the session that actually has WebRTC active (not necessarily the viewed session)
-    const activeId = audioSessionId ?? currentSessionId;
     if (currentAudioMode === "off") {
       try {
-        await startWebRTC(currentSessionId);
+        await startWebRTC();
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error("[webrtc] Failed to start:", msg);
-        stopWebRTC(currentSessionId);
+        stopWebRTC();
         setAudioError(msg);
         setTimeout(() => setAudioError(null), 5000);
       }
     } else if (currentAudioMode === "connecting") {
-      stopWebRTC(activeId);
+      stopWebRTC();
     } else if (currentAudioMode === "in_out") {
-      setAudioInOnly(activeId);
+      setAudioInOnly();
     } else {
-      stopWebRTC(activeId);
+      stopWebRTC();
     }
   }
 
@@ -178,9 +175,9 @@ export function TopBar() {
           )}
 
           {/* Guard word toggle — only shown when audio is active */}
-          {currentAudioMode !== "off" && audioSessionId && (
+          {currentAudioMode !== "off" && audioActive && (
             <button
-              onClick={() => toggleGuard(audioSessionId)}
+              onClick={() => toggleGuard()}
               className={`flex items-center justify-center w-7 h-7 rounded-lg transition-colors cursor-pointer ${
                 guardEnabled
                   ? "text-cc-warning bg-cc-warning/10 hover:bg-cc-warning/20"

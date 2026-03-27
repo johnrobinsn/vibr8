@@ -133,6 +133,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
 
   switch (data.type) {
     case "session_init": {
+      console.log(`[ws] session_init → cliConnected=true session=${sessionId.slice(0,8)}`);
       store.addSession(data.session);
       store.setCliConnected(sessionId, true);
       // Don't overwrite optimistic "running" status on init
@@ -347,7 +348,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
     }
 
     case "audio_off": {
-      stopWebRTC(sessionId);
+      stopWebRTC();
       break;
     }
 
@@ -848,12 +849,14 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
     }
 
     case "cli_disconnected": {
+      console.log(`[ws] cli_disconnected → cliConnected=false session=${sessionId.slice(0,8)}`);
       store.setCliConnected(sessionId, false);
       store.setSessionStatus(sessionId, null);
       break;
     }
 
     case "cli_connected": {
+      console.log(`[ws] cli_connected → cliConnected=true session=${sessionId.slice(0,8)}`);
       store.setCliConnected(sessionId, true);
       break;
     }
@@ -964,6 +967,7 @@ export function connectSession(sessionId: string) {
   let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
 
   ws.onopen = () => {
+    console.log(`[ws] onopen → connectionStatus=connected session=${sessionId.slice(0,8)}`);
     const s = useStore.getState();
     s.setConnectionStatus(sessionId, "connected");
     // Clear reconnect state on successful connection.
@@ -993,6 +997,7 @@ export function connectSession(sessionId: string) {
   ws.onmessage = (event) => handleMessage(sessionId, event);
 
   ws.onclose = () => {
+    console.log(`[ws] onclose → connectionStatus=disconnected, cliConnected=false session=${sessionId.slice(0,8)} current=${useStore.getState().currentSessionId?.slice(0,8) ?? 'null'}`);
     if (keepaliveInterval) { clearInterval(keepaliveInterval); keepaliveInterval = null; }
     sockets.delete(sessionId);
     const s = useStore.getState();
@@ -1090,6 +1095,7 @@ if (!_w.__v8_visibilityHandler) {
 }
 
 export function disconnectSession(sessionId: string) {
+  console.log(`[ws] disconnectSession session=${sessionId.slice(0,8)} hasSocket=${sockets.has(sessionId)}`);
   clearReconnectState(sessionId);
   const ws = sockets.get(sessionId);
   if (ws) {

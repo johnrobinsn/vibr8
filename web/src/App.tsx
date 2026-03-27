@@ -79,26 +79,28 @@ export default function App() {
   useEffect(() => {
     if (audioReconnectedRef.current) return;
     const savedMode = localStorage.getItem("cc-audio-mode");
-    const savedSession = localStorage.getItem("cc-audio-session");
-    if (!savedMode || savedMode === "off" || !savedSession) return;
+    if (!savedMode || savedMode === "off") return;
 
-    // Wait for the session's CLI to be connected before starting WebRTC
+    // Wait for any session's CLI to be connected before starting WebRTC
     const unsub = useStore.subscribe((s) => {
       if (audioReconnectedRef.current) return;
-      const isConnected = s.cliConnected.get(savedSession);
-      if (isConnected) {
-        audioReconnectedRef.current = true;
-        unsub();
-        startWebRTC(savedSession)
-          .then(() => {
-            // Restore saved audio mode (startWebRTC defaults to in_out)
-            if (savedMode === "in_only") {
-              setAudioInOnly(savedSession);
-            }
-          })
-          .catch((err) => {
-            console.warn("[webrtc] Auto-reconnect failed:", err);
-          });
+      // Check if any session has CLI connected
+      for (const [, connected] of s.cliConnected) {
+        if (connected) {
+          audioReconnectedRef.current = true;
+          unsub();
+          startWebRTC()
+            .then(() => {
+              // Restore saved audio mode (startWebRTC defaults to in_out)
+              if (savedMode === "in_only") {
+                setAudioInOnly();
+              }
+            })
+            .catch((err) => {
+              console.warn("[webrtc] Auto-reconnect failed:", err);
+            });
+          return;
+        }
       }
     });
     return () => unsub();

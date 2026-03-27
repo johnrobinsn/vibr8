@@ -155,10 +155,8 @@ async def handle_playground_ws(request: web.Request) -> web.WebSocketResponse:
                             eou_max_retries=int(data.get("eouMaxRetries", 3)),
                             min_segment_duration=float(data.get("minSegmentDuration", 0.4)),
                         )
-                        # Find the playground session for this client
-                        session_id = data.get("sessionId")
-                        if session_id:
-                            webrtc_mgr.update_stt_params(session_id, params)
+                        # Update STT params for this client's connection
+                        webrtc_mgr.update_stt_params(client_id, params)
                 except Exception:
                     pass
             elif msg.type == aiohttp.WSMsgType.ERROR:

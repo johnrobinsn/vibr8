@@ -73,8 +73,8 @@ interface AppState {
   reconnecting: Map<string, boolean>;
   reconnectGaveUp: Map<string, boolean>;
 
-  // WebRTC audio state (global singleton — one audio session at a time)
-  audioSessionId: string | null;
+  // WebRTC audio state (global singleton — one audio connection per client)
+  audioActive: boolean;
   audioMode: "off" | "connecting" | "in_out" | "in_only";
   isRecording: boolean;
   webrtcStatus: string | null;
@@ -174,7 +174,7 @@ interface AppState {
   setEditorLoading: (sessionId: string, loading: boolean) => void;
 
   // WebRTC audio actions (global)
-  setAudioSessionId: (sessionId: string | null) => void;
+  setAudioActive: (active: boolean) => void;
   setAudioMode: (mode: "off" | "connecting" | "in_out" | "in_only") => void;
   setIsRecording: (recording: boolean) => void;
   setWebRTCStatus: (status: string | null) => void;
@@ -254,7 +254,7 @@ export const useStore = create<AppState>((set) => ({
   editorLoading: new Map(),
   reconnecting: new Map(),
   reconnectGaveUp: new Map(),
-  audioSessionId: null,
+  audioActive: false,
   audioMode: "off" as const,
   isRecording: false,
   webrtcStatus: null,
@@ -405,10 +405,7 @@ export const useStore = create<AppState>((set) => ({
       editorUrl.delete(sessionId);
       const editorLoading = new Map(s.editorLoading);
       editorLoading.delete(sessionId);
-      // Reset global audio state if the removed session owns the audio
-      const audioReset = s.audioSessionId === sessionId
-        ? { audioSessionId: null, audioMode: "off" as const, isRecording: false, webrtcStatus: null, webrtcTransport: null, guardEnabled: true, voiceMode: null, activeAudioInputLabel: null }
-        : {};
+      const audioReset = {};
       return {
         sessions,
         messages,
@@ -668,13 +665,8 @@ export const useStore = create<AppState>((set) => ({
       return { editorLoading };
     }),
 
-  setAudioSessionId: (sessionId) => {
-    if (sessionId) {
-      localStorage.setItem("cc-audio-session", sessionId);
-    } else {
-      localStorage.removeItem("cc-audio-session");
-    }
-    set({ audioSessionId: sessionId });
+  setAudioActive: (active) => {
+    set({ audioActive: active });
   },
   setAudioMode: (mode) => {
     localStorage.setItem("cc-audio-mode", mode);
@@ -695,7 +687,9 @@ export const useStore = create<AppState>((set) => ({
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
   setNodes: (nodes) => set({ nodes }),
   setActiveNode: (nodeId) => set({ activeNodeId: nodeId }),
-  clearSessionState: () => set({
+  clearSessionState: () => {
+    console.log(`[store] clearSessionState — resetting cliConnected/connectionStatus maps`);
+    return set({
     sessions: new Map(),
     sdkSessions: [],
     messages: new Map(),
@@ -713,7 +707,7 @@ export const useStore = create<AppState>((set) => ({
     changedFiles: new Map(),
     sessionNames: new Map(),
     previousPermissionMode: new Map(),
-  }),
+  });},
   setPlaygroundActive: (active) => set({ playgroundActive: active }),
   setPlaygroundSessionId: (id) => set({ playgroundSessionId: id }),
   addPlaygroundSegment: (segment) => set((s) => ({
@@ -745,7 +739,7 @@ export const useStore = create<AppState>((set) => ({
       editorOpenFile: new Map(),
       editorUrl: new Map(),
       editorLoading: new Map(),
-      audioSessionId: null,
+      audioActive: false,
       audioMode: "off" as const,
       isRecording: false,
       webrtcStatus: null,

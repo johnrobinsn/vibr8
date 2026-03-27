@@ -330,6 +330,8 @@ class WsBridge:
 
         # Buffer messages so reconnecting browsers get history
         msg_type = message.get("type", "")
+        if msg_type in ("cli_connected", "cli_disconnected"):
+            logger.info(f"[ws-bridge] Remote {msg_type} for session {session_id[:8]} → {len(session.browser_sockets)} browser(s)")
         if msg_type in ("assistant", "result", "user_message"):
             session.message_history.append(message)
 
@@ -355,8 +357,8 @@ class WsBridge:
             if text:
                 track = self._webrtc_manager.get_any_outgoing_track()
                 if track:
-                    audio_session_id, audio_track = track
-                    if not self._webrtc_manager.is_tts_muted(audio_session_id):
+                    audio_client_id, audio_track = track
+                    if not self._webrtc_manager.is_tts_muted(audio_client_id):
                         asyncio.ensure_future(self._speak_text(session_id, text, audio_track))
 
         await self._broadcast_to_browsers(session, message)
@@ -394,13 +396,13 @@ class WsBridge:
         """Actually turn on the thinking tone."""
         self._thinking_timers.pop(session_id, None)
         if self._webrtc_manager:
-            self._webrtc_manager.set_thinking(session_id, True)
+            self._webrtc_manager.set_thinking_any(True)
 
     def _stop_thinking(self, session_id: str) -> None:
         """Stop the thinking tone and cancel any pending timer."""
         self._cancel_thinking_timer(session_id)
         if self._webrtc_manager:
-            self._webrtc_manager.set_thinking(session_id, False)
+            self._webrtc_manager.set_thinking_any(False)
 
     def _cancel_thinking_timer(self, session_id: str) -> None:
         handle = self._thinking_timers.pop(session_id, None)
@@ -1114,20 +1116,17 @@ class WsBridge:
             ring0 = self._ring0_manager
             is_ring0_session = ring0 and ring0.is_enabled and session.id == ring0.session_id
             tts_allowed = not ring0 or not ring0.is_enabled or is_ring0_session
-            # Look up outgoing track — the audio connection may be on a
-            # different session than the one producing the response (e.g.
-            # Ring0 responds but audio is connected via another session).
-            audio_session_id = session.id
-            track = self._webrtc_manager.get_outgoing_track(session.id)
-            if not track:
-                fallback = self._webrtc_manager.get_any_outgoing_track()
-                if fallback:
-                    audio_session_id, track = fallback
-            tts_muted = self._webrtc_manager.is_tts_muted(audio_session_id)
+            # Look up outgoing track — audio is keyed by client_id, not session.
+            audio_client_id = ""
+            track = None
+            pair = self._webrtc_manager.get_any_outgoing_track()
+            if pair:
+                audio_client_id, track = pair
+            tts_muted = self._webrtc_manager.is_tts_muted(audio_client_id) if audio_client_id else False
             text_preview = repr(text)[:200] if not isinstance(text, str) else f"{len(text)} chars"
             logger.info(
-                "[ws-bridge] TTS check: session=%s, audio_session=%s, text_type=%s, preview=%s, track=%s, tts_muted=%s, tts_allowed=%s",
-                session.id, audio_session_id, type(text).__name__, text_preview, track is not None, tts_muted, tts_allowed,
+                "[ws-bridge] TTS check: session=%s, audio_client=%s, text_type=%s, preview=%s, track=%s, tts_muted=%s, tts_allowed=%s",
+                session.id, audio_client_id, type(text).__name__, text_preview, track is not None, tts_muted, tts_allowed,
             )
             if track and not tts_muted and tts_allowed:
                 import asyncio
@@ -1211,7 +1210,7 @@ class WsBridge:
             # Stop thinking tone — TTS is taking over.
             self._cancel_thinking_timer(session_id)
             if self._webrtc_manager:
-                self._webrtc_manager.set_thinking(session_id, False)
+                self._webrtc_manager.set_thinking_any(False)
             logger.info("[ws-bridge] TTS starting for session %s: %d chars", session_id, len(text))
             from server.tts import TTS_OpenAI
             tts = TTS_OpenAI(opus_frame_handler=on_frame)

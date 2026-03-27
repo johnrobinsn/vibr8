@@ -61,7 +61,7 @@ export const commands: Command[] = [
       if (!s.currentSessionId) return;
       const sid = s.currentSessionId;
       try {
-        stopWebRTC(sid);
+        stopWebRTC();
         disconnectSession(sid);
         await api.archiveSession(sid);
       } catch { /* best-effort */ }
