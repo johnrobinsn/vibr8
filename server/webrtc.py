@@ -133,6 +133,7 @@ class WebRTCManager:
         self._ws_bridge = None
         self._ring0_manager = None
         self._launcher = None  # Set by main.py for Ring0 lazy-create
+        self._node_registry = None  # Set by main.py for distributed nodes
 
     def get_client_ice_servers(self) -> list[dict]:
         """Return ICE servers in the format the browser RTCPeerConnection expects."""
@@ -149,6 +150,10 @@ class WebRTCManager:
     def set_launcher(self, launcher) -> None:
         """Set a reference to CliLauncher for Ring0 lazy session creation."""
         self._launcher = launcher
+
+    def set_node_registry(self, registry) -> None:
+        """Set a reference to NodeRegistry for distributed node routing."""
+        self._node_registry = registry
 
     def has_active_connections(self) -> bool:
         """Return True if any WebRTC connections are active."""
@@ -411,9 +416,23 @@ class WebRTCManager:
                 if not transcript or not self._ws_bridge:
                     return
 
-                # Helper to submit text through Ring0 or active session
+                # Helper to submit text through Ring0 or active session.
+                # When a remote node is active and Ring0 is enabled, forward
+                # the transcript to the remote node's Ring0 via the WS tunnel.
                 async def _submit_text(text: str) -> None:
                     if self._ring0_manager and self._ring0_manager.is_enabled:
+                        # Check if a remote node is active — route to its Ring0
+                        if self._node_registry:
+                            active_nid = self._node_registry.active_node_id
+                            node = self._node_registry.get_node(active_nid)
+                            if node and node.tunnel and node.status == "online":
+                                    node.tunnel.send_fire_and_forget({
+                                        "type": "ring0_input",
+                                        "text": text,
+                                        "sourceClientId": client_id,
+                                    })
+                                    return
+                        # Local Ring0
                         r0sid = self._ring0_manager.session_id
                         if not r0sid and self._launcher and self._ws_bridge:
                             r0sid = await self._ring0_manager.ensure_session(self._launcher, self._ws_bridge)
@@ -519,6 +538,11 @@ class WebRTCManager:
                             else:
                                 self.set_voice_mode(session_id, NoteMode())
                                 asyncio.ensure_future(self._speak_short(session_id, "Note mode"))
+                            return
+                        if after_word.startswith("node"):
+                            if pre_text:
+                                await _submit_text(pre_text)
+                            await self._handle_node_switch_command(session_id, after_word[4:].strip())
                             return
                         # Escape sequences: submit pre-text, then transform and
                         # fall through to submit the transformed text.
@@ -642,6 +666,60 @@ class WebRTCManager:
             await tts.say(phrase)
         except Exception:
             logger.exception("[guard] TTS failed for session %s phrase=%r", session_id, phrase)
+
+    async def _handle_node_switch_command(self, session_id: str, node_name: str) -> None:
+        """Handle 'vibr8 node <name>' voice command to switch active node."""
+        if not self._node_registry:
+            asyncio.ensure_future(self._speak_short(session_id, "No nodes available"))
+            return
+
+        node_name = node_name.strip()
+        if not node_name:
+            asyncio.ensure_future(self._speak_short(session_id, "Which node?"))
+            return
+
+        # "local", "hub", or the hub's configured name switches back to hub
+        name_lower = node_name.lower()
+        local_node = self._node_registry.local_node
+        hub_name = local_node.name
+        is_hub = name_lower in ("local", "hub") or name_lower in hub_name.lower()
+        if is_hub:
+            if self._node_registry.active_node_id == local_node.id:
+                asyncio.ensure_future(self._speak_short(session_id, f"Already on {hub_name}"))
+                return
+            self._node_registry.active_node_id = local_node.id
+            logger.info("[voice] Switched to local node (%s) via voice command", hub_name)
+            asyncio.ensure_future(self._speak_short(session_id, f"Switched to {hub_name}"))
+            if self._ws_bridge:
+                asyncio.ensure_future(
+                    self._ws_bridge.broadcast_node_switch(local_node.id, hub_name)
+                )
+            return
+
+        matches = self._node_registry.find_by_name(node_name)
+        if not matches:
+            asyncio.ensure_future(self._speak_short(session_id, f"No node named {node_name} found"))
+            return
+        if len(matches) > 1:
+            names = ", ".join(m.name for m in matches[:3])
+            asyncio.ensure_future(self._speak_short(session_id, f"Multiple nodes match: {names}"))
+            return
+
+        target = matches[0]
+        if self._node_registry.active_node_id == target.id:
+            asyncio.ensure_future(self._speak_short(session_id, f"Already on {target.name}"))
+            return
+        if target.status != "online":
+            asyncio.ensure_future(self._speak_short(session_id, f"{target.name} is offline"))
+            return
+
+        self._node_registry.active_node_id = target.id
+        logger.info("[voice] Switched to node %r (id=%s) via voice command", target.name, target.id[:8])
+        asyncio.ensure_future(self._speak_short(session_id, f"Switched to node {target.name}"))
+        if self._ws_bridge:
+            asyncio.ensure_future(
+                self._ws_bridge.broadcast_node_switch(target.id, target.name)
+            )
 
     async def _consume_audio(
         self,

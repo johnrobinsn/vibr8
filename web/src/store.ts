@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { SessionState, PermissionRequest, ChatMessage, SdkSessionInfo, TaskItem } from "./types.js";
+import type { SessionState, PermissionRequest, ChatMessage, SdkSessionInfo, TaskItem, NodeInfo } from "./types.js";
 
 function getClientId(): string {
   if (typeof window === "undefined") return crypto.randomUUID();
@@ -97,6 +97,10 @@ interface AppState {
   secondScreenClientName: string | null;
   secondScreenDarkMode: boolean;
 
+  // Remote nodes
+  nodes: NodeInfo[];
+  activeNodeId: string;
+
   // Playground state
   playgroundActive: boolean;
   playgroundSessionId: string | null;
@@ -188,6 +192,11 @@ interface AppState {
   setVoiceMode: (mode: string | null) => void;
   setActiveAudioInputLabel: (label: string | null) => void;
 
+  // Node actions
+  setNodes: (nodes: NodeInfo[]) => void;
+  setActiveNode: (nodeId: string) => void;
+  clearSessionState: () => void;
+
   // Playground actions
   setPlaygroundActive: (active: boolean) => void;
   setPlaygroundSessionId: (id: string | null) => void;
@@ -270,6 +279,8 @@ export const useStore = create<AppState>((set) => ({
     return isNaN(n) ? 0 : n;
   })(),
   secondScreenDarkMode: localStorage.getItem("cc-second-screen-dark-mode") !== "false",
+  nodes: [],
+  activeNodeId: "local",
   playgroundActive: false,
   playgroundSessionId: null,
   playgroundSegments: [],
@@ -680,6 +691,27 @@ export const useStore = create<AppState>((set) => ({
   setPendingFocus: (target) => set({ pendingFocus: target }),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
+  setNodes: (nodes) => set({ nodes }),
+  setActiveNode: (nodeId) => set({ activeNodeId: nodeId }),
+  clearSessionState: () => set({
+    sessions: new Map(),
+    sdkSessions: [],
+    messages: new Map(),
+    archivedCount: new Map(),
+    streaming: new Map(),
+    streamingStartedAt: new Map(),
+    streamingOutputTokens: new Map(),
+    pendingPermissions: new Map(),
+    connectionStatus: new Map(),
+    cliConnected: new Map(),
+    sessionStatus: new Map(),
+    reconnecting: new Map(),
+    reconnectGaveUp: new Map(),
+    sessionTasks: new Map(),
+    changedFiles: new Map(),
+    sessionNames: new Map(),
+    previousPermissionMode: new Map(),
+  }),
   setPlaygroundActive: (active) => set({ playgroundActive: active }),
   setPlaygroundSessionId: (id) => set({ playgroundSessionId: id }),
   addPlaygroundSegment: (segment) => set((s) => ({

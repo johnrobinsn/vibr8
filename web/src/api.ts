@@ -1,4 +1,4 @@
-import type { SdkSessionInfo } from "./types.js";
+import type { SdkSessionInfo, NodeInfo } from "./types.js";
 
 const BASE = "/api";
 
@@ -81,6 +81,7 @@ export interface CreateSessionOpts {
   createBranch?: boolean;
   useWorktree?: boolean;
   backend?: "claude" | "codex" | "terminal";
+  nodeId?: string;
 }
 
 export interface BackendInfo {
@@ -236,7 +237,8 @@ export const api = {
       opts,
     ),
 
-  listSessions: () => get<SdkSessionInfo[]>("/sessions"),
+  listSessions: (nodeId?: string) =>
+    get<SdkSessionInfo[]>(nodeId ? `/sessions?nodeId=${encodeURIComponent(nodeId)}` : "/sessions"),
 
   killSession: (sessionId: string) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/kill`),
@@ -435,6 +437,23 @@ export const api = {
   // Pen control
   setPen: (sessionId: string, controlledBy: "ring0" | "user") =>
     post(`/sessions/${encodeURIComponent(sessionId)}/pen`, { controlledBy }),
+
+  // Nodes
+  listNodes: () => get<NodeInfo[]>("/nodes"),
+  activateNode: (nodeId: string) =>
+    post<{ ok: boolean; nodeId: string; name: string }>(
+      `/nodes/${encodeURIComponent(nodeId)}/activate`,
+    ),
+  getActiveNode: () =>
+    get<{ nodeId: string; name: string; status: string }>("/nodes/active"),
+
+  // Node API keys
+  generateNodeKey: (name: string) =>
+    post<{ apiKey: string; id: string; name: string; keyPrefix: string; createdAt: number; lastUsedAt: number }>("/nodes/generate-key", { name }),
+  listNodeKeys: () =>
+    get<Array<{ id: string; name: string; keyPrefix: string; createdAt: number; lastUsedAt: number }>>("/nodes/keys"),
+  revokeNodeKey: (keyId: string) =>
+    del(`/nodes/keys/${encodeURIComponent(keyId)}`),
 
   // Admin
   restartServer: () => post("/admin/restart"),

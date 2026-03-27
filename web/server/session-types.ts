@@ -191,6 +191,7 @@ export type BrowserIncomingMessage =
   | { type: "tts_muted"; muted: boolean }
   | { type: "voice_mode"; mode: string | null }
   | { type: "ring0_switch_ui"; sessionId: string }
+  | { type: "node_switch"; nodeId: string; nodeName?: string }
   | { type: "rpc_request"; id: string; method: string; params?: Record<string, unknown> };
 
 // ─── Session State ────────────────────────────────────────────────────────────

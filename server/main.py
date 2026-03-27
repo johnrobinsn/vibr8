@@ -25,6 +25,8 @@ from server.webrtc import WebRTCManager
 from server.terminal import TerminalManager
 from server.ring0 import Ring0Manager
 from server.ring0_events import Ring0EventRouter
+from server.node_registry import NodeRegistry
+from server.node_tunnel import NodeTunnel
 import json as _json
 from server.auth import AuthManager, auth_middleware
 
@@ -253,6 +255,87 @@ async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def handle_node_ws(request: web.Request) -> web.WebSocketResponse:
+    """Handle persistent WebSocket tunnel from a remote vibr8-node."""
+    ws = web.WebSocketResponse(heartbeat=45)
+    await ws.prepare(request)
+    node_id = request.match_info["node_id"]
+
+    registry: NodeRegistry = request.app["node_registry"]
+    bridge: WsBridge = request.app["bridge"]
+
+    # Authenticate via query param API key
+    api_key = request.rel_url.query.get("apiKey", "")
+    node = registry.get_node(node_id)
+    if not node or not registry.validate_api_key(node_id, api_key):
+        logger.warning("[nodes] Rejected WS tunnel for node %s — invalid auth", node_id[:8])
+        await ws.close(code=4001, message=b"Invalid node ID or API key")
+        return ws
+
+    # Create tunnel and mark online
+    tunnel = NodeTunnel(node_id, node.name, ws)
+    node.tunnel = tunnel
+    registry.set_online(node_id, ws)
+
+    async def on_node_message(nid: str, msg: dict) -> None:
+        """Handle node-initiated messages (heartbeat, session updates, etc.)."""
+        msg_type = msg.get("type", "")
+        if msg_type == "heartbeat":
+            registry.heartbeat(
+                nid,
+                session_count=msg.get("sessionCount"),
+                ring0_enabled=msg.get("ring0Enabled"),
+            )
+        elif msg_type == "sessions_update":
+            sessions = msg.get("sessions", [])
+            # Qualify session IDs at the hub boundary
+            from server.ws_bridge import WsBridge
+            for s in sessions:
+                raw_id = s.get("sessionId", s.get("id", ""))
+                if raw_id:
+                    qualified = WsBridge.qualify_session_id(nid, raw_id)
+                    s["sessionId"] = qualified
+                    if "id" in s:
+                        s["id"] = qualified
+            session_ids = [s.get("sessionId", s.get("id", "")) for s in sessions]
+            registry.update_sessions(nid, session_ids)
+            bridge.update_remote_sessions(nid, sessions)
+        elif msg_type == "session_message":
+            # Forward CLI output from remote session to browser clients
+            raw_session_id = msg.get("sessionId", "")
+            message = msg.get("message", {})
+            if raw_session_id and message:
+                from server.ws_bridge import WsBridge
+                qualified_id = WsBridge.qualify_session_id(nid, raw_session_id)
+                await bridge.handle_remote_session_message(qualified_id, message)
+        elif msg_type == "ring0_state":
+            n = registry.get_node(nid)
+            if n:
+                n.ring0_enabled = msg.get("enabled", False)
+        else:
+            logger.debug("[nodes] Unknown message type %r from node %s", msg_type, node.name)
+
+    tunnel.set_message_handler(on_node_message)
+
+    logger.info("[nodes] WS tunnel opened for node %r (%s)", node.name, node_id[:8])
+
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                await tunnel.handle_incoming(msg.data)
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                logger.error("[nodes] WS tunnel error for node %s: %s", node.name, ws.exception())
+                break
+    finally:
+        logger.info("[nodes] WS tunnel closed for node %r (%s)", node.name, node_id[:8])
+        tunnel.close()
+        registry.set_offline(node_id)
+        # Clean up remote sessions from WsBridge
+        bridge.remove_remote_node_sessions(node_id)
+
+    return ws
+
+
 # ── Application factory ──────────────────────────────────────────────────────
 
 
@@ -280,6 +363,7 @@ def create_app() -> web.Application:
     webrtc_manager = WebRTCManager(ice_servers=ice_servers)
     terminal_manager = TerminalManager()
     ring0_manager = Ring0Manager(PORT)
+    node_registry = NodeRegistry()
 
     # Track background tasks so we can cancel them on shutdown.
     background_tasks: set[asyncio.Task] = set()
@@ -296,9 +380,11 @@ def create_app() -> web.Application:
     ws_bridge.set_webrtc_manager(webrtc_manager)
     ws_bridge.set_ring0_manager(ring0_manager)
     ws_bridge.set_ring0_event_router(Ring0EventRouter())
+    ws_bridge.set_node_registry(node_registry)
     webrtc_manager.set_ws_bridge(ws_bridge)
     webrtc_manager.set_ring0_manager(ring0_manager)
     webrtc_manager.set_launcher(launcher)
+    webrtc_manager.set_node_registry(node_registry)
     launcher.set_store(session_store)
 
     # Restore persisted state
@@ -382,9 +468,10 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/native/{client_id}", handle_native_ws)
     app.router.add_get("/ws/terminal/{session_id}", handle_terminal_ws)
     app.router.add_get("/ws/playground/{client_id}", handle_playground_ws)
+    app.router.add_get("/ws/node/{node_id}", handle_node_ws)
 
     # REST API
-    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager)
+    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager, node_registry)
     app.router.add_routes(api_routes)
 
     # Production static file serving
@@ -408,6 +495,7 @@ def create_app() -> web.Application:
     app["terminal_manager"] = terminal_manager
     app["auth_manager"] = auth_manager
     app["ring0_manager"] = ring0_manager
+    app["node_registry"] = node_registry
     app["request_restart"] = request_restart
 
     # ── Startup / Shutdown hooks ──────────────────────────────────────────
@@ -462,6 +550,19 @@ def create_app() -> web.Application:
                     await launcher.relaunch(info.sessionId)
 
             spawn(_watchdog())
+
+        # Periodic heartbeat checker for remote nodes
+        async def _heartbeat_checker() -> None:
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    newly_offline = node_registry.check_heartbeats()
+                    for node_id in newly_offline:
+                        logger.info("[nodes] Node %s missed heartbeat — marked offline", node_id[:8])
+                except Exception:
+                    logger.exception("[nodes] Error checking heartbeats")
+
+        spawn(_heartbeat_checker())
 
         # Auto-launch ring0 session if it was previously enabled
         if ring0_manager.is_enabled:

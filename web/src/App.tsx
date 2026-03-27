@@ -172,7 +172,7 @@ export default function App() {
     return <Playground />;
   }
 
-  if (hash === "#/settings") {
+  if (hash === "#/settings" || hash.startsWith("#/settings/")) {
     return <SettingsPage />;
   }
 

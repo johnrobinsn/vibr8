@@ -82,6 +82,7 @@ export function HomePage() {
 
   const setCurrentSession = useStore((s) => s.setCurrentSession);
   const currentSessionId = useStore((s) => s.currentSessionId);
+  const activeNodeId = useStore((s) => s.activeNodeId);
 
   // Auto-focus textarea on mount
   useEffect(() => {
@@ -282,6 +283,7 @@ export function HomePage() {
         createBranch: branchName && isNewBranch ? true : undefined,
         useWorktree: useWorktree || undefined,
         backend,
+        nodeId: activeNodeId || undefined,
       });
       const sessionId = result.sessionId;
 
@@ -348,6 +350,7 @@ export function HomePage() {
         cwd: cwd || undefined,
         envSlug: selectedEnv || undefined,
         backend: "terminal",
+        nodeId: activeNodeId || undefined,
       });
       const sessionId = result.sessionId;
       useStore.getState().setSdkSessions([

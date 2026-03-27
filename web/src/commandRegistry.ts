@@ -67,7 +67,7 @@ export const commands: Command[] = [
       } catch { /* best-effort */ }
       s.newSession();
       try {
-        const list = await api.listSessions();
+        const list = await api.listSessions(s.activeNodeId);
         s.setSdkSessions(list);
       } catch { /* best-effort */ }
     },

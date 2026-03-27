@@ -67,7 +67,7 @@ vibr8 is a web UI for launching and interacting with Claude Code agents. All com
 - Server-side: `aiortc` for peer connections, Silero VAD for voice activity detection, Whisper large-v3 for STT
 - Outgoing audio: OpenAI TTS API -> Opus frames -> `QueuedAudioTrack` -> WebRTC
 - Guard word system: "vibr8" prefix required (when guard mode on) before processing voice commands
-- Voice commands: `done`, `off`, `guard`, `listen`, `quiet`, `speak`, `ring zero on/off`, `note`
+- Voice commands: `done`, `off`, `guard`, `listen`, `quiet`, `speak`, `ring zero on/off`, `note`, `node <name>`
 
 **Session Persistence** (`server/session_store.py`):
 - Sessions saved to `~/.vibr8/sessions/{session_id}.json` with debounced atomic writes
@@ -377,6 +377,16 @@ interface NodeInfo {
   - If local: submit directly to Ring0 session (existing flow)
   - If remote: forward transcript to remote Ring0 via node WS tunnel
 
+**Voice node switching:**
+- New voice command: `vibr8 node <name>` — switches the active node
+- Processed on the hub (voice is always central), before transcript routing
+- Fuzzy match on node display name (case-insensitive, partial match accepted)
+- On match: updates active node, re-routes subsequent voice transcripts to the new node's Ring0, confirms via TTS: "Switched to node <name>"
+- On no match: TTS response: "No node named <name> found"
+- On ambiguous match: TTS response: "Multiple nodes match <name>: ..." (lists candidates)
+- Hub notifies the browser via WebSocket so the UI node picker updates in sync
+- Fits alongside existing voice commands (`done`, `guard`, `ring zero on/off`, etc.)
+
 ### 3.8 The "Local" Node
 
 The hub itself is always a node — the "local" node. It runs its own Ring0 and sessions, just like today. When no remote nodes are registered or active, the UI behaves identically to today. The node switcher simply doesn't appear (or shows "Local" as the only option).
@@ -406,13 +416,17 @@ Messages on the `ws/node/{nodeId}` WebSocket, NDJSON format:
 
 Each command includes a `requestId` for correlating responses.
 
-### 3.10 Phase 1 Open Questions
+### 3.10 Phase 1 Design Decisions
 
-1. **Session ID collisions**: Remote nodes generate UUIDs independently. Collision is astronomically unlikely but should we namespace them? (`{nodeId}:{sessionId}`)
-2. **Which Ring0 gets voice?**: When switching nodes, voice routes to the new node's Ring0 automatically. But what if the user wants to talk to Ring0 on one node while viewing sessions on another?
-3. **MCP tool scope**: Ring0 on a remote node has MCP tools that call `localhost`. This still works because the node runs its own `ring0_mcp.py → localhost:node_port`. But tools like `query_client` (browser RPC) need to be proxied through the hub.
-4. **Latency budget**: Voice transcript → hub → node WS → node Ring0 → node CLI → response → hub → browser. Each hop adds latency. Need to measure if this is acceptable for conversational voice.
-5. **Offline recovery**: When a node goes offline and comes back, how much state needs to be re-synced? Session histories? Or just current session list?
+1. **Session ID collisions**: No namespacing. Bare UUIDs are used as-is across all nodes. Collision probability is ~2^-122 — not worth the complexity of `{nodeId}:{sessionId}` namespacing. All existing code paths (WsBridge, session store, frontend) continue to work unchanged.
+
+2. **Which Ring0 gets voice**: Active node's Ring0 only. When the user switches nodes (via UI or voice command), voice transcripts route to the new node's Ring0. There is no split-view where voice targets one node while the UI shows another — voice and UI always point at the same active node.
+
+3. **MCP tool scope**: Ring0 MCP tools calling `localhost` work naturally on each node — the node runs its own `ring0_mcp.py → localhost:node_port` pipeline. The `query_client` tool (browser RPC) is a known exception: it needs to reach the browser through the hub. This is solved by proxying `query_client` calls through the node WS tunnel (hub relays to the browser and returns the response).
+
+4. **Latency budget**: The distributed voice pipeline adds only 2-10ms (nearby nodes) or 100-300ms (cross-continent) on top of the existing 2-8s voice round-trip (dominated by STT, LLM inference, and TTS). The added network hops are negligible and acceptable for conversational voice.
+
+5. **Offline recovery**: Minimal — presence tracking only. When a node goes offline, the hub marks it offline and shows a toast notification in the UI. No message queuing, no state sync, no automatic failover to another node. When the node reconnects, it re-registers and sends its current session list; the hub reconciles. If the user was viewing the offline node, they see "Reconnecting..." on active sessions (existing behavior) and can manually switch to another node.
 
 ---
 
@@ -637,9 +651,12 @@ async def scroll(x: int, y: int, delta_y: int) -> str:
 
 **Node offline/online transitions:**
 - Hub marks node offline after 90s without heartbeat
-- UI shows node status (green/red dot, like session connection status)
+- UI shows node status (green/red dot, like session connection status) and displays a toast notification on offline/reconnect events
 - When node reconnects: re-registers, sends current session list, hub reconciles
 - Active browser WS connections to offline node's sessions show "Reconnecting..." (existing behavior)
+- No message queuing while a node is offline — messages are dropped (not buffered)
+- No automatic failover to another node — user manually switches if desired
+- No state sync on reconnect — only the current session list is exchanged, not session histories or pending messages
 
 **Hub restart:**
 - Nodes reconnect via WS (they already retry)

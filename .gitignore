@@ -8,3 +8,7 @@ web/dist/
 .uv/
 uv.lock
 certs/
+.env
+.claude/
+server.log
+vibe-sessions/

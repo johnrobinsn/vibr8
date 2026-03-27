@@ -384,6 +384,23 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
       break;
     }
 
+    case "node_switch": {
+      // Hub notifies that the active node changed (e.g., via voice command)
+      const newNodeId = data.nodeId as string;
+      if (newNodeId && newNodeId !== store.activeNodeId) {
+        // Disconnect current session
+        if (store.currentSessionId) {
+          const oldSdk = store.sdkSessions.find((x) => x.sessionId === store.currentSessionId);
+          if (oldSdk?.backendType !== "terminal") {
+            disconnectSession(store.currentSessionId);
+          }
+        }
+        store.setCurrentSession(null);
+        store.setActiveNode(newNodeId);
+      }
+      break;
+    }
+
     case "rpc_request": {
       const rpcId = data.id as string;
       const method = data.method as string;
