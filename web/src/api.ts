@@ -454,6 +454,16 @@ export const api = {
   revokeNodeKey: (keyId: string) =>
     del(`/nodes/keys/${encodeURIComponent(keyId)}`),
 
+  // Device tokens
+  createDeviceToken: (name: string) =>
+    post<{ token: string; tokenId: string; name: string; createdAt: number }>("/auth/device-token", { name }),
+  listDeviceTokens: () =>
+    get<{ tokens: Array<{ id: string; name: string; createdAt: number; lastUsedAt: number | null }> }>("/auth/device-tokens"),
+  revokeDeviceToken: (tokenId: string) =>
+    del(`/auth/device-tokens/${encodeURIComponent(tokenId)}`),
+  confirmPairing: (code: string, name: string) =>
+    post<{ ok: boolean; type: string }>("/pairing/confirm", { code, name }),
+
   // Admin
   restartServer: () => post("/admin/restart"),
 };

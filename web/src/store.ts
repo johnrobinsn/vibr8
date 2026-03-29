@@ -42,7 +42,7 @@ interface AppState {
   cliConnected: Map<string, boolean>;
 
   // Session status
-  sessionStatus: Map<string, "idle" | "running" | "compacting" | null>;
+  sessionStatus: Map<string, "idle" | "running" | "compacting" | "waiting_for_permission" | null>;
 
   // Plan mode: stores previous permission mode per session so we can restore it
   previousPermissionMode: Map<string, string>;
@@ -163,7 +163,7 @@ interface AppState {
   // Connection actions
   setConnectionStatus: (sessionId: string, status: "connecting" | "connected" | "disconnected") => void;
   setCliConnected: (sessionId: string, connected: boolean) => void;
-  setSessionStatus: (sessionId: string, status: "idle" | "running" | "compacting" | null) => void;
+  setSessionStatus: (sessionId: string, status: "idle" | "running" | "compacting" | "waiting_for_permission" | null) => void;
   setReconnecting: (sessionId: string, value: boolean) => void;
   setReconnectGaveUp: (sessionId: string, value: boolean) => void;
 
@@ -434,16 +434,39 @@ export const useStore = create<AppState>((set) => ({
     set((s) => {
       // Populate sessionNames from server data for any sessions without a name
       const names = new Map(s.sessionNames);
-      let changed = false;
+      let namesChanged = false;
       for (const sdk of sessions) {
         if (sdk.name && !names.has(sdk.sessionId)) {
           names.set(sdk.sessionId, sdk.name);
-          changed = true;
+          namesChanged = true;
         }
       }
-      return changed
-        ? { sdkSessions: sessions, sessionNames: names, sessionsLoaded: true }
-        : { sdkSessions: sessions, sessionsLoaded: true };
+      // Seed sessionStatus and cliConnected from REST agentState / state
+      const sessionStatus = new Map(s.sessionStatus);
+      const cliConnected = new Map(s.cliConnected);
+      for (const sdk of sessions) {
+        if (sdk.agentState) {
+          const current = sessionStatus.get(sdk.sessionId);
+          // Don't downgrade running→idle from REST (WS is authoritative for active session)
+          if (!(current === "running" && sdk.agentState === "idle")) {
+            sessionStatus.set(sdk.sessionId, sdk.agentState);
+          }
+        }
+        // Seed cliConnected from SDK process state
+        const sdkConnected = sdk.state === "connected" || sdk.state === "running";
+        const wsConnected = cliConnected.get(sdk.sessionId);
+        // Only seed if WS hasn't already set a value (WS is more real-time)
+        if (wsConnected === undefined) {
+          cliConnected.set(sdk.sessionId, sdkConnected);
+        }
+      }
+      return {
+        sdkSessions: sessions,
+        sessionsLoaded: true,
+        sessionStatus,
+        cliConnected,
+        ...(namesChanged ? { sessionNames: names } : {}),
+      };
     });
   },
 

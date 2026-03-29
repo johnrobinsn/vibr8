@@ -222,15 +222,20 @@ async def get_session_output(session_id: str) -> str:
         session_id: The session ID to get output from.
     """
     result = await _get(f"/ring0/session-output/{session_id}")
+
+    # Use server-side formatted output (no truncation)
+    if "formatted" in result:
+        return result["formatted"]
+
+    # Fallback: format locally (for older hub versions)
     messages = result.get("messages", [])
     permissions = result.get("pendingPermissions", [])
 
     if not messages and not permissions:
         return "No messages in this session yet."
 
-    # Scan ALL messages, keep last 10 meaningful lines.
     lines = []
-    trailing_tool_count = 0  # tool-use messages after last text response
+    trailing_tool_count = 0
     for msg in messages:
         role = msg.get("type", "?")
         if role == "user_message":
@@ -243,7 +248,7 @@ async def get_session_output(session_id: str) -> str:
                 raw_message = raw_message["content"]
             text, has_real_text = _extract_assistant_text(raw_message)
             if has_real_text:
-                lines.append(f"Assistant: {text[:500]}")
+                lines.append(f"Assistant: {text}")
                 trailing_tool_count = 0
             else:
                 trailing_tool_count += 1
@@ -252,10 +257,10 @@ async def get_session_output(session_id: str) -> str:
             if data.get("is_error"):
                 lines.append(f"Error: {', '.join(data.get('errors', []))}")
                 trailing_tool_count = 0
-    # Keep last 10 meaningful lines
-    lines = lines[-10:]
+    lines = lines[-30:]
+    while len(lines) > 1 and sum(len(l) for l in lines) > 50000:
+        lines.pop(0)
 
-    # If the session is mid-work (many tool calls after last text), note it
     if trailing_tool_count > 3:
         lines.append(f"[Session is actively working — {trailing_tool_count} tool calls since last text response]")
 

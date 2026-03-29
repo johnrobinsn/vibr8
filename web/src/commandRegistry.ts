@@ -109,19 +109,19 @@ export const commands: Command[] = [
   },
   {
     id: "secondscreen.pair",
-    label: "Pair Second Screen",
-    description: "Enter a pairing code from a second screen",
+    label: "Pair Device",
+    description: "Enter a pairing code from a device or second screen",
     icon: "ui",
     execute: async (ctx) => {
       if (!ctx.param) {
-        return { needsInput: "Enter pairing code from second screen" };
+        return { needsInput: "Enter 6-digit pairing code" };
       }
-      const code = ctx.param.trim();
+      const code = ctx.param.replace(/\s/g, "").trim();
       if (!code) return;
       try {
-        await api.secondScreenPair(code);
+        await api.confirmPairing(code, "Device");
       } catch (err) {
-        console.error("[second-screen] Pairing failed:", err);
+        console.error("[pairing] Pairing failed:", err);
       }
     },
   },

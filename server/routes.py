@@ -33,6 +33,84 @@ from server.ring0 import Ring0Manager
 logger = logging.getLogger(__name__)
 
 
+def _extract_assistant_text(message: Any) -> tuple[str, bool]:
+    """Extract readable text from an assistant message content.
+
+    Returns (text, has_real_text) where has_real_text is True if
+    the message contains actual text content beyond just tool-use markers.
+    """
+    if isinstance(message, str):
+        return message.strip(), bool(message.strip())
+    if isinstance(message, dict):
+        message = message.get("content", "")
+    if isinstance(message, list):
+        text_parts = []
+        tool_parts = []
+        for block in message:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and block.get("text", "").strip():
+                text_parts.append(block["text"].strip())
+            elif block.get("type") == "tool_use":
+                name = block.get("name", "unknown")
+                tool_parts.append(f"[used tool: {name}]")
+        parts = text_parts + tool_parts
+        return " ".join(parts), bool(text_parts)
+    if isinstance(message, str):
+        return message.strip(), bool(message.strip())
+    return "", False
+
+
+def _format_session_output(messages: list[dict], permissions: list[dict]) -> str:
+    """Format session messages into readable text for Ring0. No per-message truncation."""
+    if not messages and not permissions:
+        return "No messages in this session yet."
+
+    lines: list[str] = []
+    trailing_tool_count = 0
+    for msg in messages:
+        role = msg.get("type", "?")
+        if role == "user_message":
+            content = msg.get("content", "")
+            lines.append(f"User: {content}")
+            trailing_tool_count = 0
+        elif role == "assistant":
+            raw_message = msg.get("message", "")
+            if isinstance(raw_message, dict) and "content" in raw_message:
+                raw_message = raw_message["content"]
+            text, has_real_text = _extract_assistant_text(raw_message)
+            if has_real_text:
+                lines.append(f"Assistant: {text}")
+                trailing_tool_count = 0
+            else:
+                trailing_tool_count += 1
+        elif role == "result":
+            data = msg.get("data", {})
+            if data.get("is_error"):
+                lines.append(f"Error: {', '.join(data.get('errors', []))}")
+                trailing_tool_count = 0
+    # Keep last 30 entries
+    lines = lines[-30:]
+    # Guard total size — drop oldest if over 50k chars
+    while len(lines) > 1 and sum(len(l) for l in lines) > 50000:
+        lines.pop(0)
+
+    if trailing_tool_count > 3:
+        lines.append(f"[Session is actively working — {trailing_tool_count} tool calls since last text response]")
+
+    if permissions:
+        lines.append("")
+        lines.append("--- PENDING PERMISSIONS (session is blocked, waiting for response) ---")
+        for perm in permissions:
+            rid = perm.get("request_id", "?")
+            tool = perm.get("tool_name", "?")
+            desc = perm.get("description", "")
+            inp = json.dumps(perm.get("input", {}))[:300]
+            lines.append(f"  [{rid}] {tool}: {desc or inp}")
+
+    return "\n".join(lines) if lines else "No readable messages."
+
+
 def _to_camel(name: str) -> str:
     """Convert snake_case to camelCase."""
     parts = name.split("_")
@@ -126,6 +204,124 @@ def create_routes(
             "authenticated": username is not None,
             "username": username,
         })
+
+    # ── Device tokens ────────────────────────────────────────────────────
+
+    @routes.post("/api/auth/device-token")
+    async def create_device_token(request: web.Request) -> web.Response:
+        if not auth_manager or not auth_manager.enabled:
+            return web.json_response({"error": "Auth not configured"}, status=501)
+        username = request.get("auth_user")
+        if not username:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        body = await request.json()
+        name = body.get("name", "").strip()
+        if not name:
+            return web.json_response({"error": "name is required"}, status=400)
+        result = auth_manager.create_device_token(username, name)
+        return web.json_response(result)
+
+    @routes.get("/api/auth/device-tokens")
+    async def list_device_tokens(request: web.Request) -> web.Response:
+        if not auth_manager or not auth_manager.enabled:
+            return web.json_response({"error": "Auth not configured"}, status=501)
+        username = request.get("auth_user")
+        if not username:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        tokens = auth_manager.list_device_tokens(username)
+        return web.json_response({"tokens": tokens})
+
+    @routes.delete("/api/auth/device-tokens/{token_id}")
+    async def delete_device_token(request: web.Request) -> web.Response:
+        if not auth_manager or not auth_manager.enabled:
+            return web.json_response({"error": "Auth not configured"}, status=501)
+        username = request.get("auth_user")
+        if not username:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        token_id = request.match_info["token_id"]
+        if auth_manager.revoke_device_token(username, token_id):
+            return web.json_response({"ok": True})
+        return web.json_response({"error": "Token not found"}, status=404)
+
+    # ── Unified device pairing ───────────────────────────────────────
+
+    @routes.post("/api/pairing/request")
+    async def pairing_request(request: web.Request) -> web.Response:
+        """Public — device requests a pairing code to display."""
+        if not auth_manager or not auth_manager.enabled:
+            return web.json_response({"error": "Auth not configured"}, status=501)
+        ip = request.remote or "unknown"
+        if auth_manager.check_pairing_rate_limit(ip):
+            return web.json_response({"error": "Too many requests"}, status=429)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        device_type = body.get("type", "native")
+        if device_type not in ("native", "second-screen"):
+            return web.json_response({"error": "type must be 'native' or 'second-screen'"}, status=400)
+        client_id = body.get("clientId", "")
+        if device_type == "second-screen" and not client_id:
+            return web.json_response({"error": "clientId required for second-screen"}, status=400)
+        result = auth_manager.request_pairing(device_type, ip, client_id)
+        return web.json_response(result)
+
+    @routes.post("/api/pairing/confirm")
+    async def pairing_confirm(request: web.Request) -> web.Response:
+        """Authenticated — user confirms the code shown on their device."""
+        if not auth_manager or not auth_manager.enabled:
+            return web.json_response({"error": "Auth not configured"}, status=501)
+        username = request.get("auth_user")
+        if not username:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        code = body.get("code", "").strip()
+        name = body.get("name", "").strip()
+        if not code or not name:
+            return web.json_response({"error": "code and name are required"}, status=400)
+        result = auth_manager.confirm_pairing(code, username, name)
+        if not result:
+            return web.json_response({"error": "Invalid or expired code"}, status=400)
+        # Handle second-screen registration
+        if result["type"] == "second-screen":
+            client_id = result["clientId"]
+            _second_screen_pairings[client_id] = {
+                "pairedUser": username,
+                "pairedAt": time.time(),
+                "enabled": True,
+            }
+            _save_pairings()
+            # Push notification to second screen via WebSocket
+            ws = ws_bridge._ws_by_client.get(client_id)
+            if ws and not ws.closed:
+                await ws.send_str(json.dumps({
+                    "type": "second_screen_paired",
+                    "pairedUser": username,
+                }))
+            from server.ring0_events import Ring0Event
+            await ws_bridge.emit_ring0_event(Ring0Event(fields={
+                "type": "second_screen_paired",
+                "clientId": client_id[:8], "user": username,
+            }))
+            logger.info("[pairing] Paired second-screen %s → user=%s", client_id[:8], username)
+        else:
+            logger.info("[pairing] Paired native device '%s' → user=%s", name, username)
+        return web.json_response({"ok": True, "type": result["type"]})
+
+    @routes.get("/api/pairing/status/{code}")
+    async def pairing_status_unified(request: web.Request) -> web.Response:
+        """Public — device polls to check if pairing was confirmed."""
+        if not auth_manager or not auth_manager.enabled:
+            return web.json_response({"error": "Auth not configured"}, status=501)
+        ip = request.remote or "unknown"
+        if auth_manager.check_pairing_brute_force(ip):
+            return web.json_response({"error": "Too many requests"}, status=429)
+        code = request.match_info["code"]
+        status = auth_manager.get_pairing_status(code, ip)
+        return web.json_response(status)
 
     # ── Admin ─────────────────────────────────────────────────────────────
 
@@ -312,6 +508,10 @@ def create_routes(
                 s_dict["lastPromptedAt"] = lpa
             if r0_id and sid == r0_id:
                 s_dict["isRing0"] = True
+            # Enrich with agent runtime state from WsBridge
+            bridge_session = ws_bridge._sessions.get(sid)
+            if bridge_session:
+                s_dict["agentState"] = ws_bridge._derive_agent_status(bridge_session)
             enriched.append(s_dict)
         # Include terminal sessions
         if terminal_manager:
@@ -1123,7 +1323,8 @@ def create_routes(
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         messages = ws_bridge.get_message_history(resolved)
         pending = ws_bridge.get_pending_permissions(resolved)
-        return web.json_response({"messages": messages, "pendingPermissions": pending})
+        formatted = _format_session_output(messages, pending)
+        return web.json_response({"messages": messages, "pendingPermissions": pending, "formatted": formatted})
 
     @routes.get("/api/ring0/clients")
     async def ring0_clients(request: web.Request) -> web.Response:
@@ -1478,66 +1679,68 @@ def create_routes(
 
     @routes.post("/api/second-screen/pair-code")
     async def second_screen_pair_code(request: web.Request) -> web.Response:
-        """Second screen requests a pairing code to display."""
+        """Legacy — delegates to unified pairing. Second screen requests a code."""
+        if not auth_manager or not auth_manager.enabled:
+            # No-auth fallback: use old ephemeral codes
+            body = await request.json()
+            client_id = body.get("clientId", "")
+            if not client_id:
+                return web.json_response({"error": "clientId required"}, status=400)
+            code = secrets.token_hex(3).upper()
+            _pairing_codes[code] = {"secondScreenClientId": client_id, "expiresAt": time.time() + 300}
+            return web.json_response({"code": code})
         body = await request.json()
         client_id = body.get("clientId", "")
         if not client_id:
             return web.json_response({"error": "clientId required"}, status=400)
-
-        # Generate a short alphanumeric code
-        code = secrets.token_hex(3).upper()  # 6 hex chars
-        _pairing_codes[code] = {
-            "secondScreenClientId": client_id,
-            "expiresAt": time.time() + 300,  # 5 min
-        }
-        logger.info(f"[second-screen] Generated pairing code {code} for client {client_id[:8]}")
-        return web.json_response({"code": code})
+        ip = request.remote or "unknown"
+        result = auth_manager.request_pairing("second-screen", ip, client_id)
+        return web.json_response({"code": result["code"]})
 
     @routes.post("/api/second-screen/pair")
     async def second_screen_pair(request: web.Request) -> web.Response:
-        """Primary device submits a pairing code to complete pairing."""
+        """Legacy — delegates to unified pairing. Primary confirms a code."""
         body = await request.json()
-        code = body.get("code", "").upper().strip()
+        code = body.get("code", "").strip()
         if not code:
             return web.json_response({"error": "code required"}, status=400)
-
-        # Resolve username: auth cookie → body param → default
         username = request.get("auth_user") or body.get("username") or _default_username()
+        name = body.get("name", "Second Screen")
 
-        # Validate code
-        entry = _pairing_codes.get(code)
-        if not entry or time.time() > entry["expiresAt"]:
-            _pairing_codes.pop(code, None)
-            return web.json_response({"error": "Invalid or expired code"}, status=400)
+        if auth_manager and auth_manager.enabled:
+            result = auth_manager.confirm_pairing(code, username, name)
+            if not result:
+                return web.json_response({"error": "Invalid or expired code"}, status=400)
+            client_id = result.get("clientId", "")
+        else:
+            # No-auth fallback: use old ephemeral codes
+            code = code.upper()
+            entry = _pairing_codes.get(code)
+            if not entry or time.time() > entry["expiresAt"]:
+                _pairing_codes.pop(code, None)
+                return web.json_response({"error": "Invalid or expired code"}, status=400)
+            client_id = entry["secondScreenClientId"]
+            _pairing_codes.pop(code)
 
-        second_screen_client_id = entry["secondScreenClientId"]
-        _pairing_codes.pop(code)
-
-        # Store durable pairing
-        _second_screen_pairings[second_screen_client_id] = {
+        _second_screen_pairings[client_id] = {
             "pairedUser": username,
             "pairedAt": time.time(),
             "enabled": True,
         }
         _save_pairings()
-
-        # Push notification to the second screen via WebSocket
-        ws = ws_bridge._ws_by_client.get(second_screen_client_id)
+        ws = ws_bridge._ws_by_client.get(client_id)
         if ws and not ws.closed:
             await ws.send_str(json.dumps({
                 "type": "second_screen_paired",
                 "pairedUser": username,
             }))
-
-        # Notify Ring0
         from server.ring0_events import Ring0Event
         await ws_bridge.emit_ring0_event(Ring0Event(fields={
             "type": "second_screen_paired",
-            "clientId": second_screen_client_id[:8], "user": username,
+            "clientId": client_id[:8], "user": username,
         }))
-
-        logger.info(f"[second-screen] Paired {second_screen_client_id[:8]} → user={username}")
-        return web.json_response({"ok": True, "secondScreenClientId": second_screen_client_id})
+        logger.info(f"[second-screen] Paired {client_id[:8]} → user={username}")
+        return web.json_response({"ok": True, "secondScreenClientId": client_id})
 
     @routes.get("/api/second-screen/status")
     async def second_screen_status(request: web.Request) -> web.Response:

@@ -107,6 +107,8 @@ class WsBridge:
         # Native WebSocket connections (Android foreground service, bypasses WebView)
         self._native_ws_by_client: dict[str, web.WebSocketResponse] = {}
         self._native_rpc_pending: dict[str, asyncio.Future] = {}  # id → Future for native responses
+        self._native_subscriptions: dict[str, set[str]] = {}  # clientId → set of sessionIds
+        self._native_subscribe_all: set[str] = set()  # clientIds subscribed to all sessions
         # Client metadata (persisted to ~/.vibr8/clients.json)
         self._client_metadata: dict[str, dict[str, Any]] = {}
         self._CLIENTS_PATH = Path.home() / ".vibr8" / "clients.json"
@@ -120,15 +122,58 @@ class WsBridge:
 
     def unregister_native_ws(self, client_id: str) -> None:
         self._native_ws_by_client.pop(client_id, None)
+        self._native_subscriptions.pop(client_id, None)
+        self._native_subscribe_all.discard(client_id)
         logger.debug("[ws-bridge] Native WS unregistered for client %s", client_id[:8])
 
-    def handle_native_message(self, client_id: str, data: dict) -> None:
-        """Handle an incoming message from a native WebSocket (command response)."""
+    async def handle_native_message(self, client_id: str, data: dict) -> None:
+        """Handle an incoming message from a native WebSocket.
+
+        Supports three categories:
+        - RPC responses (has ``id`` matching a pending request)
+        - Subscriptions (``type: subscribe/unsubscribe``)
+        - Permission responses (``type: permission_response``)
+        """
+        # RPC response
         msg_id = data.get("id")
         if msg_id and msg_id in self._native_rpc_pending:
             future = self._native_rpc_pending.pop(msg_id)
             if not future.done():
                 future.set_result(data)
+            return
+
+        msg_type = data.get("type")
+
+        if msg_type == "subscribe":
+            session_ids = data.get("sessionIds")
+            if data.get("all"):
+                self._native_subscribe_all.add(client_id)
+                self._native_subscriptions.pop(client_id, None)
+            elif session_ids is not None:
+                self._native_subscribe_all.discard(client_id)
+                self._native_subscriptions[client_id] = set(session_ids)
+            logger.info("[ws-bridge] Native subscribe: client=%s all=%s sessions=%s",
+                        client_id[:8], client_id in self._native_subscribe_all,
+                        len(self._native_subscriptions.get(client_id, set())))
+            # Push initial state snapshot so the client doesn't start blind
+            await self._send_initial_state(client_id)
+
+        elif msg_type == "unsubscribe":
+            self._native_subscribe_all.discard(client_id)
+            self._native_subscriptions.pop(client_id, None)
+            logger.info("[ws-bridge] Native unsubscribe: client=%s", client_id[:8])
+
+        elif msg_type == "permission_response":
+            session_id = data.get("sessionId", "")
+            session = self._sessions.get(session_id) if session_id else None
+            if session:
+                await self._handle_permission_response(session, {
+                    "request_id": data.get("request_id", ""),
+                    "behavior": data.get("behavior", "deny"),
+                    "message": data.get("message"),
+                })
+            else:
+                logger.warning("[ws-bridge] Native permission_response for unknown session %s", session_id[:8] if session_id else "?")
 
     # ── Client metadata ─────────────────────────────────────────────────
 
@@ -555,14 +600,16 @@ class WsBridge:
         return self._sessions.get(session_id)
 
     async def broadcast_guard_state(self, session_id: str, enabled: bool, *, client_id: str | None = None) -> None:
-        """Broadcast guard mode state change to browser clients."""
+        """Broadcast guard mode state change to browser and native clients."""
         msg = {"type": "guard_state", "enabled": enabled}
         if client_id:
             await self._send_to_client(client_id, msg)
+            await self._push_to_all_native_clients("guard_state", {"enabled": enabled})
         else:
             session = self._sessions.get(session_id)
             if session:
                 await self._broadcast_to_browsers(session, msg)
+                await self._push_to_native_clients(session_id, "guard_state", {"enabled": enabled})
 
     async def broadcast_audio_off(self, session_id: str) -> None:
         """Tell browser to disconnect WebRTC audio."""
@@ -573,24 +620,28 @@ class WsBridge:
             )
 
     async def broadcast_tts_muted(self, session_id: str, muted: bool, *, client_id: str | None = None) -> None:
-        """Broadcast TTS mute state change to browser clients."""
+        """Broadcast TTS mute state change to browser and native clients."""
         msg = {"type": "tts_muted", "muted": muted}
         if client_id:
             await self._send_to_client(client_id, msg)
+            await self._push_to_all_native_clients("tts_muted", {"muted": muted})
         else:
             session = self._sessions.get(session_id)
             if session:
                 await self._broadcast_to_browsers(session, msg)
+                await self._push_to_native_clients(session_id, "tts_muted", {"muted": muted})
 
     async def broadcast_voice_mode(self, session_id: str, mode: str | None, *, client_id: str | None = None) -> None:
-        """Broadcast voice mode change to browser clients."""
+        """Broadcast voice mode change to browser and native clients."""
         msg = {"type": "voice_mode", "mode": mode}
         if client_id:
             await self._send_to_client(client_id, msg)
+            await self._push_to_all_native_clients("voice_mode", {"mode": mode})
         else:
             session = self._sessions.get(session_id)
             if session:
                 await self._broadcast_to_browsers(session, msg)
+                await self._push_to_native_clients(session_id, "voice_mode", {"mode": mode})
 
     async def broadcast_node_switch(self, node_id: str, node_name: str | None = None) -> None:
         """Broadcast node_switch to all connected browsers (e.g. from voice command)."""
@@ -669,6 +720,7 @@ class WsBridge:
                 if session.pending_permissions:
                     for req_id in list(session.pending_permissions):
                         await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
+                        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
                     session.pending_permissions.clear()
                 self._persist_session(session)
 
@@ -708,6 +760,7 @@ class WsBridge:
         async def on_disconnect() -> None:
             for req_id in list(session.pending_permissions):
                 await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
+                await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
             session.pending_permissions.clear()
             # Clear running/permission state and notify Ring0
             was_waiting = session.state.get("is_waiting_for_permission")
@@ -722,6 +775,7 @@ class WsBridge:
             self._persist_session(session)
             logger.info(f"[ws-bridge] Codex adapter disconnected for session {session_id}")
             await self._broadcast_to_browsers(session, {"type": "cli_disconnected"})
+            await self._push_to_native_clients(session.id, "cli_disconnected")
 
         adapter.on_disconnect(on_disconnect)
 
@@ -737,9 +791,10 @@ class WsBridge:
                 except Exception:
                     logger.warning(f"[ws-bridge] Failed to parse queued message for Codex")
 
-        # Notify browsers
+        # Notify browsers and native clients
         import asyncio
         asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
+        asyncio.ensure_future(self._push_to_native_clients(session.id, "cli_connected"))
         logger.info(f"[ws-bridge] Codex adapter attached for session {session_id}")
 
     # ── CLI WebSocket handlers ───────────────────────────────────────────
@@ -752,6 +807,8 @@ class WsBridge:
         logger.info(f"[ws-bridge] CLI connected for session {session_id} (awaiting replay)")
         import asyncio
         asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
+        asyncio.ensure_future(self._push_to_native_clients(session.id, "cli_connected"))
+        asyncio.ensure_future(self._push_to_all_native_clients("sessions_changed"))
 
         # Flush queued messages
         if session.pending_messages:
@@ -802,9 +859,11 @@ class WsBridge:
         is_waiting = session.state.get("is_waiting_for_permission")
         logger.info(f"[ws-bridge] CLI disconnected for session {session_id} is_running={is_running} is_waiting={is_waiting} pending_perms={len(pending_perms)}")
         await self._broadcast_to_browsers(session, {"type": "cli_disconnected"})
+        await self._push_to_native_clients(session.id, "cli_disconnected")
 
         for req_id in list(session.pending_permissions):
             await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
+            await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
         session.pending_permissions.clear()
         # Clear running/permission state and notify Ring0
         was_waiting = session.state.get("is_waiting_for_permission")
@@ -815,6 +874,8 @@ class WsBridge:
             asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→idle"))
         elif was_running:
             asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
+
+        asyncio.ensure_future(self._push_to_all_native_clients("sessions_changed"))
 
     # ── Browser WebSocket handlers ───────────────────────────────────────
 
@@ -1107,6 +1168,10 @@ class WsBridge:
             session.state["is_running"] = True
             import asyncio
             asyncio.ensure_future(self._notify_ring0_state_change(session, "idle→running"))
+            asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
+                "agentStatus": "running",
+                "isRunning": True, "isWaitingForPermission": False,
+            }))
 
         text = msg.get("message")
 
@@ -1244,6 +1309,10 @@ class WsBridge:
             session.state["is_running"] = False
             import asyncio
             asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
+            asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
+                "agentStatus": "idle",
+                "isRunning": False, "isWaitingForPermission": False,
+            }))
             # Restart pen timeout when session goes idle
             if session.controlled_by == "user":
                 self._schedule_pen_release(session)
@@ -1345,6 +1414,7 @@ class WsBridge:
             }
             session.pending_permissions[msg.get("request_id", "")] = perm
             await self._broadcast_to_browsers(session, {"type": "permission_request", "request": perm})
+            await self._push_to_native_clients(session.id, "permission_request", {"request": perm})
             self._persist_session(session)
             # Notify Ring0 of every permission request — not just the first.
             tool_name = perm.get("tool_name", "?")
@@ -1567,11 +1637,12 @@ class WsBridge:
                     session.state["is_running"] = False
                     asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→idle"))
         self._persist_session(session)
-        # Notify all browsers so other devices dismiss the banner.
+        # Notify all browsers and native clients so other devices dismiss the banner.
         await self._broadcast_to_browsers(session, {
             "type": "permission_cancelled",
             "request_id": request_id,
         })
+        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": request_id})
 
     def _handle_interrupt(self, session: Session) -> None:
         self.interrupt_session(session.id)
@@ -1897,6 +1968,16 @@ class WsBridge:
             if session.cli_socket:
                 await session.cli_socket.close()
 
+        # Close all native WebSocket connections and clear subscription state.
+        for ws in list(self._native_ws_by_client.values()):
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        self._native_ws_by_client.clear()
+        self._native_subscriptions.clear()
+        self._native_subscribe_all.clear()
+
     # ── Transport helpers ────────────────────────────────────────────────
 
     def _send_to_cli(self, session: Session, ndjson: str) -> None:
@@ -1936,6 +2017,7 @@ class WsBridge:
             msg["userRenamed"] = True
         await self._broadcast_to_browsers(session, msg)
         self._persist_session(session)
+        asyncio.ensure_future(self._push_to_all_native_clients("sessions_changed"))
 
     async def broadcast_ring0_switch_ui(self, target_session_id: str, *, client_id: str = "") -> bool:
         """Send ring0_switch_ui to a specific client or broadcast to all browsers.
@@ -2071,6 +2153,7 @@ class WsBridge:
             "type": "permission_cancelled",
             "request_id": request_id,
         })
+        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": request_id})
         return True
 
     async def _broadcast_to_browsers(self, session: Session, msg: dict[str, Any]) -> None:
@@ -2097,6 +2180,86 @@ class WsBridge:
             if client_id:
                 self._client_sessions.pop(client_id, None)
                 self._ws_by_client.pop(client_id, None)
+
+    async def _send_initial_state(self, client_id: str) -> None:
+        """Push a full state snapshot to a native client after subscribe."""
+        ws = self._native_ws_by_client.get(client_id)
+        if not ws or ws.closed:
+            return
+        subscribe_all = client_id in self._native_subscribe_all
+        subscribed_ids = self._native_subscriptions.get(client_id)
+        session_states: list[dict[str, Any]] = []
+        for session in self._sessions.values():
+            if not subscribe_all:
+                if not subscribed_ids or session.id not in subscribed_ids:
+                    continue
+            perms = [
+                {"id": req_id, "tool_name": p.get("tool_name", ""), "description": p.get("description", "")}
+                for req_id, p in session.pending_permissions.items()
+            ]
+            session_states.append({
+                "sessionId": session.id,
+                "cliConnected": session.cli_socket is not None or session.codex_adapter is not None,
+                "agentStatus": self._derive_agent_status(session),
+                "pendingPermissions": perms,
+            })
+        msg = json.dumps({"type": "push", "event": "initial_state", "sessions": session_states})
+        try:
+            await ws.send_str(msg)
+        except Exception:
+            logger.debug("[ws-bridge] Failed to send initial_state to native client %s", client_id[:8])
+
+    def _derive_agent_status(self, session: Session) -> str:
+        """Canonical agent runtime status: idle, running, waiting_for_permission, compacting."""
+        if session.pending_permissions:
+            return "waiting_for_permission"
+        if session.state.get("is_compacting"):
+            return "compacting"
+        if session.state.get("is_running"):
+            return "running"
+        return "idle"
+
+    async def _push_to_native_clients(self, session_id: str, event: str, payload: dict[str, Any] | None = None) -> None:
+        """Push a notification to native clients subscribed to *session_id*."""
+        if not self._native_ws_by_client:
+            return
+        msg: dict[str, Any] = {"type": "push", "event": event, "sessionId": session_id}
+        if payload:
+            msg.update(payload)
+        data = json.dumps(msg)
+        dead: list[str] = []
+        for cid, ws in self._native_ws_by_client.items():
+            if cid not in self._native_subscribe_all:
+                subs = self._native_subscriptions.get(cid)
+                if not subs or session_id not in subs:
+                    continue
+            try:
+                await ws.send_str(data)
+            except Exception:
+                dead.append(cid)
+        for cid in dead:
+            self._native_ws_by_client.pop(cid, None)
+            self._native_subscriptions.pop(cid, None)
+            self._native_subscribe_all.discard(cid)
+
+    async def _push_to_all_native_clients(self, event: str, payload: dict[str, Any] | None = None) -> None:
+        """Push a notification to ALL connected native clients (not session-scoped)."""
+        if not self._native_ws_by_client:
+            return
+        msg: dict[str, Any] = {"type": "push", "event": event}
+        if payload:
+            msg.update(payload)
+        data = json.dumps(msg)
+        dead: list[str] = []
+        for cid, ws in self._native_ws_by_client.items():
+            try:
+                await ws.send_str(data)
+            except Exception:
+                dead.append(cid)
+        for cid in dead:
+            self._native_ws_by_client.pop(cid, None)
+            self._native_subscriptions.pop(cid, None)
+            self._native_subscribe_all.discard(cid)
 
     async def _send_to_client(self, client_id: str, msg: dict[str, Any]) -> None:
         """Send a message to a specific client's current browser WebSocket."""

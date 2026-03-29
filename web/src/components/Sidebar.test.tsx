@@ -45,7 +45,7 @@ interface MockStoreState {
   currentSessionId: string | null;
   darkMode: boolean;
   cliConnected: Map<string, boolean>;
-  sessionStatus: Map<string, "idle" | "running" | "compacting" | null>;
+  sessionStatus: Map<string, "idle" | "running" | "compacting" | "waiting_for_permission" | null>;
   sessionNames: Map<string, string>;
   recentlyRenamed: Set<string>;
   pendingPermissions: Map<string, Map<string, unknown>>;

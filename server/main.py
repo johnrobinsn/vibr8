@@ -187,7 +187,7 @@ async def handle_native_ws(request: web.Request) -> web.WebSocketResponse:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
                     data = _json.loads(msg.data)
-                    bridge.handle_native_message(client_id, data)
+                    await bridge.handle_native_message(client_id, data)
                 except Exception:
                     logger.exception("[native] Error handling message from client %s", client_id[:8])
             elif msg.type == aiohttp.WSMsgType.ERROR:

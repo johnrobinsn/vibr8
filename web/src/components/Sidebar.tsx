@@ -394,6 +394,7 @@ export function Sidebar() {
     const label = name || s.model || shortId;
     const dirName = s.cwd ? s.cwd.split("/").pop() : "";
     const isRunning = s.status === "running";
+    const isWaiting = s.status === "waiting_for_permission";
     const isCompacting = s.status === "compacting";
     const isEditing = editingSessionId === s.id;
     const permCount = pendingPermissions.get(s.id)?.size ?? 0;
@@ -474,23 +475,21 @@ export function Sidebar() {
                 className={`w-2 h-2 rounded-full ${
                   archived
                     ? "bg-cc-muted opacity-40"
-                    : permCount > 0
-                    ? "bg-cc-warning"
-                    : s.sdkState === "exited"
+                    : !(s.isConnected || s.backendType === "terminal")
                     ? "bg-cc-muted opacity-40"
-                    : (s.isConnected || s.backendType === "terminal")
-                    ? isRunning
-                      ? "bg-cc-success"
-                      : isCompacting
-                      ? "bg-cc-warning"
-                      : "bg-cc-success opacity-60"
-                    : "bg-cc-muted opacity-40"
+                    : (isWaiting || permCount > 0)
+                    ? "bg-cc-warning"
+                    : isRunning
+                    ? "bg-cc-success"
+                    : isCompacting
+                    ? "bg-cc-warning"
+                    : "bg-cc-success opacity-60"
                 }`}
               />
-              {!archived && permCount > 0 && (
+              {!archived && (isWaiting || permCount > 0) && s.isConnected && (
                 <span className="absolute inset-0 w-2 h-2 rounded-full bg-cc-warning/40 animate-[pulse-dot_1.5s_ease-in-out_infinite]" />
               )}
-              {!archived && permCount === 0 && isRunning && s.isConnected && (
+              {!archived && !(isWaiting || permCount > 0) && isRunning && s.isConnected && (
                 <span className="absolute inset-0 w-2 h-2 rounded-full bg-cc-success/40 animate-[pulse-dot_1.5s_ease-in-out_infinite]" />
               )}
             </span>

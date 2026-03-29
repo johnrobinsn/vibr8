@@ -68,7 +68,7 @@ function makeSession(overrides: Partial<SessionState> = {}): SessionState {
 
 function setupMockStore(overrides: {
   isConnected?: boolean;
-  sessionStatus?: "idle" | "running" | "compacting" | null;
+  sessionStatus?: "idle" | "running" | "compacting" | "waiting_for_permission" | null;
   session?: Partial<SessionState>;
 } = {}) {
   const {
@@ -83,7 +83,7 @@ function setupMockStore(overrides: {
   const cliConnectedMap = new Map<string, boolean>();
   cliConnectedMap.set("s1", isConnected);
 
-  const sessionStatusMap = new Map<string, "idle" | "running" | "compacting" | null>();
+  const sessionStatusMap = new Map<string, "idle" | "running" | "compacting" | "waiting_for_permission" | null>();
   sessionStatusMap.set("s1", sessionStatus);
 
   const previousPermissionModeMap = new Map<string, string>();
