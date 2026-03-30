@@ -525,13 +525,82 @@ Or it can be pushed to a second screen for dual-monitor workflows:
 - Primary screen: vibr8 chat/editor
 - Second screen: live remote desktop from the node
 
-### 4.7 Phase 2 Open Questions
+### 4.7 Phase 2 Decisions (Resolved)
 
-1. **Frame rate vs quality tradeoff**: Interactive desktop needs 30fps minimum. What resolution and bitrate are acceptable over typical connections?
-2. **Audio from remote desktop**: Should the remote node's audio output also be captured and streamed? (System audio, not just voice.)
-3. **Clipboard sync**: Should clipboard be automatically synced between browser and remote node, or on-demand?
-4. **Multi-monitor**: If the remote node has multiple displays, how does the user choose which one to share?
-5. **Security**: Remote desktop access is powerful. Should it require additional authorization beyond the node API key?
+1. **Frame rate / quality**: 30fps, 1080p max resolution, ~2Mbps target bitrate. Sufficient for interactive desktop use over typical broadband connections.
+2. **Remote audio**: Skip for MVP. Voice audio already handled by the existing WebRTC audio stack. System audio capture adds complexity with minimal value for the primary use case (remote coding/terminal).
+3. **Clipboard sync**: On-demand only. A user-triggered button (not automatic sync) copies clipboard content between browser and remote node. Avoids privacy concerns and unexpected data leakage.
+4. **Multi-monitor**: Primary display only for MVP. No monitor picker UI. If the node has multiple displays, it captures the primary/default display. Multi-monitor support can be added later as a dropdown.
+5. **Security**: No additional authorization beyond the existing node API key. The node already authenticates via its API key on registration and WebSocket tunnel. Remote desktop access is implicitly authorized when the node is connected.
+
+### 4.8 Phase 2 Implementation Plan
+
+#### Milestone 1: Node-Side Screen Capture
+
+**Goal**: Node daemon captures its primary display as raw frames and exposes a capture API.
+
+**Deliverables**:
+- Platform abstraction layer: `ScreenCapture` interface with `start()`, `stop()`, `get_frame()` methods
+- **macOS backend**: `CGDisplayStream` via PyObjC — registers a callback that receives `IOSurface` frames, converts to numpy arrays. Captures primary display at native resolution, downscaled to ≤1080p before encoding.
+- **Linux backend**: PipeWire screen capture portal (`org.freedesktop.portal.ScreenCast`) for Wayland; `XShmGetImage` fallback for X11. Uses D-Bus to request screen capture permission on first run.
+- Frame rate control: 30fps target with adaptive frame skipping (only send frames that actually changed, using frame differencing or damage regions from the platform API)
+- Resolution negotiation: node reports its display resolution; hub/browser can request a target resolution ≤ native
+- Standalone test: capture → save as JPEG sequence, verify frame rate and resolution
+
+#### Milestone 2: WebRTC Video Track (Node → Hub → Browser)
+
+**Goal**: Stream captured frames as a WebRTC video track through the hub to the browser.
+
+**Deliverables**:
+- **Node-side**: `VideoStreamTrack` subclass (aiortc) that pulls frames from the `ScreenCapture` layer. Encodes as VP8 (widely supported, good for screen content). Bitrate target: 2Mbps, adjustable via WebRTC bandwidth estimation.
+- **Hub relay (SFU mode)**: Hub receives the node's video track over the existing WebSocket tunnel (or a dedicated WebRTC peer connection between node and hub). Hub forwards the video track to the browser's peer connection without re-encoding. The hub acts as a simple relay — it does not transcode.
+- **Signaling**: Extend the existing `/api/webrtc/offer` endpoint to support video track negotiation. Add a `desktop` flag to the offer request to distinguish desktop streaming from voice-only connections. The SDP offer/answer exchange adds a video media section alongside the existing audio section.
+- **Browser-side**: Extend `webrtc.ts` to handle incoming video tracks. When a video track arrives, emit an event that the UI can subscribe to. The `RTCPeerConnection` already exists for audio — this adds a video transceiver in recvonly mode.
+- **Bandwidth adaptation**: Use WebRTC's built-in bandwidth estimation. If bandwidth drops below 1Mbps, reduce resolution to 720p. Below 500Kbps, reduce to 480p and 15fps.
+- Integration test: node captures test pattern → hub relays → browser receives video track → verify frame arrives
+
+#### Milestone 3: Desktop View in vibr8 UI
+
+**Goal**: Add a Desktop view tab that displays the remote node's screen as a live video stream.
+
+**Deliverables**:
+- **`DesktopView.tsx` component**: Renders a `<video>` element bound to the incoming WebRTC video track's `MediaStream`. Auto-scales to fit the container while preserving aspect ratio. Shows connection status overlay (connecting, connected, disconnected).
+- **View mode integration**: Add "Desktop" as a third tab alongside Chat and Editor in the session view. Only visible when the active session is on a remote node that advertises screen capture capability.
+- **Toolbar**: Floating toolbar over the video with controls:
+  - Fullscreen toggle
+  - Scale mode: Fit / Fill / Native (1:1 pixel mapping with scroll)
+  - Clipboard sync button (copies browser clipboard to node or vice versa)
+  - Connection quality indicator (bitrate, fps, resolution)
+  - Disconnect button
+- **Second screen support**: "Open on second screen" button pushes the desktop view to a paired second screen display. The second screen renders the `<video>` element full-viewport. This reuses the existing second screen content-push mechanism but with a video stream instead of HTML.
+- **Cursor rendering**: Remote cursor position is sent from the node as a data channel message. The UI renders a cursor overlay on top of the video at the correct position, so the user can see where the remote cursor is even when not actively controlling it.
+
+#### Milestone 4: Bidirectional Input (Browser → Node)
+
+**Goal**: User can control the remote desktop with keyboard, mouse, and touch from the browser.
+
+**Deliverables**:
+- **Input capture layer** (`DesktopInput.ts`): When the Desktop view is focused/active, capture DOM events (`keydown`, `keyup`, `mousemove`, `mousedown`, `mouseup`, `wheel`, `touchstart`, `touchmove`, `touchend`) and translate them to the input event protocol defined in §4.3.
+- **Coordinate mapping**: Mouse/touch coordinates are mapped from the browser's `<video>` element dimensions to the remote display's native resolution, accounting for aspect ratio letterboxing and the current scale mode.
+- **Transport**: Input events are sent via a WebRTC data channel (`RTCDataChannel` named `"input"`). This gives the lowest latency path. Fallback: send over the existing WebSocket tunnel if data channel isn't available.
+- **Node-side injection**:
+  - **macOS**: `CGEventPost(kCGHIDEventTap, event)` for mouse events, `CGEventCreateKeyboardEvent` for key events. Uses Quartz event services. Requires Accessibility permissions (prompted on first use).
+  - **Linux**: `python-uinput` to create a virtual input device, or `xdotool` for X11 / `ydotool` for Wayland. The `uinput` approach is preferred (no X11 dependency, works on headless servers with virtual framebuffers).
+- **Key mapping**: Browser `KeyboardEvent.code` values (physical key codes like `"KeyA"`, `"ShiftLeft"`) are mapped to platform-specific keycodes on the node side. A mapping table covers the standard 104-key US layout; non-US layouts use the `key` property as fallback.
+- **Pointer lock**: Optional — when the user clicks a "Capture input" button, the browser enters pointer lock mode (`requestPointerLock()`) for relative mouse movement (useful for games/3D apps). Without pointer lock, absolute mouse positioning is used (sufficient for normal desktop use).
+- **Input gating**: Input injection is only active when the Desktop view is focused. Clicking outside the video element releases input capture. A visual indicator ("Input active" / "Input paused") shows the current state.
+- Integration test: browser sends synthetic click event → node receives and injects → screenshot confirms cursor moved
+
+#### Milestone 5: Polish and Edge Cases
+
+**Goal**: Production-ready remote desktop experience.
+
+**Deliverables**:
+- **Reconnection**: If the WebRTC connection drops, auto-reconnect with exponential backoff. Preserve the Desktop view tab state (don't reset to Chat on reconnect).
+- **Clipboard sync implementation**: "Copy to remote" reads `navigator.clipboard.readText()` and sends it to the node via data channel. Node writes to its clipboard via `pbcopy` (macOS) or `xclip`/`wl-copy` (Linux). Reverse direction: node reads clipboard and sends to browser, browser writes via `navigator.clipboard.writeText()`. Both directions are user-triggered (button click).
+- **Performance telemetry**: Expose `RTCPeerConnection.getStats()` data — frame rate, resolution, bitrate, round-trip time, packet loss. Display in the toolbar's quality indicator. Log warnings when quality degrades.
+- **Session lifecycle**: When a remote node disconnects, the Desktop tab shows a "Node offline" state instead of disappearing. When the node reconnects, streaming resumes automatically.
+- **Mobile/touch**: On mobile browsers, touch events on the video map to mouse events on the remote desktop. Pinch-to-zoom controls the scale mode. Two-finger scroll maps to scroll events.
 
 ---
 
