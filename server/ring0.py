@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
+    from server.auth import AuthManager
     from server.cli_launcher import CliLauncher
     from server.ws_bridge import WsBridge
 
@@ -137,8 +138,10 @@ When mirroring, the second screen shows that session's full chat with live strea
 class Ring0Manager:
     """Manages the Ring0 meta-agent session."""
 
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, auth_manager: Optional[AuthManager] = None) -> None:
         self._port = port
+        self._auth_manager = auth_manager
+        self._service_token: Optional[str] = None
         self._enabled: bool = False
         self._events_muted: bool = False
         self._session_id: str = RING0_SESSION_ID
@@ -159,6 +162,15 @@ class Ring0Manager:
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    def _get_service_token(self) -> Optional[str]:
+        """Get or create a service token for Ring0 MCP API calls."""
+        if not self._auth_manager or not self._auth_manager.enabled:
+            return None
+        if not self._service_token:
+            self._service_token = self._auth_manager.create_service_token("ring0")
+            logger.info("[ring0] Created service token for MCP API access")
+        return self._service_token
 
     # ── Enable / Disable ──────────────────────────────────────────────────
 
@@ -251,7 +263,10 @@ class Ring0Manager:
                     "type": "stdio",
                     "command": uv_bin,
                     "args": ["run", "--project", str(server_dir), "--no-sync", "python", mcp_script],
-                    "env": {"VIBR8_PORT": str(self._port)},
+                    "env": {
+                        "VIBR8_PORT": str(self._port),
+                        **({} if not self._get_service_token() else {"VIBR8_TOKEN": self._get_service_token()}),
+                    },
                 }
             }
         }

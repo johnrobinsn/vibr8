@@ -1131,6 +1131,7 @@ def create_routes(
         sdp_type = body.get("type", "offer")
         session_id = body.get("sessionId", "")
         playground = bool(body.get("playground", False))
+        desktop = bool(body.get("desktop", False))
         profile_id = body.get("profileId")
         username = _get_username(request)
 
@@ -1146,6 +1147,7 @@ def create_routes(
                 playground=playground,
                 profile_id=profile_id,
                 username=username,
+                desktop=desktop,
             )
             return web.json_response(answer)
         except Exception as e:

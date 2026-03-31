@@ -1,7 +1,7 @@
 import { useStore } from "./store.js";
 import { api } from "./api.js";
 import { disconnectSession } from "./ws.js";
-import { stopWebRTC } from "./webrtc.js";
+import { startWebRTC, stopWebRTC, isWebRTCActive, stopDesktopStream, isDesktopStreamActive } from "./webrtc.js";
 
 export interface CommandContext {
   param?: string;
@@ -123,6 +123,27 @@ export const commands: Command[] = [
       } catch (err) {
         console.error("[pairing] Pairing failed:", err);
       }
+    },
+  },
+  {
+    id: "desktop.start",
+    label: "Start Desktop Stream",
+    description: "Stream the server's screen via WebRTC",
+    icon: "ui",
+    execute: () => {
+      useStore.getState().setActiveView("desktop");
+      startWebRTC({ desktop: true }).catch((err) => {
+        console.error("[desktop] Failed to start:", err);
+      });
+    },
+  },
+  {
+    id: "desktop.stop",
+    label: "Stop Desktop Stream",
+    description: "Disconnect the desktop stream",
+    icon: "ui",
+    execute: () => {
+      stopDesktopStream();
     },
   },
 ];

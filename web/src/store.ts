@@ -65,6 +65,7 @@ interface AppState {
   taskPanelOpen: boolean;
   homeResetKey: number;
   activeTab: "chat" | "editor" | "terminal";
+  activeView: "session" | "desktop";
   editorOpenFile: Map<string, string>;
   editorUrl: Map<string, string>;
   editorLoading: Map<string, boolean>;
@@ -82,6 +83,10 @@ interface AppState {
   guardEnabled: boolean;
   voiceMode: string | null;
   activeAudioInputLabel: string | null;
+  desktopStreamActive: boolean;
+  desktopRemoteStream: MediaStream | null;
+  desktopStatus: "idle" | "connecting" | "connected" | "reconnecting" | "offline";
+  desktopStats: { fps: number; bitrate: number; rtt: number } | null;
 
   // Focus management
   pendingFocus: "composer" | "terminal" | "home" | null;
@@ -169,6 +174,7 @@ interface AppState {
 
   // Editor actions
   setActiveTab: (tab: "chat" | "editor") => void;
+  setActiveView: (view: "session" | "desktop") => void;
   setEditorOpenFile: (sessionId: string, filePath: string | null) => void;
   setEditorUrl: (sessionId: string, url: string) => void;
   setEditorLoading: (sessionId: string, loading: boolean) => void;
@@ -179,6 +185,10 @@ interface AppState {
   setIsRecording: (recording: boolean) => void;
   setWebRTCStatus: (status: string | null) => void;
   setWebRTCTransport: (transport: "direct" | "relay" | null) => void;
+  setDesktopStreamActive: (active: boolean) => void;
+  setDesktopRemoteStream: (stream: MediaStream | null) => void;
+  setDesktopStatus: (status: "idle" | "connecting" | "connected" | "reconnecting" | "offline") => void;
+  setDesktopStats: (stats: { fps: number; bitrate: number; rtt: number } | null) => void;
 
   // Focus management actions
   setPendingFocus: (target: "composer" | "terminal" | "home" | null) => void;
@@ -249,6 +259,7 @@ export const useStore = create<AppState>((set) => ({
   taskPanelOpen: typeof window !== "undefined" ? localStorage.getItem("cc-task-panel-open") !== "false" && window.innerWidth >= 1024 : false,
   homeResetKey: 0,
   activeTab: "chat",
+  activeView: "session" as const,
   editorOpenFile: new Map(),
   editorUrl: new Map(),
   editorLoading: new Map(),
@@ -259,6 +270,10 @@ export const useStore = create<AppState>((set) => ({
   isRecording: false,
   webrtcStatus: null,
   webrtcTransport: null,
+  desktopStreamActive: false,
+  desktopRemoteStream: null,
+  desktopStatus: "idle" as const,
+  desktopStats: null,
   guardEnabled: typeof window !== "undefined" ? localStorage.getItem("cc-guard-enabled") !== "false" : true,
   voiceMode: null,
   activeAudioInputLabel: null,
@@ -662,6 +677,7 @@ export const useStore = create<AppState>((set) => ({
     }),
 
   setActiveTab: (tab) => set({ activeTab: tab }),
+  setActiveView: (view) => set({ activeView: view }),
 
   setEditorOpenFile: (sessionId, filePath) =>
     set((s) => {
@@ -698,6 +714,12 @@ export const useStore = create<AppState>((set) => ({
   setIsRecording: (recording) => set({ isRecording: recording }),
   setWebRTCStatus: (status) => set({ webrtcStatus: status }),
   setWebRTCTransport: (transport) => set({ webrtcTransport: transport }),
+  setDesktopStreamActive: (active) => {
+    set({ desktopStreamActive: active });
+  },
+  setDesktopRemoteStream: (stream) => set({ desktopRemoteStream: stream }),
+  setDesktopStatus: (status) => set({ desktopStatus: status }),
+  setDesktopStats: (stats) => set({ desktopStats: stats }),
   setGuardEnabled: (enabled) => {
     localStorage.setItem("cc-guard-enabled", String(enabled));
     set({ guardEnabled: enabled });
@@ -759,6 +781,7 @@ export const useStore = create<AppState>((set) => ({
       sessionNames: new Map(),
       recentlyRenamed: new Set(),
       activeTab: "chat" as const,
+      activeView: "session" as const,
       editorOpenFile: new Map(),
       editorUrl: new Map(),
       editorLoading: new Map(),
@@ -767,6 +790,10 @@ export const useStore = create<AppState>((set) => ({
       isRecording: false,
       webrtcStatus: null,
       webrtcTransport: null,
+      desktopStreamActive: false,
+      desktopRemoteStream: null,
+      desktopStatus: "idle" as const,
+      desktopStats: null,
       guardEnabled: true,
       voiceMode: null,
       activeAudioInputLabel: null,

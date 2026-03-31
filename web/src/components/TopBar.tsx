@@ -17,6 +17,7 @@ export function TopBar() {
   const setTaskPanelOpen = useStore((s) => s.setTaskPanelOpen);
   const activeTab = useStore((s) => s.activeTab);
   const setActiveTab = useStore((s) => s.setActiveTab);
+  const activeView = useStore((s) => s.activeView);
   const connectionStatus = useStore((s) => s.connectionStatus);
   const reconnecting = useStore((s) => s.reconnecting);
   const reconnectGaveUp = useStore((s) => s.reconnectGaveUp);
@@ -112,31 +113,31 @@ export function TopBar() {
         )}
 
         {/* Session name — inline on mobile (avoids camera notch), hidden on desktop (centered instead) */}
-        {currentSessionId && sessionName && (
+        {activeView === "desktop" ? (
+          <span className="sm:hidden text-sm text-cc-fg font-semibold truncate max-w-[35vw]">
+            Desktop
+          </span>
+        ) : currentSessionId && sessionName ? (
           <span className="sm:hidden text-sm text-cc-fg font-semibold truncate max-w-[35vw]">
             {sessionName}
           </span>
-        )}
+        ) : null}
       </div>
 
       {/* ── Center — session name (desktop only) ── */}
-      {currentSessionId && (
+      {activeView === "desktop" ? (
         <div className="hidden sm:block absolute left-1/2 -translate-x-1/2 max-w-[40%] pointer-events-none">
-          {status === "running" || status === "compacting" ? (
-            sessionName && (
-              <span className="text-sm text-cc-fg font-semibold truncate block">
-                {sessionName}
-              </span>
-            )
-          ) : (
-            sessionName && (
-              <span className="text-sm text-cc-fg font-semibold truncate block">
-                {sessionName}
-              </span>
-            )
+          <span className="text-sm text-cc-fg font-semibold truncate block">Desktop</span>
+        </div>
+      ) : currentSessionId ? (
+        <div className="hidden sm:block absolute left-1/2 -translate-x-1/2 max-w-[40%] pointer-events-none">
+          {sessionName && (
+            <span className="text-sm text-cc-fg font-semibold truncate block">
+              {sessionName}
+            </span>
           )}
         </div>
-      )}
+      ) : null}
 
       {/* ── Right side ── */}
       {currentSessionId && !isTerminalSession && (

@@ -15,8 +15,8 @@ function formatDuration(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function shortId(uuid: string): string {
-  return uuid.slice(0, 8);
+function shortId(uuid: string | null | undefined): string {
+  return uuid ? uuid.slice(0, 8) : "—";
 }
 
 function CopyableText({ text, className }: { text: string; className?: string }) {

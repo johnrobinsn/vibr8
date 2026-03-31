@@ -111,17 +111,34 @@ class AuthManager:
         ).hexdigest()
         return f"s:{payload}:{sig}"
 
+    def create_service_token(self, service_name: str) -> str:
+        """Create an internal service token: svc:name:timestamp:signature.
+
+        Service tokens don't require the username to exist in users.json.
+        Used for internal components like Ring0 MCP that call protected API routes.
+        """
+        ts = str(int(time.time()))
+        payload = f"{service_name}:{ts}"
+        sig = hmac.new(
+            self._secret.encode(), payload.encode(), hashlib.sha256
+        ).hexdigest()
+        return f"svc:{payload}:{sig}"
+
     def validate_session(self, token: str) -> Optional[str]:
-        """Validate an HMAC-signed token (session or device). Stateless — survives server restarts.
+        """Validate an HMAC-signed token (session, device, or service). Stateless — survives server restarts.
 
         Token formats:
-          s:username:timestamp:signature   (session, 30-day expiry)
-          d:username:timestamp:signature   (device, no expiry, revocable)
-          username:timestamp:signature     (legacy session, backward compat)
+          s:username:timestamp:signature     (session, 30-day expiry)
+          d:username:timestamp:signature     (device, no expiry, revocable)
+          svc:service:timestamp:signature    (service, no expiry, no user check)
+          username:timestamp:signature       (legacy session, backward compat)
         """
         # Determine token type
         token_type = "s"  # default: session (legacy compat)
-        if token.startswith("s:") or token.startswith("d:"):
+        if token.startswith("svc:"):
+            token_type = "svc"
+            token = token[4:]  # strip "svc:" prefix
+        elif token.startswith("s:") or token.startswith("d:"):
             token_type = token[0]
             token = token[2:]  # strip prefix
 
@@ -150,6 +167,9 @@ class AuthManager:
                 return None
             # Track last-used time
             self._update_device_last_used(sig)
+        # Service tokens skip user-exists check (internal components)
+        if token_type == "svc":
+            return username
         # Verify user still exists
         if username not in self._users:
             return None

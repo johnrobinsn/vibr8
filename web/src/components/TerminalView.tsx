@@ -36,6 +36,11 @@ function getOrCreateTerminal(sessionId: string) {
 
   // Intercept Ctrl/Cmd+Alt shortcuts (events don't bubble out of xterm)
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+    if (e.type === "keydown" && e.key === "k" && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      useStore.getState().toggleCommandPalette();
+      return false;
+    }
     if (e.type === "keydown" && e.altKey && (e.metaKey || e.ctrlKey)) {
       if (e.key === "s") {
         e.preventDefault();

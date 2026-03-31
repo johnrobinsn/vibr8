@@ -3,21 +3,26 @@ import { api } from "./api.js";
 
 export interface WebRTCSession {
   pc: RTCPeerConnection;
-  localStream: MediaStream;
+  localStream: MediaStream | null;
   remoteAudio: HTMLAudioElement;
+  remoteVideoStream: MediaStream | null;
 }
 
 // Store on window to survive Vite HMR module reloads
 const _w = window as unknown as Record<string, unknown>;
 const rtcSessions = (_w.__v8_rtcSessions ??= new Map<string, WebRTCSession>()) as Map<string, WebRTCSession>;
 
-export async function startWebRTC(): Promise<void> {
+export async function startWebRTC(opts?: { desktop?: boolean }): Promise<void> {
+  if (opts?.desktop) {
+    return startDesktopStream();
+  }
+
   const store0 = useStore.getState();
   const clientId = store0.clientId;
 
   if (rtcSessions.has(clientId)) return;
 
-  // Only one WebRTC session at a time — close any existing one first.
+  // Only one audio WebRTC session at a time — close any existing one first.
   for (const [existingId] of rtcSessions) {
     stopWebRTC();
     break;
@@ -27,7 +32,7 @@ export async function startWebRTC(): Promise<void> {
   store0.setAudioActive(true);
   store0.setAudioMode("connecting");
 
-  // Get mic permission — restore saved device preference if available
+  // Get mic permission
   const audioConstraints: MediaTrackConstraints = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
   const savedInputLabel = localStorage.getItem("cc-audio-input-label");
   if (savedInputLabel) {
@@ -59,15 +64,25 @@ export async function startWebRTC(): Promise<void> {
   const remoteAudio = new Audio();
   remoteAudio.autoplay = true;
 
+  // Remote video stream (populated if server sends a video track)
+  let remoteVideoStream: MediaStream | null = null;
+
   // Handle incoming remote tracks
   pc.ontrack = (event) => {
-    if (event.streams[0]) {
-      remoteAudio.srcObject = event.streams[0];
+    if (event.track.kind === "video") {
+      remoteVideoStream = event.streams[0] || new MediaStream([event.track]);
+      const existing = rtcSessions.get(clientId);
+      if (existing) existing.remoteVideoStream = remoteVideoStream;
     } else {
-      remoteAudio.srcObject = new MediaStream([event.track]);
+      // Audio track
+      if (event.streams[0]) {
+        remoteAudio.srcObject = event.streams[0];
+      } else {
+        remoteAudio.srcObject = new MediaStream([event.track]);
+      }
+      // Ensure playback starts (may be blocked by autoplay policy)
+      remoteAudio.play().catch(() => {});
     }
-    // Ensure playback starts (may be blocked by autoplay policy)
-    remoteAudio.play().catch(() => {});
   };
 
   // Monitor connection state changes
@@ -122,7 +137,7 @@ export async function startWebRTC(): Promise<void> {
   );
 
   // Store the session keyed by clientId
-  rtcSessions.set(clientId, { pc, localStream, remoteAudio });
+  rtcSessions.set(clientId, { pc, localStream, remoteAudio, remoteVideoStream });
 
   // Detect active audio input device
   queryActiveInputDevice();
@@ -173,6 +188,235 @@ export function setAudioInOut(): void {
   store.setAudioMode("in_out");
 }
 
+// ── Desktop stream (separate connection from audio) ──────────────────────
+
+interface DesktopSession {
+  pc: RTCPeerConnection;
+  remoteVideoStream: MediaStream | null;
+  inputChannel: RTCDataChannel | null;
+  statsInterval: ReturnType<typeof setInterval> | null;
+}
+
+const _dw = window as unknown as Record<string, unknown>;
+let desktopSession = (_dw.__v8_desktop ??= null) as DesktopSession | null;
+
+// Reconnect state — survives across session objects
+let _desktopUserStopped = false;
+let _desktopReconnectAttempt = 0;
+let _desktopReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+const DESKTOP_MAX_RECONNECT = 3;
+const DESKTOP_RECONNECT_DELAYS = [1000, 2000, 4000];
+
+async function startDesktopStream(): Promise<void> {
+  if (desktopSession) return;
+
+  _desktopUserStopped = false;
+  _desktopReconnectAttempt = 0;
+  useStore.getState().setDesktopStatus("connecting");
+  await _connectDesktop();
+}
+
+async function _connectDesktop(): Promise<void> {
+  // Clean up previous session if any
+  if (desktopSession) {
+    desktopSession.pc.onconnectionstatechange = null;
+    if (desktopSession.statsInterval) clearInterval(desktopSession.statsInterval);
+    desktopSession.pc.close();
+    desktopSession = null;
+    (_dw.__v8_desktop as unknown) = null;
+  }
+
+  const clientId = useStore.getState().clientId;
+  const desktopClientId = `desktop-${clientId}`;
+
+  let iceServers: RTCIceServer[] = [];
+  try {
+    const config = await api.getIceServers();
+    iceServers = config.iceServers;
+  } catch { /* local only */ }
+
+  const pc = new RTCPeerConnection({ iceServers });
+
+  // Create input data channel for mouse/keyboard events
+  const inputChannel = pc.createDataChannel("input");
+
+  // Receive-only video (no local media)
+  pc.addTransceiver("video", { direction: "recvonly" });
+
+  let remoteVideoStream: MediaStream | null = null;
+
+  pc.ontrack = (event) => {
+    if (event.track.kind === "video") {
+      remoteVideoStream = event.streams[0] || new MediaStream([event.track]);
+      if (desktopSession) desktopSession.remoteVideoStream = remoteVideoStream;
+      const store = useStore.getState();
+      store.setDesktopRemoteStream(remoteVideoStream);
+      store.setDesktopStreamActive(true);
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    const state = pc.connectionState;
+    if (state === "connected") {
+      _desktopReconnectAttempt = 0;
+      const store = useStore.getState();
+      store.setDesktopStatus("connected");
+      // Start stats polling
+      _startDesktopStats(pc);
+    } else if (state === "failed" || state === "disconnected") {
+      _handleDesktopDisconnect();
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  if (pc.iceGatheringState !== "complete") {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 10_000);
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === "complete") {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+    });
+  }
+
+  const answer = await api.webrtcOffer(
+    desktopClientId,
+    { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
+    { desktop: true },
+  );
+
+  await pc.setRemoteDescription(
+    new RTCSessionDescription({ sdp: answer.sdp, type: answer.type as RTCSdpType }),
+  );
+
+  desktopSession = { pc, remoteVideoStream, inputChannel, statsInterval: null };
+  (_dw.__v8_desktop as unknown) = desktopSession;
+}
+
+function _handleDesktopDisconnect(): void {
+  // Stop stats
+  if (desktopSession?.statsInterval) {
+    clearInterval(desktopSession.statsInterval);
+    desktopSession.statsInterval = null;
+  }
+  useStore.getState().setDesktopStats(null);
+
+  if (_desktopUserStopped) return;
+
+  if (_desktopReconnectAttempt < DESKTOP_MAX_RECONNECT) {
+    const delay = DESKTOP_RECONNECT_DELAYS[_desktopReconnectAttempt] ?? 4000;
+    _desktopReconnectAttempt++;
+    useStore.getState().setDesktopStatus("reconnecting");
+    console.log(`[desktop] reconnecting (attempt ${_desktopReconnectAttempt}/${DESKTOP_MAX_RECONNECT}) in ${delay}ms`);
+    _desktopReconnectTimer = setTimeout(() => {
+      _desktopReconnectTimer = null;
+      _connectDesktop().catch(() => _handleDesktopDisconnect());
+    }, delay);
+  } else {
+    // Exhausted retries
+    useStore.getState().setDesktopStatus("offline");
+    useStore.getState().setDesktopStreamActive(false);
+    _cleanupDesktopSession();
+  }
+}
+
+function _cleanupDesktopSession(): void {
+  if (desktopSession) {
+    desktopSession.pc.onconnectionstatechange = null;
+    if (desktopSession.statsInterval) clearInterval(desktopSession.statsInterval);
+    desktopSession.pc.close();
+    desktopSession = null;
+    (_dw.__v8_desktop as unknown) = null;
+  }
+}
+
+// Stats polling for quality indicator
+let _prevBytesReceived = 0;
+let _prevStatsTime = 0;
+
+function _startDesktopStats(pc: RTCPeerConnection): void {
+  if (desktopSession?.statsInterval) clearInterval(desktopSession.statsInterval);
+  _prevBytesReceived = 0;
+  _prevStatsTime = 0;
+
+  const interval = setInterval(async () => {
+    if (!desktopSession || pc.connectionState !== "connected") {
+      clearInterval(interval);
+      return;
+    }
+    try {
+      const stats = await pc.getStats();
+      let fps = 0;
+      let bytesReceived = 0;
+      let rtt = 0;
+
+      stats.forEach((report) => {
+        if (report.type === "inbound-rtp" && report.kind === "video") {
+          fps = report.framesPerSecond ?? 0;
+          bytesReceived = report.bytesReceived ?? 0;
+        }
+        if (report.type === "candidate-pair" && report.state === "succeeded" && report.nominated) {
+          rtt = (report.currentRoundTripTime ?? 0) * 1000; // seconds → ms
+        }
+      });
+
+      const now = performance.now();
+      let bitrate = 0;
+      if (_prevStatsTime > 0 && bytesReceived > _prevBytesReceived) {
+        const elapsed = (now - _prevStatsTime) / 1000;
+        bitrate = Math.round(((bytesReceived - _prevBytesReceived) * 8) / elapsed / 1000); // kbps
+      }
+      _prevBytesReceived = bytesReceived;
+      _prevStatsTime = now;
+
+      useStore.getState().setDesktopStats({ fps: Math.round(fps), bitrate, rtt: Math.round(rtt) });
+    } catch {
+      // stats unavailable
+    }
+  }, 2000);
+
+  if (desktopSession) desktopSession.statsInterval = interval;
+}
+
+export function stopDesktopStream(): void {
+  _desktopUserStopped = true;
+  if (_desktopReconnectTimer) {
+    clearTimeout(_desktopReconnectTimer);
+    _desktopReconnectTimer = null;
+  }
+
+  _cleanupDesktopSession();
+
+  const store = useStore.getState();
+  store.setDesktopStreamActive(false);
+  store.setDesktopRemoteStream(null);
+  store.setDesktopStatus("idle");
+  store.setDesktopStats(null);
+}
+
+/** Retry connection once (from "offline" state). */
+export function retryDesktopStream(): void {
+  _desktopUserStopped = false;
+  _desktopReconnectAttempt = 0;
+  useStore.getState().setDesktopStatus("connecting");
+  _connectDesktop().catch(() => _handleDesktopDisconnect());
+}
+
+export function sendDesktopInput(event: object): void {
+  const ch = desktopSession?.inputChannel;
+  if (ch && ch.readyState === "open") {
+    ch.send(JSON.stringify(event));
+  }
+}
+
+export function isDesktopStreamActive(): boolean {
+  return desktopSession !== null;
+}
+
 export function stopWebRTC(): void {
   const clientId = useStore.getState().clientId;
   const session = rtcSessions.get(clientId);
@@ -181,8 +425,10 @@ export function stopWebRTC(): void {
   rtcSessions.delete(clientId);
 
   // Stop all local media tracks
-  for (const track of session.localStream.getTracks()) {
-    track.stop();
+  if (session.localStream) {
+    for (const track of session.localStream.getTracks()) {
+      track.stop();
+    }
   }
 
   // Close the peer connection
@@ -215,6 +461,11 @@ export function getRemoteAudio(): HTMLAudioElement | null {
   return null;
 }
 
+/** Return the active remote video MediaStream, or null. */
+export function getRemoteVideoStream(): MediaStream | null {
+  return desktopSession?.remoteVideoStream ?? null;
+}
+
 // ── Audio input device detection ──────────────────────────────────────────
 
 /** Query the active audio input device label and update the store.
@@ -223,7 +474,7 @@ export async function queryActiveInputDevice(): Promise<void> {
   try {
     let track: MediaStreamTrack | undefined;
     for (const [, session] of rtcSessions) {
-      track = session.localStream.getAudioTracks()[0];
+      track = session.localStream?.getAudioTracks()[0];
       break;
     }
     if (!track) {
@@ -446,8 +697,10 @@ export async function startPlaygroundWebRTC(profileId?: string): Promise<string>
 
   // Mute main session(s) so playground testing doesn't reach the agent
   for (const [, session] of rtcSessions) {
-    for (const track of session.localStream.getAudioTracks()) {
-      track.enabled = false;
+    if (session.localStream) {
+      for (const track of session.localStream.getAudioTracks()) {
+        track.enabled = false;
+      }
     }
   }
 
@@ -482,8 +735,10 @@ export async function stopPlaygroundWebRTC(): Promise<void> {
 
   // Unmute main session(s)
   for (const [, session] of rtcSessions) {
-    for (const track of session.localStream.getAudioTracks()) {
-      track.enabled = true;
+    if (session.localStream) {
+      for (const track of session.localStream.getAudioTracks()) {
+        track.enabled = true;
+      }
     }
   }
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Dict
 
@@ -18,7 +19,10 @@ from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSession
 from av import AudioFrame
 
 from server.audio_track import QueuedAudioTrack
+from server.input_injector import InputInjector
+from server.screen_capture import ScreenCapture, NoDisplayError
 from server.stt import AsyncSTT, STTParams
+from server.video_track import ScreenShareTrack
 from server.voice_logger import VoiceLogger
 from server import voice_profiles
 
@@ -128,12 +132,15 @@ class WebRTCManager:
         self._connections: Dict[str, RTCPeerConnection] = {}
         self._stats: Dict[str, AudioStatsLogger] = {}
         self._outgoing_tracks: Dict[str, QueuedAudioTrack] = {}
+        self._video_tracks: Dict[str, ScreenShareTrack] = {}
+        self._screen_captures: Dict[str, ScreenCapture] = {}
         self._stt_instances: Dict[str, AsyncSTT] = {}
         self._stt_muted: set[str] = set()  # client_ids with STT muted
         self._guard_enabled: Dict[str, bool] = {}
         self._tts_muted: Dict[str, bool] = {}
         self._voice_loggers: Dict[str, VoiceLogger] = {}
         self._voice_modes: Dict[str, VoiceMode] = {}
+        self._input_injectors: Dict[str, InputInjector] = {}
         self._playground_ws: Dict[str, object] = {}  # client_id → WS
         self._playground_clients: set[str] = set()  # client_ids that are playground
         self._ws_bridge = None
@@ -303,7 +310,7 @@ class WebRTCManager:
     async def handle_offer(
         self, client_id: str, sdp: str, sdp_type: str, session_id: str = "",
         playground: bool = False, profile_id: str | None = None,
-        username: str = "default",
+        username: str = "default", desktop: bool = False,
     ) -> dict[str, str]:
         """Process an SDP offer and return an SDP answer.
 
@@ -315,6 +322,9 @@ class WebRTCManager:
 
         If *playground* is True, STT events go to the playground WS
         instead of the agent session.
+
+        If *desktop* is True, a :class:`ScreenShareTrack` is added to
+        stream the server's screen capture as a WebRTC video track.
         """
         # Tear down any pre-existing connection for this client.
         if client_id in self._connections:
@@ -334,25 +344,6 @@ class WebRTCManager:
         pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_server_objs))
         self._connections[client_id] = pc
 
-        # Resolve voice profile → STT params
-        stt_params = voice_profiles.get_stt_params(username, profile_id)
-
-        # Create STT instance for this client.
-        # aiortc typically delivers stereo (2-channel) audio even if source is mono.
-        stt = AsyncSTT(sample_rate=48000, num_channels=2, params=stt_params)
-
-        if playground:
-            stt.add_listener(self._make_playground_listener(client_id))
-        else:
-            stt.add_listener(self._make_stt_listener(client_id))
-
-        self._stt_instances[client_id] = stt
-
-        # Create voice logger for audio persistence
-        vl = VoiceLogger(username, session_id or client_id)
-        self._voice_loggers[client_id] = vl
-        await vl.start_recording()
-
         @pc.on("connectionstatechange")
         async def _on_connection_state_change() -> None:
             logger.info(
@@ -363,20 +354,88 @@ class WebRTCManager:
             if pc.connectionState in ("failed", "closed"):
                 await self.close_connection(client_id)
 
-        @pc.on("track")
-        def _on_track(track: MediaStreamTrack) -> None:
-            logger.info(
-                "[webrtc] client %s received %s track", client_id, track.kind
-            )
-            if track.kind == "audio":
-                stats = AudioStatsLogger(client_id, "incoming")
-                self._stats[client_id] = stats
-                asyncio.ensure_future(self._consume_audio(client_id, track, stats))
+        # Desktop connections are video-only (no incoming audio to process).
+        if not desktop:
+            # Resolve voice profile → STT params
+            stt_params = voice_profiles.get_stt_params(username, profile_id)
 
-        # Add outgoing audio track (receives TTS Opus frames via queue).
-        outgoing = QueuedAudioTrack(client_id)
-        pc.addTrack(outgoing)
-        self._outgoing_tracks[client_id] = outgoing
+            # Create STT instance for this client.
+            # aiortc typically delivers stereo (2-channel) audio even if source is mono.
+            stt = AsyncSTT(sample_rate=48000, num_channels=2, params=stt_params)
+
+            if playground:
+                stt.add_listener(self._make_playground_listener(client_id))
+            else:
+                stt.add_listener(self._make_stt_listener(client_id))
+
+            self._stt_instances[client_id] = stt
+
+            # Create voice logger for audio persistence
+            vl = VoiceLogger(username, session_id or client_id)
+            self._voice_loggers[client_id] = vl
+            await vl.start_recording()
+
+            @pc.on("track")
+            def _on_track(track: MediaStreamTrack) -> None:
+                logger.info(
+                    "[webrtc] client %s received %s track", client_id, track.kind
+                )
+                if track.kind == "audio":
+                    stats = AudioStatsLogger(client_id, "incoming")
+                    self._stats[client_id] = stats
+                    asyncio.ensure_future(self._consume_audio(client_id, track, stats))
+
+            # Add outgoing audio track (receives TTS Opus frames via queue).
+            outgoing = QueuedAudioTrack(client_id)
+            pc.addTrack(outgoing)
+            self._outgoing_tracks[client_id] = outgoing
+
+        # Add outgoing video track for desktop screen sharing.
+        if desktop:
+            try:
+                capture = ScreenCapture(target_fps=30, max_height=1080)
+                await capture.start()
+                video_track = ScreenShareTrack(capture)
+                pc.addTrack(video_track)
+                # Prefer H.264 for WebView compatibility (VP8 decode is unreliable)
+                for t in pc.getTransceivers():
+                    if t.kind == "video":
+                        from aiortc.rtcrtpsender import RTCRtpSender
+                        caps = RTCRtpSender.getCapabilities("video")
+                        h264 = [c for c in caps.codecs if "H264" in c.mimeType]
+                        if h264:
+                            t.setCodecPreferences(h264)
+                            logger.info("[webrtc] client %s: H.264 preferred for desktop", client_id)
+                        break
+                self._video_tracks[client_id] = video_track
+                self._screen_captures[client_id] = capture
+                logger.info(
+                    "[webrtc] client %s: desktop video track added (%dx%d)",
+                    client_id, capture.capture_width, capture.capture_height,
+                )
+
+                # Handle input data channel from browser
+                display = os.environ.get("DISPLAY", ":1")
+
+                @pc.on("datachannel")
+                def on_datachannel(channel):
+                    injector = InputInjector(
+                        display, capture.native_width, capture.native_height,
+                        screen_size_fn=lambda: (capture.native_width, capture.native_height),
+                    )
+                    self._input_injectors[client_id] = injector
+                    logger.info("[webrtc] client %s: input channel '%s' opened", client_id, channel.label)
+
+                    @channel.on("message")
+                    def on_message(msg):
+                        import json
+                        try:
+                            event = json.loads(msg)
+                            asyncio.ensure_future(injector.inject(event))
+                        except Exception:
+                            pass
+            except NoDisplayError as exc:
+                logger.warning("[webrtc] client %s: no display for desktop: %s", client_id, exc)
 
         # SDP exchange.
         offer = RTCSessionDescription(sdp=sdp, type=sdp_type)
@@ -848,6 +907,14 @@ class WebRTCManager:
         pc = self._connections.pop(client_id, None)
         self._stats.pop(client_id, None)
         self._outgoing_tracks.pop(client_id, None)
+        self._video_tracks.pop(client_id, None)
+        self._input_injectors.pop(client_id, None)
+        capture = self._screen_captures.pop(client_id, None)
+        if capture:
+            try:
+                await capture.stop()
+            except Exception:
+                pass
         self._guard_enabled.pop(client_id, None)
         self._tts_muted.pop(client_id, None)
         self._playground_clients.discard(client_id)

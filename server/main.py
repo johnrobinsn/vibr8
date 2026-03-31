@@ -360,7 +360,7 @@ def create_app() -> web.Application:
 
     webrtc_manager = WebRTCManager(ice_servers=ice_servers)
     terminal_manager = TerminalManager()
-    ring0_manager = Ring0Manager(PORT)
+    ring0_manager = Ring0Manager(PORT, auth_manager=auth_manager)
     node_registry = NodeRegistry()
 
     # Track background tasks so we can cancel them on shutdown.

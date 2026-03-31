@@ -283,7 +283,10 @@ def list_recordings(username: str) -> list[dict]:
     for f in recordings_dir.iterdir():
         if f.suffix == ".json":
             try:
-                recordings.append(json.loads(f.read_text(encoding="utf-8")))
+                rec = json.loads(f.read_text(encoding="utf-8"))
+                if not rec.get("id"):
+                    continue  # skip corrupted entries with null/missing id
+                recordings.append(rec)
             except Exception:
                 continue
     recordings.sort(key=lambda r: r.get("startedAt", 0), reverse=True)

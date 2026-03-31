@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
 import { connectSession, disconnectSession } from "../ws.js";
-import { stopWebRTC } from "../webrtc.js";
+import { startWebRTC, stopWebRTC, stopDesktopStream } from "../webrtc.js";
 import { destroyTerminal } from "./TerminalView.js";
 import { EnvManager } from "./EnvManager.js";
 
@@ -33,6 +33,8 @@ export function Sidebar() {
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const nodes = useStore((s) => s.nodes);
   const activeNodeId = useStore((s) => s.activeNodeId);
+  const desktopStreamActive = useStore((s) => s.desktopStreamActive);
+  const activeView = useStore((s) => s.activeView);
   const sidebarListRef = useRef<HTMLDivElement>(null);
   const newSessionRef = useRef<HTMLButtonElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -177,6 +179,8 @@ export function Sidebar() {
         connectSession(sessionId);
       }
     }
+    // Switch back to session view (from desktop or any other view)
+    s.setActiveView("session");
     // Signal where focus should land
     s.setPendingFocus(isTerminal ? "terminal" : "composer");
     // Close sidebar on mobile
@@ -193,6 +197,7 @@ export function Sidebar() {
       }
     }
     useStore.getState().newSession();
+    useStore.getState().setActiveView("session");
     useStore.getState().setPendingFocus("home");
     if (window.innerWidth < 768) {
       useStore.getState().setSidebarOpen(false);
@@ -706,7 +711,51 @@ export function Sidebar() {
           ) : (
             <>
               <div className="space-y-0.5">
-                {activeSessions.map((s) => renderSessionItem(s))}
+                {activeSessions.map((s) => (
+                  <Fragment key={s.id}>
+                    {renderSessionItem(s)}
+                    {/* Desktop entry right after Ring0 */}
+                    {s.isRing0 && <DesktopEntry
+                      active={activeView === "desktop"}
+                      streamActive={desktopStreamActive}
+                      onNavigate={() => {
+                        useStore.getState().setActiveView("desktop");
+                        if (window.innerWidth < 768) useStore.getState().setSidebarOpen(false);
+                      }}
+                      onStart={async () => {
+                        useStore.getState().setActiveView("desktop");
+                        if (window.innerWidth < 768) useStore.getState().setSidebarOpen(false);
+                        try {
+                          await startWebRTC({ desktop: true });
+                        } catch (err) {
+                          console.error("[desktop] Failed to start:", err);
+                        }
+                      }}
+                      onStop={() => stopDesktopStream()}
+                    />}
+                  </Fragment>
+                ))}
+                {/* If no Ring0 session, still show Desktop entry */}
+                {!activeSessions.some((s) => s.isRing0) && (
+                  <DesktopEntry
+                    active={activeView === "desktop"}
+                    streamActive={desktopStreamActive}
+                    onNavigate={() => {
+                      useStore.getState().setActiveView("desktop");
+                      if (window.innerWidth < 768) useStore.getState().setSidebarOpen(false);
+                    }}
+                    onStart={async () => {
+                      useStore.getState().setActiveView("desktop");
+                      if (window.innerWidth < 768) useStore.getState().setSidebarOpen(false);
+                      try {
+                        await startWebRTC({ desktop: true });
+                      } catch (err) {
+                        console.error("[desktop] Failed to start:", err);
+                      }
+                    }}
+                    onStop={() => stopDesktopStream()}
+                  />
+                )}
               </div>
 
               {archivedSessions.length > 0 && (
@@ -854,5 +903,73 @@ export function Sidebar() {
         <EnvManager onClose={() => setShowEnvManager(false)} />
       )}
     </aside>
+  );
+}
+
+// ── Desktop pseudo-session entry ─────────────────────────────────────────────
+
+function DesktopEntry({
+  active,
+  streamActive,
+  onNavigate,
+  onStart,
+  onStop,
+}: {
+  active: boolean;
+  streamActive: boolean;
+  onNavigate: () => void;
+  onStart: () => void;
+  onStop: () => void;
+}) {
+  return (
+    <div className="relative group">
+      <button
+        onClick={() => {
+          if (streamActive) {
+            onNavigate();
+          } else {
+            onStart();
+          }
+        }}
+        className={`w-full px-3 py-2.5 pr-8 text-left rounded-[10px] transition-all duration-100 cursor-pointer ${
+          active
+            ? "bg-cc-active"
+            : "hover:bg-cc-hover"
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <span className="relative flex shrink-0">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                streamActive ? "bg-cc-success opacity-60" : "bg-cc-muted opacity-40"
+              }`}
+            />
+          </span>
+          <span className="text-[13px] font-medium truncate flex-1 text-cc-fg flex items-center gap-1.5">
+            {/* Monitor icon */}
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" className="w-3.5 h-3.5 shrink-0 opacity-60">
+              <rect x="2" y="3" width="12" height="8" rx="1" />
+              <path d="M5 14h6M8 11v3" />
+            </svg>
+            <span className="truncate">Desktop</span>
+          </span>
+        </div>
+      </button>
+      {/* Stop button — visible on hover or when active */}
+      {streamActive && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onStop();
+          }}
+          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md hover:bg-cc-border text-cc-muted hover:text-red-400 transition-all cursor-pointer"
+          title="Stop desktop stream"
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
+            <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
+          </svg>
+        </button>
+      )}
+    </div>
   );
 }

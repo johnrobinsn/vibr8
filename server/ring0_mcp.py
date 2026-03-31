@@ -20,20 +20,27 @@ logger = logging.getLogger(__name__)
 
 PORT = int(os.environ.get("VIBR8_PORT", "3456"))
 BASE_URL = f"http://localhost:{PORT}/api"
+_TOKEN = os.environ.get("VIBR8_TOKEN")
 
 mcp = FastMCP("vibr8")
 
 
+def _auth_headers() -> dict[str, str]:
+    if _TOKEN:
+        return {"Authorization": f"Bearer {_TOKEN}"}
+    return {}
+
+
 async def _get(path: str) -> dict[str, Any]:
     async with httpx.AsyncClient() as client:
-        r = await client.get(f"{BASE_URL}{path}", timeout=10)
+        r = await client.get(f"{BASE_URL}{path}", headers=_auth_headers(), timeout=10)
         r.raise_for_status()
         return r.json()
 
 
 async def _post(path: str, body: dict | None = None) -> dict[str, Any]:
     async with httpx.AsyncClient() as client:
-        r = await client.post(f"{BASE_URL}{path}", json=body, timeout=30)
+        r = await client.post(f"{BASE_URL}{path}", json=body, headers=_auth_headers(), timeout=30)
         if r.status_code >= 400:
             try:
                 return r.json()
@@ -44,7 +51,7 @@ async def _post(path: str, body: dict | None = None) -> dict[str, Any]:
 
 async def _put(path: str, body: dict | None = None) -> dict[str, Any]:
     async with httpx.AsyncClient() as client:
-        r = await client.put(f"{BASE_URL}{path}", json=body, timeout=10)
+        r = await client.put(f"{BASE_URL}{path}", json=body, headers=_auth_headers(), timeout=10)
         if r.status_code >= 400:
             try:
                 return r.json()

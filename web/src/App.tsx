@@ -6,6 +6,7 @@ import { ChatView } from "./components/ChatView.js";
 import { TopBar } from "./components/TopBar.js";
 import { HomePage } from "./components/HomePage.js";
 import { TaskPanel } from "./components/TaskPanel.js";
+import { DesktopView } from "./components/DesktopView.js";
 import { EditorPanel } from "./components/EditorPanel.js";
 import { Playground } from "./components/Playground.js";
 import { SecondScreen } from "./components/SecondScreen.js";
@@ -31,6 +32,7 @@ export default function App() {
   const taskPanelOpen = useStore((s) => s.taskPanelOpen);
   const homeResetKey = useStore((s) => s.homeResetKey);
   const activeTab = useStore((s) => s.activeTab);
+  const activeView = useStore((s) => s.activeView);
   const isTerminalSession = useStore((s) => {
     if (!s.currentSessionId) return false;
     const sdk = s.sdkSessions.find((x) => x.sessionId === s.currentSessionId);
@@ -142,6 +144,11 @@ export default function App() {
         }
         return;
       }
+      if (e.key === "k" && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        useStore.getState().toggleCommandPalette();
+        return;
+      }
       if (e.altKey && (e.metaKey || e.ctrlKey)) {
         if (e.key === "p") {
           e.preventDefault();
@@ -212,7 +219,7 @@ export default function App() {
           ))}
 
           {/* Non-terminal content */}
-          {!isTerminalSession && (
+          {!isTerminalSession && activeView !== "desktop" && (
             <>
               {/* Chat tab — visible when activeTab is "chat" or no session */}
               <div className={`absolute inset-0 ${activeTab === "chat" || !currentSessionId ? "" : "hidden"}`}>
@@ -230,6 +237,13 @@ export default function App() {
                 </div>
               )}
             </>
+          )}
+
+          {/* Desktop view (node-level, not session-specific — renders over any session) */}
+          {activeView === "desktop" && (
+            <div className="absolute inset-0">
+              <DesktopView sessionId={currentSessionId || ""} />
+            </div>
           )}
         </div>
       </div>
