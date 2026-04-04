@@ -121,15 +121,35 @@ _auto_generate_key() {
 }
 
 _build_image() {
-    _info "Building Docker image $IMAGE_NAME:$IMAGE_TAG ..."
+    _info "Building Docker image $IMAGE_NAME:latest (base) ..."
     docker build \
         -f "$REPO_ROOT/Dockerfile.node" \
-        -t "$IMAGE_NAME:$IMAGE_TAG" \
+        -t "$IMAGE_NAME:latest" \
+        "$REPO_ROOT"
+
+    _info "Building Docker image $IMAGE_NAME:gui ..."
+    docker build \
+        -f "$REPO_ROOT/Dockerfile.node-gui" \
+        -t "$IMAGE_NAME:gui" \
+        "$REPO_ROOT"
+
+    _info "Building Docker image $IMAGE_NAME:gpu ..."
+    docker build \
+        -f "$REPO_ROOT/Dockerfile.node-gpu" \
+        -t "$IMAGE_NAME:gpu" \
         "$REPO_ROOT"
 }
 
 _build_image_if_needed() {
-    if ! docker image inspect "$IMAGE_NAME:$IMAGE_TAG" >/dev/null 2>&1; then
+    # Check if the required tier exists; build all if any is missing
+    local needs_build=false
+    for tag in latest gui gpu; do
+        if ! docker image inspect "$IMAGE_NAME:$tag" >/dev/null 2>&1; then
+            needs_build=true
+            break
+        fi
+    done
+    if $needs_build; then
         _build_image
     fi
 }
@@ -142,6 +162,14 @@ _create_container() {
     # Source config
     _read_config "$name"
 
+    # Select image tag based on tier
+    local image_tag="${IMAGE_TIER:-latest}"
+    case "$image_tag" in
+        base) image_tag="latest" ;;
+        gui|gpu) ;; # use as-is
+        *) image_tag="latest" ;;
+    esac
+
     local args=(
         --name "$(_container_name "$name")"
         --restart unless-stopped
@@ -150,6 +178,15 @@ _create_container() {
         -v "$dir/vibr8-data:/home/vibr8/.vibr8"
         -v "$dir/vibr8-node-data:/home/vibr8/.vibr8-node"
     )
+
+    # GPU passthrough (NVIDIA)
+    if [ "${GPU_ENABLED:-}" = "true" ]; then
+        if [ -n "${GPU_DEVICE:-}" ]; then
+            args+=(--gpus "\"device=${GPU_DEVICE}\"")
+        else
+            args+=(--gpus all)
+        fi
+    fi
 
     # Mount code directory
     if [ -n "${HOST_CODE_DIR:-}" ]; then
@@ -173,7 +210,100 @@ _create_container() {
         args+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
     fi
 
-    docker create "${args[@]}" "$IMAGE_NAME:$IMAGE_TAG"
+    docker create "${args[@]}" "$IMAGE_NAME:$image_tag"
+}
+
+# ── Wizard (whiptail TUI) ───────────────────────────────────────────────────
+
+_run_wizard() {
+    # Interactive TUI for node creation. Sets variables in the caller's scope.
+    command -v whiptail >/dev/null 2>&1 || _die "Wizard requires 'whiptail'. Install with: sudo apt-get install whiptail"
+
+    local wt_title="vibr8-node: Create Node"
+
+    # Hub URL
+    if [ -z "$hub_url" ]; then
+        hub_url=$(whiptail --title "$wt_title" \
+            --inputbox "Hub URL:" 8 60 "$DEFAULT_HUB_URL" \
+            3>&1 1>&2 2>&3) || exit 1
+    fi
+
+    # Code directory
+    if [ -z "$code_dir" ]; then
+        code_dir=$(whiptail --title "$wt_title" \
+            --inputbox "Code directory to mount:" 8 60 "$(pwd)" \
+            3>&1 1>&2 2>&3) || exit 1
+    fi
+
+    # Virtual display?
+    if [ -z "$virtual_display" ]; then
+        if whiptail --title "$wt_title" \
+            --yesno "Enable virtual display?\n\nAdds XFCE desktop with Chrome, VSCode, and Kitty terminal.\nAccessible via vibr8 remote desktop." 12 60; then
+
+            # Resolution
+            local dims
+            dims=$(whiptail --title "$wt_title" \
+                --menu "Display resolution:" 15 50 4 \
+                "1920x1080" "Full HD (recommended)" \
+                "2560x1440" "QHD" \
+                "1280x720"  "HD (low bandwidth)" \
+                "3840x2160" "4K" \
+                3>&1 1>&2 2>&3) || dims="1920x1080"
+            virtual_display="$dims"
+
+            # GPU acceleration?
+            if whiptail --title "$wt_title" \
+                --yesno "Enable NVIDIA GPU acceleration?\n\nRequires NVIDIA GPU + nvidia-container-toolkit.\nSelect No for CPU/software rendering (default)." 11 60 \
+                --defaultno; then
+                gpu_enabled=true
+
+                # Enumerate GPUs and let user pick
+                if command -v nvidia-smi >/dev/null 2>&1; then
+                    local gpu_csv gpu_items=() gpu_count=0
+                    gpu_csv="$(nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null)" || gpu_csv=""
+                    if [ -n "$gpu_csv" ]; then
+                        while IFS=',' read -r idx gname gmem; do
+                            # Trim whitespace
+                            idx="${idx## }"; idx="${idx%% }"
+                            gname="${gname## }"; gname="${gname%% }"
+                            gmem="${gmem## }"; gmem="${gmem%% }"
+                            gpu_items+=("$idx" "${gname} (${gmem})" "ON")
+                            gpu_count=$((gpu_count + 1))
+                        done <<< "$gpu_csv"
+
+                        if [ "$gpu_count" -gt 1 ]; then
+                            local selected
+                            selected=$(whiptail --title "$wt_title" \
+                                --checklist "Select GPUs to pass through:" \
+                                $((gpu_count + 8)) 70 "$gpu_count" \
+                                "${gpu_items[@]}" \
+                                3>&1 1>&2 2>&3) || selected=""
+
+                            if [ -n "$selected" ]; then
+                                # whiptail returns: "0" "1" — strip quotes, join with comma
+                                gpu_device="$(echo "$selected" | tr -d '"' | tr ' ' ',')"
+                            fi
+                            # empty selection or cancelled → all GPUs (gpu_device stays empty)
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    # API key (try auto-generate, then prompt)
+    if [ -z "$api_key" ]; then
+        api_key="$(_auto_generate_key "$hub_url" "$name")" || true
+        if [ -z "$api_key" ]; then
+            api_key=$(whiptail --title "$wt_title" \
+                --inputbox "API key (generate in web UI → Settings → API Keys):" 9 70 "" \
+                3>&1 1>&2 2>&3) || exit 1
+            [ -n "$api_key" ] || _die "API key is required"
+        else
+            whiptail --title "$wt_title" \
+                --msgbox "API key auto-generated from local hub credentials." 8 55
+        fi
+    fi
 }
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -181,6 +311,7 @@ _create_container() {
 cmd_create() {
     local name="" hub_url="" api_key="" code_dir=""
     local anthropic_key="" port="3457"
+    local virtual_display="" gpu_enabled=false gpu_device="" wizard_mode=false
 
     # Parse flags
     while [[ $# -gt 0 ]]; do
@@ -190,6 +321,17 @@ cmd_create() {
             --code-dir)  code_dir="$2"; shift 2 ;;
             --port)      port="$2"; shift 2 ;;
             --anthropic-api-key) anthropic_key="$2"; shift 2 ;;
+            --virtual-display)
+                # Optional value: --virtual-display or --virtual-display 2560x1440
+                if [[ "${2:-}" =~ ^[0-9]+x[0-9]+$ ]]; then
+                    virtual_display="$2"; shift 2
+                else
+                    virtual_display="1920x1080"; shift
+                fi
+                ;;
+            --gpu)       gpu_enabled=true; shift ;;
+            --gpu-device) gpu_device="$2"; shift 2 ;;
+            --wizard)    wizard_mode=true; shift ;;
             -*)          _die "Unknown flag: $1" ;;
             *)
                 [ -z "$name" ] && name="$1" && shift || _die "Unexpected arg: $1"
@@ -197,10 +339,15 @@ cmd_create() {
         esac
     done
 
-    [ -n "$name" ] || _die "Usage: vibr8-node create <name> [--hub URL] [--api-key KEY] [--code-dir PATH] [--ring0]"
+    [ -n "$name" ] || _die "Usage: vibr8-node create <name> [--hub URL] [--api-key KEY] [--code-dir PATH] [--virtual-display [WxH]] [--gpu] [--gpu-device ID] [--wizard]"
     _validate_name "$name"
     _node_exists "$name" && _die "Node '$name' already exists. Use 'destroy' first."
     _require_docker
+
+    # Wizard mode — interactive TUI for all options
+    if $wizard_mode; then
+        _run_wizard
+    fi
 
     # Interactive prompts for missing values
     if [ -z "$hub_url" ]; then
@@ -237,6 +384,15 @@ cmd_create() {
     dir="$(_node_dir "$name")"
     mkdir -p "$dir/vibr8-data" "$dir/vibr8-node-data"
 
+    # Determine image tier
+    local image_tier="base"
+    if [ -n "$virtual_display" ]; then
+        image_tier="gui"
+        if $gpu_enabled; then
+            image_tier="gpu"
+        fi
+    fi
+
     # Write config
     cat > "$dir/config.env" <<EOF
 HUB_URL=$hub_url
@@ -245,8 +401,18 @@ NODE_NAME=$name
 NODE_PORT=$port
 WORK_DIR=/code
 HOST_CODE_DIR=$code_dir
+IMAGE_TIER=$image_tier
 EOF
 
+    if [ -n "$virtual_display" ]; then
+        echo "VIRTUAL_DISPLAY=$virtual_display" >> "$dir/config.env"
+    fi
+    if $gpu_enabled; then
+        echo "GPU_ENABLED=true" >> "$dir/config.env"
+        if [ -n "$gpu_device" ]; then
+            echo "GPU_DEVICE=$gpu_device" >> "$dir/config.env"
+        fi
+    fi
     if [ -n "$anthropic_key" ]; then
         echo "ANTHROPIC_API_KEY=$anthropic_key" >> "$dir/config.env"
     fi
@@ -285,6 +451,19 @@ RING0
     _info "Node '$name' created successfully!"
     echo "  Hub:       $hub_url"
     echo "  Code dir:  $code_dir"
+    echo "  Image:     vibr8-node:${image_tier}"
+    if [ -n "$virtual_display" ]; then
+        echo "  Display:   ${virtual_display}"
+        if $gpu_enabled; then
+            if [ -n "$gpu_device" ]; then
+                echo "  GPU:       NVIDIA (device=$gpu_device)"
+            else
+                echo "  GPU:       NVIDIA (all GPUs)"
+            fi
+        else
+            echo "  GPU:       CPU (software rendering)"
+        fi
+    fi
     echo "  Ring0:     enabled"
     echo ""
     echo "Start it with:  vibr8-node start $name"
@@ -359,6 +538,19 @@ cmd_status() {
         [ -n "$uptime" ] && echo "  Started:   $uptime"
         echo "  Hub:       ${HUB_URL:-unknown}"
         echo "  Code dir:  ${HOST_CODE_DIR:-none}"
+        echo "  Image:     vibr8-node:${IMAGE_TIER:-base}"
+        if [ -n "${VIRTUAL_DISPLAY:-}" ]; then
+            echo "  Display:   ${VIRTUAL_DISPLAY}"
+            if [ "${GPU_ENABLED:-}" = "true" ]; then
+                if [ -n "${GPU_DEVICE:-}" ]; then
+                    echo "  GPU:       NVIDIA (device=${GPU_DEVICE})"
+                else
+                    echo "  GPU:       NVIDIA (all GPUs)"
+                fi
+            else
+                echo "  GPU:       CPU (software)"
+            fi
+        fi
         local ring0_status="disabled"
         local ring0_json="$(_node_dir "$name")/vibr8-data/ring0.json"
         if [ -f "$ring0_json" ] && python3 -c "import json; exit(0 if json.load(open('$ring0_json')).get('enabled') else 1)" 2>/dev/null; then
@@ -498,13 +690,35 @@ Commands:
   update [name]   Rebuild image and recreate node(s)
   shell <name>    Open a shell in a running node
   destroy <name>  Remove a node (--keep-data to preserve data)
+  install-native  Install node agent natively (no Docker, macOS/Linux)
+
+Create flags:
+  --hub URL                 Hub URL (default: wss://vibr8.ringzero.ai)
+  --api-key KEY             Node API key
+  --code-dir PATH           Code directory to mount
+  --virtual-display [WxH]   Enable virtual display (default: 1920x1080)
+  --gpu                     Enable NVIDIA GPU acceleration (requires --virtual-display)
+  --gpu-device ID           GPU index, UUID, or comma-separated list (default: all)
+  --wizard                  Interactive setup wizard
+  --port PORT               Node port (default: 3457)
+  --anthropic-api-key KEY   Anthropic API key for Claude Code
+
+Image tiers:
+  base (default)   Headless — Claude Code CLI, tmux
+  gui              Virtual display — XFCE, Chrome, VSCode, Kitty (CPU rendering)
+  gpu              GPU accelerated — NVIDIA hardware rendering
 
 Examples:
   vibr8-node create my-node --code-dir ~/projects/myrepo
+  vibr8-node create gui-node --virtual-display --code-dir ~/projects
+  vibr8-node create gpu-node --virtual-display 2560x1440 --gpu --code-dir ~/projects
+  vibr8-node create gpu-node --virtual-display --gpu --gpu-device 0 --code-dir ~/projects
+  vibr8-node create my-node --wizard
   vibr8-node start my-node
   vibr8-node logs my-node -f
   vibr8-node update
   vibr8-node destroy my-node
+  vibr8-node install-native
 EOF
 }
 
@@ -524,6 +738,7 @@ main() {
         update)  cmd_update "$@" ;;
         shell)   cmd_shell "$@" ;;
         destroy) cmd_destroy "$@" ;;
+        install-native) exec bash "$REPO_ROOT/install-node.sh" "$@" ;;
         help|-h|--help) _usage ;;
         *)       _die "Unknown command: $cmd. Run 'vibr8-node help' for usage." ;;
     esac

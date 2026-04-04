@@ -1,0 +1,36 @@
+# Base deps layer — system packages, Node.js, Claude CLI, Python deps.
+# Contains NO app code — only slow-changing dependencies.
+# Build: docker build -f Dockerfile.node-base-deps -t vibr8-node:base-deps .
+
+FROM python:3.12-slim
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl build-essential ca-certificates gnupg tmux && \
+    rm -rf /var/lib/apt/lists/*
+
+# Node.js 20 LTS (required for Claude Code CLI)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code
+
+# uv (Python package manager)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Create non-root user (Claude Code refuses bypassPermissions as root)
+RUN useradd -m -s /bin/bash vibr8 && \
+    mkdir -p /app /code && \
+    chown -R vibr8:vibr8 /app /code
+
+# Install Python deps via installer (deps only — no code yet)
+# Copy just the requirements and installer, then run in system-python mode
+COPY requirements-node.txt /tmp/requirements-node.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-node.txt && \
+    rm /tmp/requirements-node.txt
+
+# Runtime environment
+ENV PYTHONPATH="/app/lib"
+ENV WORK_DIR="/code"

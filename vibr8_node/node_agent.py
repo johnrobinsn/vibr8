@@ -18,6 +18,7 @@ from server.ws_bridge import WsBridge
 from server.session_store import SessionStore
 from server.ring0 import Ring0Manager
 from server import session_names
+from vibr8_node.desktop_webrtc import DesktopWebRTCManager
 
 logger = logging.getLogger("vibr8-node")
 
@@ -47,6 +48,7 @@ class NodeAgent:
         self._bridge: WsBridge | None = None
         self._store: SessionStore | None = None
         self._ring0: Ring0Manager | None = None
+        self._desktop_webrtc = DesktopWebRTCManager()
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
@@ -288,6 +290,8 @@ class NodeAgent:
             return await self._cmd_unarchive_session(msg)
         elif cmd_type == "rename_session":
             return await self._cmd_rename_session(msg)
+        elif cmd_type == "webrtc_offer":
+            return await self._cmd_webrtc_offer(msg)
         else:
             logger.warning("Unknown hub command: %s", cmd_type)
             return {"error": f"Unknown command: {cmd_type}"}
@@ -476,6 +480,26 @@ class NodeAgent:
         await self._bridge.submit_user_message(r0sid, text, source_client_id=source_client_id)
         return {"ok": True}
 
+    async def _cmd_webrtc_offer(self, msg: dict) -> dict:
+        """Handle a desktop WebRTC offer forwarded from the hub."""
+        client_id = msg.get("clientId", "")
+        sdp = msg.get("sdp", "")
+        sdp_type = msg.get("sdpType", "offer")
+        desktop_role = msg.get("desktopRole", "controller")
+        ice_servers = msg.get("iceServers")
+        if not client_id or not sdp:
+            return {"error": "clientId and sdp required"}
+        try:
+            answer = await self._desktop_webrtc.handle_offer(
+                client_id, sdp, sdp_type,
+                desktop_role=desktop_role,
+                ice_servers=ice_servers,
+            )
+            return answer
+        except Exception as e:
+            logger.error("[desktop-webrtc] Failed to handle offer: %s", e)
+            return {"error": str(e)}
+
     # ── Broadcast hook ────────────────────────────────────────────────────
 
     async def _forward_to_hub(self, session_id: str, msg: dict) -> None:
@@ -535,6 +559,8 @@ class NodeAgent:
 
     async def _shutdown(self) -> None:
         """Clean shutdown."""
+        if self._desktop_webrtc:
+            await self._desktop_webrtc.close_all()
         if self._bridge:
             self._bridge.flush_to_disk()
         if self._launcher:

@@ -237,8 +237,19 @@ async function _connectDesktop(): Promise<void> {
 
   const pc = new RTCPeerConnection({ iceServers });
 
-  // Create input data channel for mouse/keyboard events
+  // Create input data channel for mouse/keyboard events + clipboard
   const inputChannel = pc.createDataChannel("input");
+
+  // Listen for incoming messages (clipboard responses from server)
+  inputChannel.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "clipboard" && _clipboardResolve) {
+        _clipboardResolve(msg.text ?? "");
+        _clipboardResolve = null;
+      }
+    } catch { /* ignore malformed */ }
+  };
 
   // Receive-only video (no local media)
   pc.addTransceiver("video", { direction: "recvonly" });
@@ -247,6 +258,8 @@ async function _connectDesktop(): Promise<void> {
 
   pc.ontrack = (event) => {
     if (event.track.kind === "video") {
+      // Hint browser to prefer sharpness over smoothness for screen content
+      event.track.contentHint = "detail";
       remoteVideoStream = event.streams[0] || new MediaStream([event.track]);
       if (desktopSession) desktopSession.remoteVideoStream = remoteVideoStream;
       const store = useStore.getState();
@@ -286,7 +299,7 @@ async function _connectDesktop(): Promise<void> {
   const answer = await api.webrtcOffer(
     desktopClientId,
     { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
-    { desktop: true },
+    { desktop: true, nodeId: useStore.getState().activeNodeId },
   );
 
   await pc.setRemoteDescription(
@@ -413,8 +426,222 @@ export function sendDesktopInput(event: object): void {
   }
 }
 
+// ── Remote clipboard ────────────────────────────────────────────────────────
+
+let _clipboardResolve: ((text: string) => void) | null = null;
+
+/** Request the remote clipboard contents. Resolves with the text. */
+export function getRemoteClipboard(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const ch = desktopSession?.inputChannel;
+    if (!ch || ch.readyState !== "open") {
+      reject(new Error("No data channel"));
+      return;
+    }
+    _clipboardResolve = resolve;
+    ch.send(JSON.stringify({ type: "clipboard_get" }));
+    // Timeout after 5s
+    setTimeout(() => {
+      if (_clipboardResolve === resolve) {
+        _clipboardResolve = null;
+        reject(new Error("Clipboard request timed out"));
+      }
+    }, 5000);
+  });
+}
+
+/** Set the remote clipboard to the given text. */
+export function setRemoteClipboard(text: string): void {
+  const ch = desktopSession?.inputChannel;
+  if (ch && ch.readyState === "open") {
+    ch.send(JSON.stringify({ type: "clipboard_set", text }));
+  }
+}
+
 export function isDesktopStreamActive(): boolean {
   return desktopSession !== null;
+}
+
+/** Tear down existing desktop stream and reconnect to the current active node. */
+export function reconnectDesktopForNode(): void {
+  if (!desktopSession && _desktopReconnectTimer === null) return;
+  // Cancel any pending reconnect timers
+  if (_desktopReconnectTimer) {
+    clearTimeout(_desktopReconnectTimer);
+    _desktopReconnectTimer = null;
+  }
+  // Clean up old session without marking as user-stopped
+  _cleanupDesktopSession();
+  // Reset reconnect state and connect to the (now-updated) activeNodeId
+  _desktopUserStopped = false;
+  _desktopReconnectAttempt = 0;
+  useStore.getState().setDesktopStatus("connecting");
+  _connectDesktop().catch(() => _handleDesktopDisconnect());
+}
+
+// ── Desktop controller for second screens ───────────────────────────────
+
+interface DesktopViewerSession {
+  pc: RTCPeerConnection;
+  stream: MediaStream | null;
+  inputChannel: RTCDataChannel | null;
+}
+
+// Store on window to survive Vite HMR module reloads (same pattern as desktopSession)
+const _vw = window as unknown as Record<string, unknown>;
+const _activeViewers = (_vw.__v8_desktopViewers ??= new Map<string, DesktopViewerSession>()) as Map<string, DesktopViewerSession>;
+
+/**
+ * Connect as a desktop controller (second screen).
+ * Returns a MediaStream with the remote video track once connected.
+ * Creates an input data channel for mouse/keyboard/touch events.
+ */
+export async function connectDesktopViewer(viewerId: string, nodeId?: string): Promise<MediaStream> {
+  // Clean up any existing viewer with this ID
+  disconnectDesktopViewer(viewerId);
+
+  let iceServers: RTCIceServer[] = [];
+  try {
+    const config = await api.getIceServers();
+    iceServers = config.iceServers;
+  } catch { /* local only */ }
+
+  const pc = new RTCPeerConnection({ iceServers });
+
+  // Create input data channel for mouse/keyboard events
+  const inputChannel = pc.createDataChannel("input");
+
+  // Track when data channel opens (SCTP may lag behind media transport)
+  const channelReady = new Promise<void>((resolve) => {
+    if (inputChannel.readyState === "open") { resolve(); return; }
+    inputChannel.addEventListener("open", () => resolve(), { once: true });
+  });
+
+  // Listen for incoming messages (clipboard responses from server)
+  inputChannel.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "clipboard" && _viewerClipboardResolve) {
+        _viewerClipboardResolve(msg.text ?? "");
+        _viewerClipboardResolve = null;
+      }
+    } catch { /* ignore */ }
+  };
+
+  // Receive-only video
+  pc.addTransceiver("video", { direction: "recvonly" });
+
+  const streamReady = new Promise<MediaStream>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Desktop viewer timed out")), 15000);
+
+    pc.ontrack = (event) => {
+      if (event.track.kind === "video") {
+        // Hint browser to prefer sharpness over smoothness for screen content
+        event.track.contentHint = "detail";
+        clearTimeout(timeout);
+        const stream = event.streams[0] || new MediaStream([event.track]);
+        const viewer = _activeViewers.get(viewerId);
+        if (viewer) viewer.stream = stream;
+        resolve(stream);
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed") {
+        clearTimeout(timeout);
+        reject(new Error("Connection failed"));
+      }
+    };
+  });
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  // Wait for ICE gathering
+  if (pc.iceGatheringState !== "complete") {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 10_000);
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === "complete") {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+    });
+  }
+
+  const answer = await api.webrtcOffer(
+    viewerId,
+    { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
+    { desktop: true, nodeId: nodeId ?? useStore.getState().activeNodeId },
+  );
+
+  await pc.setRemoteDescription(
+    new RTCSessionDescription({ sdp: answer.sdp, type: answer.type as RTCSdpType }),
+  );
+
+  _activeViewers.set(viewerId, { pc, stream: null, inputChannel });
+
+  // Wait for video stream, plus data channel open (with 5s safety timeout)
+  const [stream] = await Promise.all([
+    streamReady,
+    Promise.race([channelReady, new Promise<void>((r) => setTimeout(r, 5000))]),
+  ]);
+  return stream;
+}
+
+/** Send an input event on a desktop viewer's data channel. */
+export function sendDesktopViewerInput(viewerId: string, event: object): void {
+  const viewer = _activeViewers.get(viewerId);
+  if (!viewer) {
+    console.warn("[desktop-viewer] no viewer for", viewerId);
+    return;
+  }
+  const ch = viewer.inputChannel;
+  if (!ch || ch.readyState !== "open") {
+    console.warn("[desktop-viewer] channel not open:", ch?.readyState ?? "null");
+    return;
+  }
+  ch.send(JSON.stringify(event));
+}
+
+/** Clipboard get via a viewer's data channel. */
+let _viewerClipboardResolve: ((text: string) => void) | null = null;
+
+export function getViewerClipboard(viewerId: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const viewer = _activeViewers.get(viewerId);
+    const ch = viewer?.inputChannel;
+    if (!ch || ch.readyState !== "open") {
+      reject(new Error("No data channel"));
+      return;
+    }
+    _viewerClipboardResolve = resolve;
+    ch.send(JSON.stringify({ type: "clipboard_get" }));
+    setTimeout(() => {
+      if (_viewerClipboardResolve === resolve) {
+        _viewerClipboardResolve = null;
+        reject(new Error("Clipboard request timed out"));
+      }
+    }, 5000);
+  });
+}
+
+/** Clipboard set via a viewer's data channel. */
+export function setViewerClipboard(viewerId: string, text: string): void {
+  const viewer = _activeViewers.get(viewerId);
+  const ch = viewer?.inputChannel;
+  if (ch && ch.readyState === "open") {
+    ch.send(JSON.stringify({ type: "clipboard_set", text }));
+  }
+}
+
+/** Disconnect a desktop viewer by ID. */
+export function disconnectDesktopViewer(viewerId: string): void {
+  const viewer = _activeViewers.get(viewerId);
+  if (!viewer) return;
+  _activeViewers.delete(viewerId);
+  viewer.pc.close();
 }
 
 export function stopWebRTC(): void {
@@ -579,6 +806,25 @@ if (typeof navigator !== "undefined" && navigator.mediaDevices) {
     // Only re-query if audio is active
     if (rtcSessions.size > 0) {
       queryActiveInputDevice();
+    }
+  });
+}
+
+// Auto-reconnect desktop stream when active node changes
+{
+  let _prevNodeId = useStore.getState().activeNodeId;
+  useStore.subscribe((state) => {
+    if (state.activeNodeId !== _prevNodeId) {
+      const oldNodeId = _prevNodeId;
+      _prevNodeId = state.activeNodeId;
+      if (desktopSession || _desktopReconnectTimer !== null) {
+        // Active stream or pending reconnect — tear down and reconnect to new node
+        console.log(`[desktop] node changed ${oldNodeId} → ${state.activeNodeId}, reconnecting stream`);
+        reconnectDesktopForNode();
+      } else if (state.desktopStatus === "offline") {
+        // Stale offline state from old node — reset so user can start fresh
+        state.setDesktopStatus("idle");
+      }
     }
   });
 }

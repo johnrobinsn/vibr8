@@ -1,0 +1,21 @@
+# GPU layer — NVIDIA hardware-accelerated rendering
+# Build: docker build -f Dockerfile.node-gpu -t vibr8-node:gpu .
+# Requires: vibr8-node:gui (Dockerfile.node-gui)
+# Runtime: docker run --gpus all ...
+
+FROM vibr8-node:gui
+
+USER root
+
+# NVIDIA OpenGL/EGL userspace libraries for hardware rendering.
+# The actual GPU driver is injected at runtime by nvidia-container-toolkit
+# when the container is started with --gpus all.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libegl1 libgl1 libgles2 libglvnd0 libglx0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Tell EGL/GLX to use the NVIDIA driver when available
+ENV __NV_PRIME_RENDER_OFFLOAD=1
+ENV __GLX_VENDOR_LIBRARY_NAME=nvidia
+
+USER vibr8

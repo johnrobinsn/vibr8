@@ -712,7 +712,8 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         const contentType = params?.type ?? "markdown";
         const content = params?.content ?? "";
         const filename = params?.filename;
-        store.setSecondScreenContent({ type: contentType, content, ...(filename && { filename }) });
+        const nodeId = params?.nodeId;
+        store.setSecondScreenContent({ type: contentType, content, ...(filename && { filename }), ...(nodeId && { nodeId }) });
         response = { type: "rpc_response", id: rpcId, result: { shown: true, type: contentType } };
       } else if (method === "mirror_session") {
         const params = data.params as Record<string, string> | undefined;

@@ -1132,6 +1132,7 @@ def create_routes(
         session_id = body.get("sessionId", "")
         playground = bool(body.get("playground", False))
         desktop = bool(body.get("desktop", False))
+        desktop_role = body.get("desktopRole", "controller")
         profile_id = body.get("profileId")
         username = _get_username(request)
 
@@ -1139,6 +1140,36 @@ def create_routes(
             return web.json_response(
                 {"error": "clientId and sdp required"}, status=400
             )
+
+        # Desktop offers: route to remote node if client specified one
+        target_node_id = body.get("nodeId", "")
+        if desktop and target_node_id and node_registry:
+            node = node_registry.get_node(target_node_id) or node_registry.get_node_by_name(target_node_id)
+            if node and node.tunnel and node.tunnel.connected:
+                # Remote node — forward via tunnel
+                try:
+                    result = await node.tunnel.send_command({
+                        "type": "webrtc_offer",
+                        "clientId": client_id,
+                        "sdp": sdp,
+                        "sdpType": sdp_type,
+                        "desktopRole": desktop_role,
+                        "iceServers": webrtc_manager.get_client_ice_servers(),
+                    }, timeout=30.0)
+                    if result.get("error"):
+                        return web.json_response(
+                            {"error": result["error"]}, status=500
+                        )
+                    return web.json_response(result)
+                except Exception as e:
+                    logger.error("[webrtc] Failed to forward desktop offer to node %s: %s", node.name, e)
+                    return web.json_response({"error": str(e)}, status=500)
+            elif not node or node.tunnel:
+                # Unknown node, or remote node with disconnected tunnel
+                return web.json_response(
+                    {"error": "Remote node unavailable"}, status=503
+                )
+            # Local node (no tunnel) — fall through to local handling
 
         try:
             answer = await webrtc_manager.handle_offer(
@@ -1148,6 +1179,7 @@ def create_routes(
                 profile_id=profile_id,
                 username=username,
                 desktop=desktop,
+                desktop_role=desktop_role,
             )
             return web.json_response(answer)
         except Exception as e:

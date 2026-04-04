@@ -95,7 +95,7 @@ interface AppState {
   commandPaletteOpen: boolean;
 
   // Second screen pushed content
-  secondScreenContent: { type: string; content: string; filename?: string } | null;
+  secondScreenContent: { type: string; content: string; filename?: string; nodeId?: string } | null;
   mirroredSessionId: string | null;
   secondScreenScale: number;
   secondScreenTvSafe: number; // 0 = off, >0 = padding percent
@@ -115,7 +115,7 @@ interface AppState {
 
   // Actions
   setClientRole: (role: "primary" | "secondscreen") => void;
-  setSecondScreenContent: (content: { type: string; content: string; filename?: string } | null) => void;
+  setSecondScreenContent: (content: { type: string; content: string; filename?: string; nodeId?: string } | null) => void;
   setMirroredSessionId: (id: string | null) => void;
   setSecondScreenScale: (scale: number) => void;
   setSecondScreenTvSafe: (padding: number) => void;

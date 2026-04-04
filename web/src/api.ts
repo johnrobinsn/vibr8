@@ -380,7 +380,7 @@ export const api = {
   getIceServers: () =>
     get<{ iceServers: RTCIceServer[] }>("/webrtc/ice-servers"),
 
-  webrtcOffer: (clientId: string, offer: { sdp: string; type: string }, opts?: { playground?: boolean; profileId?: string; desktop?: boolean }) =>
+  webrtcOffer: (clientId: string, offer: { sdp: string; type: string }, opts?: { playground?: boolean; profileId?: string; desktop?: boolean; desktopRole?: string; nodeId?: string }) =>
     post<{ sdp: string; type: string }>("/webrtc/offer", {
       clientId,
       sdp: offer.sdp,
@@ -388,6 +388,8 @@ export const api = {
       ...(opts?.playground ? { playground: true } : {}),
       ...(opts?.profileId ? { profileId: opts.profileId } : {}),
       ...(opts?.desktop ? { desktop: true } : {}),
+      ...(opts?.desktopRole ? { desktopRole: opts.desktopRole } : {}),
+      ...(opts?.nodeId ? { nodeId: opts.nodeId } : {}),
     }),
 
   // Voice Profiles

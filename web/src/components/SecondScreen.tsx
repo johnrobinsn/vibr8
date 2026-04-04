@@ -4,6 +4,7 @@ import { api } from "../api.js";
 import { MessageFeed } from "./MessageFeed.js";
 import { MarkdownContent } from "./MessageBubble.js";
 import { handleMessage } from "../ws.js";
+import { connectDesktopViewer, disconnectDesktopViewer, sendDesktopViewerInput, getViewerClipboard, setViewerClipboard } from "../webrtc.js";
 
 const RING0_SESSION_ID = "ring0";
 
@@ -368,14 +369,20 @@ export function SecondScreen() {
         />
       )}
 
-      {/* Content area */}
-      <div className="flex-1 flex flex-col min-h-0" style={{ zoom: scale }}>
-        {pushedContent ? (
-          <PushedContentView content={pushedContent} onHome={handleGoHome} />
-        ) : (
-          <MessageFeed sessionId={displaySessionId} />
-        )}
-      </div>
+      {/* Content area — desktop viewer renders outside zoom for correct coordinate mapping */}
+      {pushedContent?.type === "desktop" ? (
+        <div className="flex-1 min-h-0">
+          <DesktopViewer onHome={handleGoHome} nodeId={pushedContent.nodeId} />
+        </div>
+      ) : (
+        <div className="flex-1 flex flex-col min-h-0" style={{ zoom: scale }}>
+          {pushedContent ? (
+            <PushedContentView content={pushedContent} onHome={handleGoHome} />
+          ) : (
+            <MessageFeed sessionId={displaySessionId} />
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -453,7 +460,7 @@ function PushedContentView({
   content,
   onHome,
 }: {
-  content: { type: string; content: string; filename?: string };
+  content: { type: string; content: string; filename?: string; nodeId?: string };
   onHome: () => void;
 }) {
   const [imgError, setImgError] = useState(false);
@@ -464,6 +471,11 @@ function PushedContentView({
     setImgError(false);
     setImgLoaded(false);
   }, [content.content]);
+
+  // Desktop remote stream viewer
+  if (content.type === "desktop") {
+    return <DesktopViewer onHome={onHome} nodeId={content.nodeId} />;
+  }
 
   // Image viewer
   if (content.type === "image") {
@@ -562,5 +574,460 @@ function PushedContentView({
       </div>
       <BackButton onClick={onHome} />
     </div>
+  );
+}
+
+/** Full desktop controller for second screens — video + input + toolbar. */
+function DesktopViewer({ onHome, nodeId }: { onHome: () => void; nodeId?: string }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [status, setStatus] = useState<"connecting" | "connected" | "error">("connecting");
+  const [error, setError] = useState<string | null>(null);
+  const viewerIdRef = useRef(`ss-viewer-${crypto.randomUUID()}`);
+  const lastMoveRef = useRef(0);
+
+  const webrtcSupported = typeof RTCPeerConnection !== "undefined";
+
+  // ── Toolbar state ──────────────────────────────────────────────────────
+  const [showToolbar, setShowToolbar] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [vkbActive, setVkbActive] = useState(false);
+  const vkbInputRef = useRef<HTMLInputElement>(null);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [clipToast, setClipToast] = useState<string | null>(null);
+  const clipToastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const resetHideTimer = useCallback(() => {
+    setShowToolbar(true);
+    clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => setShowToolbar(false), 3000);
+  }, []);
+
+  // ── Connect WebRTC ─────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!webrtcSupported) {
+      setStatus("error");
+      setError("WebRTC is not supported in this browser");
+      return;
+    }
+
+    const viewerId = viewerIdRef.current;
+    let cancelled = false;
+
+    connectDesktopViewer(viewerId, nodeId)
+      .then((stream) => {
+        if (cancelled) { disconnectDesktopViewer(viewerId); return; }
+        setStatus("connected");
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) { setStatus("error"); setError(err?.message || "Failed to connect"); }
+      });
+
+    return () => { cancelled = true; disconnectDesktopViewer(viewerId); };
+  }, [webrtcSupported, nodeId]);
+
+  // Fullscreen change listener
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+
+  // ── Coordinate mapping (object-contain, no zoom/pan) ───────────────────
+  const getVideoCoords = useCallback(
+    (clientX: number, clientY: number): { x: number; y: number } | null => {
+      const video = videoRef.current;
+      const container = containerRef.current;
+      if (!video || !container || !video.videoWidth || !video.videoHeight) {
+        console.warn("[desktop-viewer] getVideoCoords: no video dimensions", {
+          video: !!video, container: !!container,
+          videoWidth: video?.videoWidth, videoHeight: video?.videoHeight,
+        });
+        return null;
+      }
+
+      const cRect = container.getBoundingClientRect();
+      const elW = cRect.width;
+      const elH = cRect.height;
+      const localX = clientX - cRect.left;
+      const localY = clientY - cRect.top;
+
+      // object-contain: compute letterbox/pillarbox
+      const vidAR = video.videoWidth / video.videoHeight;
+      const elAR = elW / elH;
+      let renderW: number, renderH: number, renderX: number, renderY: number;
+      if (vidAR > elAR) {
+        renderW = elW; renderH = elW / vidAR; renderX = 0; renderY = (elH - renderH) / 2;
+      } else {
+        renderH = elH; renderW = elH * vidAR; renderY = 0; renderX = (elW - renderW) / 2;
+      }
+
+      return {
+        x: Math.max(0, Math.min(1, (localX - renderX) / renderW)),
+        y: Math.max(0, Math.min(1, (localY - renderY) / renderH)),
+      };
+    },
+    [],
+  );
+
+  // Helper to send input on this viewer's data channel
+  const sendCount = useRef(0);
+  const send = useCallback((event: object) => {
+    if (sendCount.current < 5) {
+      console.log("[desktop-viewer] send", event, "viewerId=", viewerIdRef.current);
+      sendCount.current++;
+    }
+    sendDesktopViewerInput(viewerIdRef.current, event);
+  }, []);
+
+  // ── Mouse handlers ─────────────────────────────────────────────────────
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      const now = performance.now();
+      if (now - lastMoveRef.current < 33) return;
+      lastMoveRef.current = now;
+      const coords = getVideoCoords(e.clientX, e.clientY);
+      if (coords) send({ type: "mousemove", ...coords });
+    },
+    [getVideoCoords, send],
+  );
+
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const coords = getVideoCoords(e.clientX, e.clientY);
+      if (coords) send({ type: "mousedown", button: e.button, ...coords });
+    },
+    [getVideoCoords, send],
+  );
+
+  const handleMouseUp = useCallback(
+    (e: React.MouseEvent) => {
+      const coords = getVideoCoords(e.clientX, e.clientY);
+      if (coords) send({ type: "mouseup", button: e.button, ...coords });
+    },
+    [getVideoCoords, send],
+  );
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => { e.preventDefault(); }, []);
+
+  // ── Wheel (non-passive) ────────────────────────────────────────────────
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      const coords = getVideoCoords(e.clientX, e.clientY);
+      if (coords) send({ type: "wheel", dx: e.deltaX, dy: e.deltaY, ...coords });
+    };
+    video.addEventListener("wheel", handler, { passive: false });
+    return () => video.removeEventListener("wheel", handler);
+  }, [getVideoCoords, send]);
+
+  // ── Touch: single-finger → mouse, two-finger → ignored ────────────────
+  const activeTouchCountRef = useRef(0);
+
+  const handleTouchStart = useCallback(
+    (e: React.TouchEvent) => {
+      activeTouchCountRef.current = e.touches.length;
+      if (e.touches.length === 1) {
+        const t = e.changedTouches[0];
+        if (!t) return;
+        const coords = getVideoCoords(t.clientX, t.clientY);
+        if (coords) send({ type: "mousedown", button: 0, ...coords });
+      }
+    },
+    [getVideoCoords, send],
+  );
+
+  const handleTouchMove = useCallback(
+    (e: React.TouchEvent) => {
+      if (e.touches.length === 1 && activeTouchCountRef.current === 1) {
+        const now = performance.now();
+        if (now - lastMoveRef.current < 33) return;
+        lastMoveRef.current = now;
+        const t = e.changedTouches[0];
+        if (!t) return;
+        const coords = getVideoCoords(t.clientX, t.clientY);
+        if (coords) send({ type: "mousemove", ...coords });
+      }
+    },
+    [getVideoCoords, send],
+  );
+
+  const handleTouchEnd = useCallback(
+    (e: React.TouchEvent) => {
+      if (e.touches.length === 0 && activeTouchCountRef.current === 1) {
+        const t = e.changedTouches[0];
+        if (!t) return;
+        const coords = getVideoCoords(t.clientX, t.clientY);
+        if (coords) send({ type: "mouseup", button: 0, ...coords });
+      }
+      activeTouchCountRef.current = e.touches.length;
+    },
+    [getVideoCoords, send],
+  );
+
+  // ── Keyboard ───────────────────────────────────────────────────────────
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.metaKey || (e.ctrlKey && e.key === "Tab")) return;
+    e.preventDefault();
+    send({ type: "keydown", key: e.key });
+  }, [send]);
+
+  const handleKeyUp = useCallback((e: React.KeyboardEvent) => {
+    e.preventDefault();
+    send({ type: "keyup", key: e.key });
+  }, [send]);
+
+  // ── Virtual keyboard ──────────────────────────────────────────────────
+  const toggleVirtualKeyboard = useCallback(() => {
+    if (vkbActive) {
+      vkbInputRef.current?.blur();
+    } else {
+      setVkbActive(true);
+      requestAnimationFrame(() => vkbInputRef.current?.focus());
+    }
+  }, [vkbActive]);
+
+  const handleVkbKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key.length > 1 || e.ctrlKey || e.altKey || e.metaKey) {
+      e.preventDefault();
+      send({ type: "keydown", key: e.key });
+    }
+  }, [send]);
+
+  const handleVkbKeyUp = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key.length > 1 || e.ctrlKey || e.altKey || e.metaKey) {
+      send({ type: "keyup", key: e.key });
+    }
+  }, [send]);
+
+  const handleVkbInput = useCallback((e: React.FormEvent<HTMLInputElement>) => {
+    const input = e.currentTarget;
+    const data = (e.nativeEvent as InputEvent).data;
+    if (data) {
+      for (const char of data) { send({ type: "text", text: char }); }
+    }
+    input.value = "";
+  }, [send]);
+
+  const handleVkbBlur = useCallback(() => {
+    setVkbActive(false);
+    if (vkbInputRef.current) vkbInputRef.current.value = "";
+  }, []);
+
+  // ── Clipboard ──────────────────────────────────────────────────────────
+  const showClipToast = useCallback((msg: string) => {
+    setClipToast(msg);
+    clearTimeout(clipToastTimer.current);
+    clipToastTimer.current = setTimeout(() => setClipToast(null), 2000);
+  }, []);
+
+  const handleCopyFromRemote = useCallback(async () => {
+    try {
+      const text = await getViewerClipboard(viewerIdRef.current);
+      await navigator.clipboard.writeText(text);
+      showClipToast("Copied from remote");
+    } catch { showClipToast("Copy failed"); }
+  }, [showClipToast]);
+
+  const handlePasteToRemote = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      setViewerClipboard(viewerIdRef.current, text);
+      showClipToast("Pasted to remote");
+    } catch { showClipToast("Paste failed"); }
+  }, [showClipToast]);
+
+  // ── Toolbar actions ────────────────────────────────────────────────────
+  const toggleFullscreen = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) { document.exitFullscreen(); }
+    else { el.requestFullscreen(); }
+  }, []);
+
+  const handleDisconnect = useCallback(() => {
+    disconnectDesktopViewer(viewerIdRef.current);
+    onHome();
+  }, [onHome]);
+
+  // ── Error / not-supported states ───────────────────────────────────────
+  if (!webrtcSupported) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-4 p-8">
+        <div className="text-4xl opacity-40">⚠</div>
+        <div className="text-lg font-medium text-cc-fg-muted">WebRTC not supported</div>
+        <div className="text-sm text-cc-fg-muted/70 text-center max-w-md">
+          This browser does not support WebRTC, which is required for remote desktop streaming.
+          Try using a recent version of Chrome, Firefox, Safari, or Edge.
+        </div>
+        <BackButton onClick={onHome} />
+      </div>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-4 p-8">
+        <div className="text-4xl opacity-40">⚠</div>
+        <div className="text-lg font-medium text-cc-fg-muted">Desktop stream unavailable</div>
+        <div className="text-sm text-cc-fg-muted/70 text-center max-w-md">
+          {error || "Could not connect to the remote desktop stream."}
+        </div>
+        <BackButton onClick={onHome} />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className="h-full w-full bg-black relative overflow-hidden select-none outline-none"
+      tabIndex={0}
+      onMouseMove={resetHideTimer}
+      onMouseEnter={resetHideTimer}
+      onKeyDown={handleKeyDown}
+      onKeyUp={handleKeyUp}
+    >
+      {/* Video */}
+      <video
+        ref={videoRef}
+        className="w-full h-full object-contain cursor-default"
+        autoPlay
+        playsInline
+        muted
+        onMouseMove={handleMouseMove}
+        onMouseDown={handleMouseDown}
+        onMouseUp={handleMouseUp}
+        onContextMenu={handleContextMenu}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+      />
+
+      {/* Hidden input for virtual keyboard */}
+      <input
+        ref={vkbInputRef}
+        type="text"
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        className="absolute opacity-0 w-px h-px pointer-events-auto"
+        style={{ top: 0, left: 0 }}
+        onKeyDown={handleVkbKeyDown}
+        onKeyUp={handleVkbKeyUp}
+        onInput={handleVkbInput}
+        onBlur={handleVkbBlur}
+      />
+
+      {/* Connecting overlay */}
+      {status === "connecting" && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-10">
+          <div className="text-center space-y-2">
+            <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin mx-auto" />
+            <p className="text-white/70 text-sm">Connecting…</p>
+          </div>
+        </div>
+      )}
+
+      {/* Floating toolbar */}
+      <div
+        className={`absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1 px-2 py-1.5 rounded-xl bg-black/70 backdrop-blur-sm border border-white/10 transition-opacity duration-300 z-20 ${
+          showToolbar ? "opacity-100" : "opacity-0 pointer-events-none"
+        }`}
+      >
+        {/* Fullscreen */}
+        <SSToolbarButton
+          title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+          onClick={toggleFullscreen}
+        >
+          {isFullscreen ? (
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
+              <path d="M5 2v3H2M11 2v3h3M5 14v-3H2M11 14v-3h3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
+              <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          )}
+        </SSToolbarButton>
+
+        {/* Virtual keyboard */}
+        <SSToolbarButton
+          title={vkbActive ? "Hide keyboard" : "Show keyboard"}
+          onClick={toggleVirtualKeyboard}
+          active={vkbActive}
+        >
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" className="w-4 h-4">
+            <rect x="1" y="4" width="14" height="9" rx="1.5" />
+            <path d="M4 7h1M7 7h2M11 7h1M4 9.5h1M7 9.5h2M11 9.5h1M5 11.5h6" strokeLinecap="round" />
+          </svg>
+        </SSToolbarButton>
+
+        {/* Clipboard: copy from remote */}
+        <SSToolbarButton title="Copy from remote" onClick={handleCopyFromRemote}>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" className="w-4 h-4">
+            <rect x="5" y="1.5" width="8" height="10" rx="1.2" />
+            <path d="M3 4.5H2.5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V14" />
+          </svg>
+        </SSToolbarButton>
+
+        {/* Clipboard: paste to remote */}
+        <SSToolbarButton title="Paste to remote" onClick={handlePasteToRemote}>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" className="w-4 h-4">
+            <rect x="2.5" y="2.5" width="11" height="12" rx="1.2" />
+            <path d="M5.5 1.5h5a1 1 0 0 1 1 1v1h-7v-1a1 1 0 0 1 1-1z" />
+            <path d="M5.5 8h5M5.5 10.5h3" strokeLinecap="round" />
+          </svg>
+        </SSToolbarButton>
+
+        {/* Divider */}
+        <div className="w-px h-5 bg-white/20 mx-1" />
+
+        {/* Disconnect / Home */}
+        <SSToolbarButton title="Disconnect" onClick={handleDisconnect} danger>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
+            <path d="M12 4L4 12M4 4l8 8" strokeLinecap="round" />
+          </svg>
+        </SSToolbarButton>
+      </div>
+
+      {/* Clipboard toast */}
+      {clipToast && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-lg bg-black/80 text-white text-xs font-medium backdrop-blur-sm border border-white/10 z-20">
+          {clipToast}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SSToolbarButton({
+  children, onClick, title, danger, active,
+}: {
+  children: React.ReactNode; onClick: () => void; title: string;
+  danger?: boolean; active?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className={`flex items-center justify-center w-8 h-8 rounded-lg transition-colors cursor-pointer ${
+        danger
+          ? "text-white/70 hover:text-red-400 hover:bg-red-500/20"
+          : active
+          ? "text-blue-400 bg-blue-500/20"
+          : "text-white/70 hover:text-white hover:bg-white/10"
+      }`}
+    >
+      {children}
+    </button>
   );
 }

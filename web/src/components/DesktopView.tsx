@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 import { useStore } from "../store.js";
-import { stopDesktopStream, sendDesktopInput, retryDesktopStream } from "../webrtc.js";
+import { stopDesktopStream, sendDesktopInput, retryDesktopStream, getRemoteClipboard, setRemoteClipboard } from "../webrtc.js";
 
 type ScaleMode = "fit" | "fill";
 
@@ -21,6 +21,35 @@ export function DesktopView({ sessionId: _sessionId }: { sessionId: string }) {
   const [vkbActive, setVkbActive] = useState(false);
   const vkbInputRef = useRef<HTMLInputElement>(null);
 
+  // ── Clipboard toast ─────────────────────────────────────────────────────
+  const [clipToast, setClipToast] = useState<string | null>(null);
+  const clipToastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const showClipToast = useCallback((msg: string) => {
+    setClipToast(msg);
+    clearTimeout(clipToastTimer.current);
+    clipToastTimer.current = setTimeout(() => setClipToast(null), 2000);
+  }, []);
+
+  const handleCopyFromRemote = useCallback(async () => {
+    try {
+      const text = await getRemoteClipboard();
+      await navigator.clipboard.writeText(text);
+      showClipToast("Copied from remote");
+    } catch {
+      showClipToast("Copy failed");
+    }
+  }, [showClipToast]);
+
+  const handlePasteToRemote = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      setRemoteClipboard(text);
+      showClipToast("Pasted to remote");
+    } catch {
+      showClipToast("Paste failed");
+    }
+  }, [showClipToast]);
+
   // ── Pinch-to-zoom state ────────────────────────────────────────────────
   const [zoom, setZoom] = useState(1);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
@@ -33,6 +62,8 @@ export function DesktopView({ sessionId: _sessionId }: { sessionId: string }) {
     if (desktopRemoteStream) {
       video.srcObject = desktopRemoteStream;
       video.play().catch(() => {});
+      // Auto-focus container so keyboard events work immediately
+      containerRef.current?.focus();
     } else {
       video.srcObject = null;
     }
@@ -171,6 +202,8 @@ export function DesktopView({ sessionId: _sessionId }: { sessionId: string }) {
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLVideoElement>) => {
       e.preventDefault();
+      // Ensure the container keeps focus so keyboard events work
+      containerRef.current?.focus();
       const coords = getVideoCoords(e.clientX, e.clientY);
       if (coords) sendDesktopInput({ type: "mousedown", button: e.button, ...coords });
     },
@@ -185,17 +218,17 @@ export function DesktopView({ sessionId: _sessionId }: { sessionId: string }) {
     [getVideoCoords],
   );
 
-  // Wheel — non-passive for preventDefault
+  // Wheel — non-passive for preventDefault; bind on container to catch all scrolls
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
+    const container = containerRef.current;
+    if (!container) return;
     const handler = (e: WheelEvent) => {
       e.preventDefault();
       const coords = getVideoCoords(e.clientX, e.clientY);
       if (coords) sendDesktopInput({ type: "wheel", dx: e.deltaX, dy: e.deltaY, ...coords });
     };
-    video.addEventListener("wheel", handler, { passive: false });
-    return () => video.removeEventListener("wheel", handler);
+    container.addEventListener("wheel", handler, { passive: false });
+    return () => container.removeEventListener("wheel", handler);
   }, [getVideoCoords]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
@@ -487,6 +520,23 @@ export function DesktopView({ sessionId: _sessionId }: { sessionId: string }) {
           </svg>
         </ToolbarButton>
 
+        {/* Clipboard: copy from remote */}
+        <ToolbarButton title="Copy from remote" onClick={handleCopyFromRemote}>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" className="w-4 h-4">
+            <rect x="5" y="1.5" width="8" height="10" rx="1.2" />
+            <path d="M3 4.5H2.5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V14" />
+          </svg>
+        </ToolbarButton>
+
+        {/* Clipboard: paste to remote */}
+        <ToolbarButton title="Paste to remote" onClick={handlePasteToRemote}>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" className="w-4 h-4">
+            <rect x="2.5" y="2.5" width="11" height="12" rx="1.2" />
+            <path d="M5.5 1.5h5a1 1 0 0 1 1 1v1h-7v-1a1 1 0 0 1 1-1z" />
+            <path d="M5.5 8h5M5.5 10.5h3" strokeLinecap="round" />
+          </svg>
+        </ToolbarButton>
+
         {/* Reset zoom (only when zoomed) */}
         {zoom > 1.05 && (
           <ToolbarButton
@@ -536,6 +586,13 @@ export function DesktopView({ sessionId: _sessionId }: { sessionId: string }) {
           </svg>
         </ToolbarButton>
       </div>
+
+      {/* Clipboard toast */}
+      {clipToast && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-lg bg-black/80 text-white text-xs font-medium backdrop-blur-sm border border-white/10 animate-fade-in">
+          {clipToast}
+        </div>
+      )}
     </div>
   );
 }
@@ -574,6 +631,7 @@ function ToolbarButton({
   return (
     <button
       onClick={onClick}
+      onMouseDown={(e) => e.preventDefault()} // prevent focus steal from container
       title={title}
       className={`flex items-center justify-center w-8 h-8 rounded-lg transition-colors cursor-pointer ${
         danger

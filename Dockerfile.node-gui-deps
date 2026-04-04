@@ -1,0 +1,50 @@
+# GUI deps layer — virtual display, window manager, browser, editor, terminal.
+# Contains NO app code — only slow-changing GUI dependencies.
+# Build: docker build -f Dockerfile.node-gui-deps -t vibr8-node:gui-deps .
+# Requires: vibr8-node:base-deps (Dockerfile.node-base-deps)
+
+FROM vibr8-node:base-deps
+
+USER root
+
+# Virtual display + XFCE desktop + input tools + clipboard
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb xdotool x11-utils xterm dbus-x11 xclip \
+    xfce4 xfce4-terminal \
+    fonts-liberation fonts-noto-color-emoji \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Chrome (preferred) with Chromium fallback
+RUN curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb && \
+    apt-get update && apt-get install -y /tmp/chrome.deb && \
+    rm /tmp/chrome.deb && rm -rf /var/lib/apt/lists/* \
+    || (apt-get update && apt-get install -y --no-install-recommends chromium && rm -rf /var/lib/apt/lists/*)
+
+# Chrome needs --no-sandbox inside Docker (no user namespaces).
+# Patch the main launcher to inject --no-sandbox so all launch paths work
+# (/usr/bin/google-chrome, /usr/bin/google-chrome-stable, .desktop files).
+RUN sed -i 's|exec -a "$0" "$HERE/chrome" "$@"|exec -a "$0" "$HERE/chrome" --no-sandbox "$@"|' \
+    /opt/google/chrome/google-chrome 2>/dev/null; true
+
+# Visual Studio Code
+RUN curl -fsSL "https://code.visualstudio.com/sha/download?build=stable&os=linux-deb-x64" -o /tmp/vscode.deb && \
+    apt-get update && apt-get install -y /tmp/vscode.deb && \
+    rm /tmp/vscode.deb && rm -rf /var/lib/apt/lists/*
+
+# Kitty terminal
+RUN apt-get update && apt-get install -y --no-install-recommends kitty && \
+    rm -rf /var/lib/apt/lists/*
+
+# Clean up XFCE autostart items we don't need (power manager, update notifier, etc.)
+RUN rm -f /etc/xdg/autostart/xfce4-power-manager.desktop \
+          /etc/xdg/autostart/xscreensaver.desktop \
+          /etc/xdg/autostart/light-locker.desktop 2>/dev/null; true
+
+# Generate machine-id (Chrome and dbus need it)
+RUN python3 -c 'import uuid; print(uuid.uuid4().hex)' > /etc/machine-id
+
+# Desktop streaming Python deps (aiortc + av for screen capture / WebRTC)
+COPY requirements-node-desktop.txt /tmp/requirements-node-desktop.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-node-desktop.txt && \
+    rm /tmp/requirements-node-desktop.txt

@@ -585,6 +585,7 @@ async def show_on_second_screen(
     image_mime: str = "image/png",
     filename: str = "",
     pdf_data: str = "",
+    node_id: str = "",
 ) -> str:
     """Push content to one or all connected second screen displays.
 
@@ -597,14 +598,18 @@ async def show_on_second_screen(
                  - html: the HTML string to render
                  - session: the session ID to mirror
                  - home: ignored (returns second screen to default view)
+                 - desktop: ignored (streams the remote desktop to second screen)
         content_type: Type of content. One of:
-                 "markdown", "image", "file", "pdf", "html", "session", "home".
+                 "markdown", "image", "file", "pdf", "html", "session", "home", "desktop".
         client_id: Optional specific second screen client ID. If omitted,
                    sends to all connected second screens.
         image_data: Base64-encoded image bytes. Only used when content_type is "image".
         image_mime: MIME type for image_data (default "image/png").
         filename: Display filename for content_type "file".
         pdf_data: Base64-encoded PDF bytes. Only used when content_type is "pdf".
+        node_id: Optional node ID for content_type "desktop". If provided, the second
+                 screen will connect to this specific node's desktop. Defaults to the
+                 second screen's own active node.
     """
     # Build the actual content to send
     display_content = content
@@ -650,6 +655,8 @@ async def show_on_second_screen(
             params: dict[str, str] = {"type": content_type, "content": display_content}
             if filename:
                 params["filename"] = filename
+            if content_type == "desktop" and node_id:
+                params["nodeId"] = node_id
             body = {
                 "clientId": screen["clientId"],
                 "method": "show_content",

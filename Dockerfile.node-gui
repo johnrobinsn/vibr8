@@ -1,10 +1,10 @@
-# Code layer — app source only, fast rebuild on code changes.
-# Build: docker build -f Dockerfile.node -t vibr8-node:latest .
-# Requires: vibr8-node:base-deps (Dockerfile.node-base-deps)
+# GUI code layer — app source only, fast rebuild on code changes.
+# Build: docker build -f Dockerfile.node-gui -t vibr8-node:gui .
+# Requires: vibr8-node:gui-deps (Dockerfile.node-gui-deps)
 
-FROM vibr8-node:base-deps
+FROM vibr8-node:gui-deps
 
-# Copy vibr8 source via installer (code copy only, deps already installed)
+# Copy vibr8 source via installer (code copy only, all deps already installed)
 COPY install-node.sh /tmp/install-node.sh
 COPY vibr8_node/ /tmp/vibr8-src/vibr8_node/
 COPY server/ /tmp/vibr8-src/server/

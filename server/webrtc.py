@@ -9,8 +9,12 @@ so connections survive session switches.
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 import os
+import shutil
+import subprocess
+import sys
 import time
 from typing import Dict
 
@@ -18,12 +22,18 @@ import numpy as np
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from av import AudioFrame
 
+from aiortc.codecs import h264 as _h264_codec
+
 from server.audio_track import QueuedAudioTrack
 from server.input_injector import InputInjector
 from server.screen_capture import ScreenCapture, NoDisplayError
 from server.stt import AsyncSTT, STTParams
 from server.video_track import ScreenShareTrack
 from server.voice_logger import VoiceLogger
+
+# Raise H.264 bitrate limits for screen content (sharp text/UI edges)
+_h264_codec.DEFAULT_BITRATE = 4_000_000  # 4 Mbps (was 1 Mbps)
+_h264_codec.MAX_BITRATE = 8_000_000      # 8 Mbps (was 3 Mbps)
 from server import voice_profiles
 
 logger = logging.getLogger(__name__)
@@ -118,6 +128,59 @@ class AudioStatsLogger:
             self._last_log_time = now
 
 
+# ── Clipboard helpers ────────────────────────────────────────────────────────
+
+_IS_LINUX = sys.platform.startswith("linux")
+_IS_MACOS = sys.platform == "darwin"
+
+
+async def _handle_clipboard_get(channel) -> None:
+    """Read the remote clipboard and send it back on the data channel."""
+    loop = asyncio.get_event_loop()
+    text = await loop.run_in_executor(None, _clipboard_read)
+    if channel.readyState == "open":
+        channel.send(_json.dumps({"type": "clipboard", "text": text}))
+
+
+async def _handle_clipboard_set(text: str) -> None:
+    """Write text to the remote clipboard."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _clipboard_write, text)
+
+
+def _clipboard_read() -> str:
+    """Read clipboard contents (blocking)."""
+    try:
+        if _IS_MACOS:
+            return subprocess.check_output(["pbpaste"], timeout=3).decode("utf-8", errors="replace")
+        elif _IS_LINUX and shutil.which("xclip"):
+            return subprocess.check_output(
+                ["xclip", "-o", "-selection", "clipboard"],
+                timeout=3,
+                env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")},
+            ).decode("utf-8", errors="replace")
+    except Exception as exc:
+        logger.warning("[webrtc] clipboard read failed: %s", exc)
+    return ""
+
+
+def _clipboard_write(text: str) -> None:
+    """Write text to clipboard (blocking)."""
+    try:
+        if _IS_MACOS:
+            subprocess.run(["pbcopy"], input=text.encode(), timeout=3, check=True)
+        elif _IS_LINUX and shutil.which("xclip"):
+            subprocess.run(
+                ["xclip", "-selection", "clipboard"],
+                input=text.encode(),
+                timeout=3,
+                check=True,
+                env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")},
+            )
+    except Exception as exc:
+        logger.warning("[webrtc] clipboard write failed: %s", exc)
+
+
 class WebRTCManager:
     """Manages per-client RTCPeerConnection instances with STT and TTS audio.
 
@@ -143,6 +206,10 @@ class WebRTCManager:
         self._input_injectors: Dict[str, InputInjector] = {}
         self._playground_ws: Dict[str, object] = {}  # client_id → WS
         self._playground_clients: set[str] = set()  # client_ids that are playground
+        # Shared screen capture: one per display, ref-counted across viewers
+        self._shared_captures: Dict[str, ScreenCapture] = {}  # display → capture
+        self._shared_capture_refs: Dict[str, set[str]] = {}  # display → {client_ids}
+        self._desktop_viewers: set[str] = set()  # client_ids that are view-only
         self._ws_bridge = None
         self._ring0_manager = None
         self._launcher = None  # Set by main.py for Ring0 lazy-create
@@ -311,6 +378,7 @@ class WebRTCManager:
         self, client_id: str, sdp: str, sdp_type: str, session_id: str = "",
         playground: bool = False, profile_id: str | None = None,
         username: str = "default", desktop: bool = False,
+        desktop_role: str = "controller",
     ) -> dict[str, str]:
         """Process an SDP offer and return an SDP answer.
 
@@ -325,6 +393,10 @@ class WebRTCManager:
 
         If *desktop* is True, a :class:`ScreenShareTrack` is added to
         stream the server's screen capture as a WebRTC video track.
+
+        *desktop_role* controls the connection type when *desktop* is True:
+        ``"controller"`` (default) gets video + input channel,
+        ``"viewer"`` gets video only (no input).
         """
         # Tear down any pre-existing connection for this client.
         if client_id in self._connections:
@@ -351,7 +423,17 @@ class WebRTCManager:
                 client_id,
                 pc.connectionState,
             )
-            if pc.connectionState in ("failed", "closed"):
+            if pc.connectionState == "connected" and desktop:
+                # Force a keyframe after bitrate ramp-up for a sharp first image
+                async def _delayed_keyframe() -> None:
+                    await asyncio.sleep(2)
+                    for t in pc.getTransceivers():
+                        if t.kind == "video" and hasattr(t.sender, "_send_keyframe"):
+                            t.sender._send_keyframe()
+                            logger.info("[webrtc] client %s: forced desktop keyframe", client_id)
+                            break
+                asyncio.ensure_future(_delayed_keyframe())
+            elif pc.connectionState in ("failed", "closed"):
                 await self.close_connection(client_id)
 
         # Desktop connections are video-only (no incoming audio to process).
@@ -393,8 +475,20 @@ class WebRTCManager:
         # Add outgoing video track for desktop screen sharing.
         if desktop:
             try:
-                capture = ScreenCapture(target_fps=30, max_height=1080)
-                await capture.start()
+                display = os.environ.get("DISPLAY", ":1")
+
+                # Use shared capture: one ScreenCapture per display, ref-counted
+                if display in self._shared_captures:
+                    capture = self._shared_captures[display]
+                    self._shared_capture_refs[display].add(client_id)
+                    logger.info("[webrtc] client %s: reusing shared capture for %s", client_id, display)
+                else:
+                    capture = ScreenCapture(target_fps=30, max_height=1080)
+                    await capture.start()
+                    self._shared_captures[display] = capture
+                    self._shared_capture_refs[display] = {client_id}
+                    logger.info("[webrtc] client %s: created shared capture for %s", client_id, display)
+
                 video_track = ScreenShareTrack(capture)
                 pc.addTrack(video_track)
                 # Prefer H.264 for WebView compatibility (VP8 decode is unreliable)
@@ -410,30 +504,37 @@ class WebRTCManager:
                 self._video_tracks[client_id] = video_track
                 self._screen_captures[client_id] = capture
                 logger.info(
-                    "[webrtc] client %s: desktop video track added (%dx%d)",
-                    client_id, capture.capture_width, capture.capture_height,
+                    "[webrtc] client %s: desktop %s track added (%dx%d)",
+                    client_id, desktop_role, capture.capture_width, capture.capture_height,
                 )
 
-                # Handle input data channel from browser
-                display = os.environ.get("DISPLAY", ":1")
+                if desktop_role == "viewer":
+                    # Viewer: video only, no input injection
+                    self._desktop_viewers.add(client_id)
+                else:
+                    # Controller: full input channel for mouse/keyboard/clipboard
+                    @pc.on("datachannel")
+                    def on_datachannel(channel):
+                        injector = InputInjector(
+                            display, capture.native_width, capture.native_height,
+                            screen_size_fn=lambda: (capture.native_width, capture.native_height),
+                        )
+                        self._input_injectors[client_id] = injector
+                        logger.info("[webrtc] client %s: input channel '%s' opened", client_id, channel.label)
 
-                @pc.on("datachannel")
-                def on_datachannel(channel):
-                    injector = InputInjector(
-                        display, capture.native_width, capture.native_height,
-                        screen_size_fn=lambda: (capture.native_width, capture.native_height),
-                    )
-                    self._input_injectors[client_id] = injector
-                    logger.info("[webrtc] client %s: input channel '%s' opened", client_id, channel.label)
-
-                    @channel.on("message")
-                    def on_message(msg):
-                        import json
-                        try:
-                            event = json.loads(msg)
-                            asyncio.ensure_future(injector.inject(event))
-                        except Exception:
-                            pass
+                        @channel.on("message")
+                        def on_message(msg):
+                            try:
+                                event = _json.loads(msg)
+                                etype = event.get("type")
+                                if etype == "clipboard_get":
+                                    asyncio.ensure_future(_handle_clipboard_get(channel))
+                                elif etype == "clipboard_set":
+                                    asyncio.ensure_future(_handle_clipboard_set(event.get("text", "")))
+                                else:
+                                    asyncio.ensure_future(injector.inject(event))
+                            except Exception:
+                                pass
             except NoDisplayError as exc:
                 logger.warning("[webrtc] client %s: no display for desktop: %s", client_id, exc)
 
@@ -909,12 +1010,29 @@ class WebRTCManager:
         self._outgoing_tracks.pop(client_id, None)
         self._video_tracks.pop(client_id, None)
         self._input_injectors.pop(client_id, None)
+        self._desktop_viewers.discard(client_id)
         capture = self._screen_captures.pop(client_id, None)
         if capture:
-            try:
-                await capture.stop()
-            except Exception:
-                pass
+            # Shared capture ref-counting: only stop when last consumer disconnects
+            stopped = False
+            for display, cap in list(self._shared_captures.items()):
+                if cap is capture:
+                    refs = self._shared_capture_refs.get(display, set())
+                    refs.discard(client_id)
+                    if not refs:
+                        self._shared_captures.pop(display, None)
+                        self._shared_capture_refs.pop(display, None)
+                        try:
+                            await capture.stop()
+                        except Exception:
+                            pass
+                    stopped = True
+                    break
+            if not stopped:
+                try:
+                    await capture.stop()
+                except Exception:
+                    pass
         self._guard_enabled.pop(client_id, None)
         self._tts_muted.pop(client_id, None)
         self._playground_clients.discard(client_id)
