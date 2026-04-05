@@ -269,12 +269,17 @@ export default function App() {
           {!isTerminalSession && activeView !== "desktop" && !(splitViewActive && (desktopStreamActive || desktopStatus === "connecting" || desktopStatus === "reconnecting")) && (
             <>
               {/* Chat tab — visible when activeTab is "chat" or no session */}
-              <div className={`absolute inset-0 ${activeTab === "chat" || !currentSessionId ? "" : "hidden"}`}>
-                {currentSessionId ? (
-                  <ChatView sessionId={currentSessionId} />
-                ) : (
-                  <HomePage key={homeResetKey} />
+              <div className={`absolute inset-0 flex flex-col ${activeTab === "chat" || !currentSessionId ? "" : "hidden"}`}>
+                {isComputerUseSession && currentSessionId && (
+                  <AgentControls sessionId={currentSessionId} />
                 )}
+                <div className="flex-1 min-h-0">
+                  {currentSessionId ? (
+                    <ChatView sessionId={currentSessionId} />
+                  ) : (
+                    <HomePage key={homeResetKey} />
+                  )}
+                </div>
               </div>
 
               {/* Editor tab */}

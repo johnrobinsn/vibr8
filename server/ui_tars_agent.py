@@ -275,11 +275,15 @@ class UITarsAgent:
         """Human-readable one-line action summary."""
         if not action.action_type:
             return "unknown action"
-        parts = [action.action_type]
-        if action.params:
-            param_str = ", ".join(f"{k}={v}" for k, v in action.params.items())
-            parts.append(f"({param_str})")
-        return "".join(parts)
+        p = action.params
+        if action.action_type in ("click", "left_double", "right_single", "scroll"):
+            return f"{action.action_type}({p.get('x', '?')}, {p.get('y', '?')})"
+        if action.action_type == "drag":
+            return f"drag({p.get('sx')},{p.get('sy')} → {p.get('ex')},{p.get('ey')})"
+        if action.action_type in ("type", "hotkey"):
+            val = p.get("content") or p.get("key") or ""
+            return f"{action.action_type}('{val[:30]}')"
+        return action.action_type
 
     @staticmethod
     def _format_action_display(action, response_text: str) -> str:
