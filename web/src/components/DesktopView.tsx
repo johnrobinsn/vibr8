@@ -4,7 +4,7 @@ import { stopDesktopStream, sendDesktopInput, retryDesktopStream, getRemoteClipb
 
 type ScaleMode = "fit" | "fill";
 
-export function DesktopView({ sessionId: _sessionId }: { sessionId: string }) {
+export function DesktopView({ sessionId: _sessionId, embedded = false }: { sessionId: string; embedded?: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const desktopStreamActive = useStore((s) => s.desktopStreamActive);
@@ -119,8 +119,11 @@ export function DesktopView({ sessionId: _sessionId }: { sessionId: string }) {
 
   const handleDisconnect = useCallback(() => {
     stopDesktopStream();
+    if (embedded) {
+      useStore.getState().setSplitViewActive(false);
+    }
     useStore.getState().setActiveView("session");
-  }, []);
+  }, [embedded]);
 
   // ── Input event helpers ────────────────────────────────────────────────
 
@@ -319,9 +322,14 @@ export function DesktopView({ sessionId: _sessionId }: { sessionId: string }) {
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.metaKey || (e.ctrlKey && e.key === "Tab")) return;
+    // In embedded (split) mode, Escape releases focus to the chat panel
+    if (embedded && e.key === "Escape") {
+      containerRef.current?.blur();
+      return;
+    }
     e.preventDefault();
     sendDesktopInput({ type: "keydown", key: e.key });
-  }, []);
+  }, [embedded]);
 
   const handleKeyUp = useCallback((e: React.KeyboardEvent) => {
     e.preventDefault();
@@ -472,7 +480,7 @@ export function DesktopView({ sessionId: _sessionId }: { sessionId: string }) {
 
       {/* Floating toolbar */}
       <div
-        className={`absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1 px-2 py-1.5 rounded-xl bg-black/70 backdrop-blur-sm border border-white/10 transition-opacity duration-300 ${
+        className={`absolute ${embedded ? "bottom-1" : "bottom-4"} left-1/2 -translate-x-1/2 flex items-center gap-1 px-2 py-1.5 rounded-xl bg-black/70 backdrop-blur-sm border border-white/10 transition-opacity duration-300 ${
           showToolbar ? "opacity-100" : "opacity-0 pointer-events-none"
         }`}
       >
@@ -492,21 +500,23 @@ export function DesktopView({ sessionId: _sessionId }: { sessionId: string }) {
           )}
         </ToolbarButton>
 
-        {/* Fullscreen */}
-        <ToolbarButton
-          title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-          onClick={toggleFullscreen}
-        >
-          {isFullscreen ? (
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
-              <path d="M5 2v3H2M11 2v3h3M5 14v-3H2M11 14v-3h3" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          ) : (
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
-              <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          )}
-        </ToolbarButton>
+        {/* Fullscreen (hidden in embedded/split mode) */}
+        {!embedded && (
+          <ToolbarButton
+            title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+            onClick={toggleFullscreen}
+          >
+            {isFullscreen ? (
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
+                <path d="M5 2v3H2M11 2v3h3M5 14v-3H2M11 14v-3h3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
+                <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
+          </ToolbarButton>
+        )}
 
         {/* Virtual keyboard toggle */}
         <ToolbarButton

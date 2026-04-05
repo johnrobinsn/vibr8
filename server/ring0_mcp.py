@@ -76,26 +76,36 @@ async def create_session(
     model: str = "",
     initial_message: str = "",
 ) -> str:
-    """Create a new coding session with its own working directory.
+    """Create a new session.
 
     Args:
-        name: Human-readable session name (e.g., "auth refactor", "frontend tests").
-        backend: Backend type — "claude" (default) or "codex".
-        project_dir: Working directory for the session. If empty, creates /mntc/code/{slugified-name}.
+        name: Human-readable session name (e.g., "auth refactor", "frontend tests",
+              "Desktop: open Chrome").
+        backend: Backend type — "claude" (default), "codex", or "computer-use".
+                 Use "computer-use" for desktop GUI tasks (opens apps, clicks, types).
+        project_dir: Working directory for the session. Only used for claude/codex backends.
+                     If empty, creates /mntc/code/{slugified-name}.
         model: Optional model override (e.g., "claude-sonnet-4-6").
         initial_message: Optional first message to send to the session after creation.
+                         For computer-use sessions, this is the task to execute
+                         (e.g., "open Chrome and go to google.com").
     """
-    if backend not in ("claude", "codex"):
-        return f"Error: backend must be 'claude' or 'codex', got '{backend}'."
+    if backend not in ("claude", "codex", "computer-use"):
+        return f"Error: backend must be 'claude', 'codex', or 'computer-use', got '{backend}'."
 
-    # Resolve working directory
-    cwd = project_dir.strip() if project_dir else f"/mntc/code/{_slugify(name)}"
-    Path(cwd).mkdir(parents=True, exist_ok=True)
-
-    # Create the session via REST API
-    body: dict[str, Any] = {"cwd": cwd, "backend": backend, "name": name}
+    body: dict[str, Any] = {"backend": backend, "name": name}
     if model:
         body["model"] = model
+
+    if backend == "computer-use":
+        # Computer-use doesn't need a working directory
+        pass
+    else:
+        # Resolve working directory for coding backends
+        cwd = project_dir.strip() if project_dir else f"/mntc/code/{_slugify(name)}"
+        Path(cwd).mkdir(parents=True, exist_ok=True)
+        body["cwd"] = cwd
+
     result = await _post("/ring0/create-session", body)
 
     if result.get("error"):
@@ -105,12 +115,17 @@ async def create_session(
     if not session_id:
         return f"Error: no sessionId in response: {json.dumps(result)}"
 
-    # Wait for CLI to connect, then send initial message if provided
+    # Send initial message (task for computer-use, prompt for claude/codex)
     if initial_message:
-        await asyncio.sleep(2)
+        if backend == "computer-use":
+            await asyncio.sleep(1)  # Agent starts faster than CLI
+        else:
+            await asyncio.sleep(2)
         await _post("/ring0/send-message", {"sessionId": session_id, "message": initial_message})
 
-    parts = [f"Session created: {name} (id={session_id[:8]}, cwd={cwd})"]
+    parts = [f"Session created: {name} (id={session_id[:8]}, backend={backend})"]
+    if backend != "computer-use":
+        parts.append(f"cwd={body.get('cwd', '')}")
     if initial_message:
         parts.append(f"Initial message sent: {initial_message[:80]}")
     return "\n".join(parts)
@@ -139,6 +154,20 @@ async def list_sessions() -> str:
         pen_info = ", PEN: user (do not send messages)" if pen == "user" else ""
         lines.append(f"- {name} (id={sid[:8]}, state={state}, type={backend}, cwd={cwd}{perm_info}{pen_info})")
     return "\n".join(lines) if lines else "No active sessions."
+
+
+@mcp.tool()
+async def rename_session(session_id: str, new_name: str) -> str:
+    """Rename a session.
+
+    Args:
+        session_id: The session ID (full or prefix) to rename.
+        new_name: The new human-readable name for the session.
+    """
+    result = await _post("/ring0/rename-session", {"sessionId": session_id, "name": new_name})
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    return f"Renamed session {session_id[:8]} to '{new_name}'."
 
 
 @mcp.tool()

@@ -42,7 +42,7 @@ interface AppState {
   cliConnected: Map<string, boolean>;
 
   // Session status
-  sessionStatus: Map<string, "idle" | "running" | "compacting" | "waiting_for_permission" | null>;
+  sessionStatus: Map<string, "idle" | "running" | "compacting" | "waiting_for_permission" | "watching" | "confirming" | null>;
 
   // Plan mode: stores previous permission mode per session so we can restore it
   previousPermissionMode: Map<string, string>;
@@ -66,6 +66,13 @@ interface AppState {
   homeResetKey: number;
   activeTab: "chat" | "editor" | "terminal";
   activeView: "session" | "desktop";
+  splitViewActive: boolean;
+
+  // Computer-use agent controls
+  agentMode: "watch" | "act";
+  executionMode: "auto" | "confirm" | "gated";
+  pendingConfirmation: { step: number; actionType: string; actionSummary: string; thought: string } | null;
+
   editorOpenFile: Map<string, string>;
   editorUrl: Map<string, string>;
   editorLoading: Map<string, boolean>;
@@ -168,13 +175,18 @@ interface AppState {
   // Connection actions
   setConnectionStatus: (sessionId: string, status: "connecting" | "connected" | "disconnected") => void;
   setCliConnected: (sessionId: string, connected: boolean) => void;
-  setSessionStatus: (sessionId: string, status: "idle" | "running" | "compacting" | "waiting_for_permission" | null) => void;
+  setSessionStatus: (sessionId: string, status: "idle" | "running" | "compacting" | "waiting_for_permission" | "watching" | "confirming" | null) => void;
   setReconnecting: (sessionId: string, value: boolean) => void;
   setReconnectGaveUp: (sessionId: string, value: boolean) => void;
 
   // Editor actions
   setActiveTab: (tab: "chat" | "editor") => void;
   setActiveView: (view: "session" | "desktop") => void;
+  setSplitViewActive: (active: boolean) => void;
+  toggleSplitView: () => void;
+  setAgentMode: (mode: "watch" | "act") => void;
+  setExecutionMode: (mode: "auto" | "confirm" | "gated") => void;
+  setPendingConfirmation: (confirm: { step: number; actionType: string; actionSummary: string; thought: string } | null) => void;
   setEditorOpenFile: (sessionId: string, filePath: string | null) => void;
   setEditorUrl: (sessionId: string, url: string) => void;
   setEditorLoading: (sessionId: string, loading: boolean) => void;
@@ -260,6 +272,10 @@ export const useStore = create<AppState>((set) => ({
   homeResetKey: 0,
   activeTab: "chat",
   activeView: "session" as const,
+  splitViewActive: false,
+  agentMode: "act" as const,
+  executionMode: "auto" as const,
+  pendingConfirmation: null,
   editorOpenFile: new Map(),
   editorUrl: new Map(),
   editorLoading: new Map(),
@@ -678,6 +694,11 @@ export const useStore = create<AppState>((set) => ({
 
   setActiveTab: (tab) => set({ activeTab: tab }),
   setActiveView: (view) => set({ activeView: view }),
+  setSplitViewActive: (active) => set({ splitViewActive: active }),
+  toggleSplitView: () => set((s) => ({ splitViewActive: !s.splitViewActive })),
+  setAgentMode: (mode) => set({ agentMode: mode }),
+  setExecutionMode: (mode) => set({ executionMode: mode }),
+  setPendingConfirmation: (confirm) => set({ pendingConfirmation: confirm }),
 
   setEditorOpenFile: (sessionId, filePath) =>
     set((s) => {
@@ -782,6 +803,10 @@ export const useStore = create<AppState>((set) => ({
       recentlyRenamed: new Set(),
       activeTab: "chat" as const,
       activeView: "session" as const,
+      splitViewActive: false,
+      agentMode: "act" as const,
+      executionMode: "auto" as const,
+      pendingConfirmation: null,
       editorOpenFile: new Map(),
       editorUrl: new Map(),
       editorLoading: new Map(),

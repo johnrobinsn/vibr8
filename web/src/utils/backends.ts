@@ -64,20 +64,36 @@ export const CODEX_MODES: ModeOption[] = [
   { value: "plan", label: "Suggest" },
 ];
 
+export const COMPUTER_USE_MODELS: ModelOption[] = [
+  { value: "ByteDance-Seed/UI-TARS-1.5-7B", label: "UI-TARS 1.5 7B", icon: "\u25CF" },
+];
+
+export const COMPUTER_USE_MODES: ModeOption[] = [
+  { value: "bypassPermissions", label: "Auto" },
+];
+
 // ─── Getters ─────────────────────────────────────────────────────────────────
 
 export function getModelsForBackend(backend: BackendType): ModelOption[] {
-  return backend === "codex" ? CODEX_MODELS : CLAUDE_MODELS;
+  if (backend === "codex") return CODEX_MODELS;
+  if (backend === "computer-use") return COMPUTER_USE_MODELS;
+  return CLAUDE_MODELS;
 }
 
 export function getModesForBackend(backend: BackendType): ModeOption[] {
-  return backend === "codex" ? CODEX_MODES : CLAUDE_MODES;
+  if (backend === "codex") return CODEX_MODES;
+  if (backend === "computer-use") return COMPUTER_USE_MODES;
+  return CLAUDE_MODES;
 }
 
 export function getDefaultModel(backend: BackendType): string {
-  return backend === "codex" ? CODEX_MODELS[0].value : CLAUDE_MODELS[0].value;
+  if (backend === "codex") return CODEX_MODELS[0].value;
+  if (backend === "computer-use") return COMPUTER_USE_MODELS[0].value;
+  return CLAUDE_MODELS[0].value;
 }
 
 export function getDefaultMode(backend: BackendType): string {
-  return backend === "codex" ? CODEX_MODES[0].value : CLAUDE_MODES[0].value;
+  if (backend === "codex") return CODEX_MODES[0].value;
+  if (backend === "computer-use") return COMPUTER_USE_MODES[0].value;
+  return CLAUDE_MODES[0].value;
 }

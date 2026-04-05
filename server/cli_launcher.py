@@ -46,6 +46,7 @@ class SdkSessionInfo:
     branch: Optional[str] = None
     actualBranch: Optional[str] = None
     name: Optional[str] = None
+    nodeId: Optional[str] = None
     backendType: Optional[BackendType] = None
     mcpConfig: Optional[str] = None
 
@@ -85,6 +86,7 @@ class LaunchOptions:
     mcpConfig: Optional[str] = None
     sessionId: Optional[str] = None
     resumeSessionId: Optional[str] = None
+    nodeId: Optional[str] = None
 
 
 @dataclass
@@ -119,6 +121,9 @@ class CliLauncher:
         self._on_codex_adapter: Optional[
             Callable[[str, CodexAdapter], None]
         ] = None
+        self._on_computer_use_created: Optional[
+            Callable[[str, SdkSessionInfo], None]
+        ] = None
         # Keep references to background tasks so they are not GC'd
         self._monitor_tasks: Dict[str, asyncio.Task[None]] = {}
         self._pipe_tasks: List[asyncio.Task[None]] = []
@@ -132,6 +137,14 @@ class CliLauncher:
         """Register a callback for when a CodexAdapter is created
         (WsBridge needs to attach it)."""
         self._on_codex_adapter = cb
+
+    def on_computer_use_created(
+        self,
+        cb: Callable[[str, SdkSessionInfo], None],
+    ) -> None:
+        """Register a callback for when a computer-use session is created
+        (WsBridge needs to attach the agent)."""
+        self._on_computer_use_created = cb
 
     def set_store(self, store: SessionStore) -> None:
         """Attach a persistent store for surviving server restarts."""
@@ -220,7 +233,18 @@ class CliLauncher:
             info.branch = options.worktreeInfo.branch
             info.actualBranch = options.worktreeInfo.actualBranch
 
+        if options.nodeId:
+            info.nodeId = options.nodeId
+
         self._sessions[session_id] = info
+
+        if backend_type == "computer-use":
+            # Computer-use runs in-process — no subprocess to spawn
+            info.state = "connected"
+            if self._on_computer_use_created:
+                self._on_computer_use_created(session_id, info)
+            self._persist_state()
+            return info
 
         if backend_type == "codex":
             asyncio.ensure_future(self._spawn_codex(session_id, info, options))
@@ -272,6 +296,14 @@ class CliLauncher:
                 pass
 
         info.state = "starting"
+
+        if info.backendType == "computer-use":
+            # Computer-use is in-process — just mark connected and re-create
+            info.state = "connected"
+            if self._on_computer_use_created:
+                self._on_computer_use_created(session_id, info)
+            self._persist_state()
+            return True
 
         if info.backendType == "codex":
             await self._spawn_codex(
@@ -635,6 +667,14 @@ class CliLauncher:
 
     async def kill(self, session_id: str) -> bool:
         """Kill a session's CLI process and all its children (e.g. MCP)."""
+        info = self._sessions.get(session_id)
+        if info and info.backendType == "computer-use":
+            # Computer-use has no subprocess — just mark exited
+            info.state = "exited"
+            info.exitCode = 0
+            self._persist_state()
+            return True
+
         proc = self._processes.get(session_id)
         if not proc:
             return False

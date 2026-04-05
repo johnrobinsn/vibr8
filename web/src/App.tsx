@@ -14,8 +14,10 @@ import { TerminalView } from "./components/TerminalView.js";
 import { LoginPage } from "./components/LoginPage.js";
 import { CommandPalette } from "./components/CommandPalette.js";
 import { SettingsPage } from "./components/SettingsPage.js";
+import { AgentControls } from "./components/AgentControls.js";
 import { connectSession, disconnectSession } from "./ws.js";
 import { startWebRTC, setAudioInOnly } from "./webrtc.js";
+import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 
 function useHash() {
   return useSyncExternalStore(
@@ -46,6 +48,14 @@ export default function App() {
     terminalIdsRef.current = ids;
     return ids;
   });
+  const isComputerUseSession = useStore((s) => {
+    if (!s.currentSessionId) return false;
+    const sdk = s.sdkSessions.find((x) => x.sessionId === s.currentSessionId);
+    return sdk?.backendType === "computer-use";
+  });
+  const splitViewActive = useStore((s) => s.splitViewActive);
+  const desktopStreamActive = useStore((s) => s.desktopStreamActive);
+  const desktopStatus = useStore((s) => s.desktopStatus);
   const commandPaletteOpen = useStore((s) => s.commandPaletteOpen);
   const [ring0SessionId, setRing0SessionId] = useState<string | null>(null);
   useEffect(() => {
@@ -167,6 +177,13 @@ export default function App() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [sidebarOpen, taskPanelOpen, ring0SessionId]);
 
+  // Auto-disable split view when desktop stream stops (but not while connecting)
+  useEffect(() => {
+    if (!desktopStreamActive && splitViewActive && desktopStatus !== "connecting" && desktopStatus !== "reconnecting") {
+      useStore.getState().setSplitViewActive(false);
+    }
+  }, [desktopStreamActive, splitViewActive, desktopStatus]);
+
   const sessionsLoaded = useStore((s) => s.sessionsLoaded);
 
   // Second screen bypasses auth — it uses pairing codes instead
@@ -218,8 +235,38 @@ export default function App() {
             </div>
           ))}
 
-          {/* Non-terminal content */}
-          {!isTerminalSession && activeView !== "desktop" && (
+          {/* Split view: desktop on top, chat on bottom */}
+          {!isTerminalSession && splitViewActive && (desktopStreamActive || desktopStatus === "connecting" || desktopStatus === "reconnecting") && activeView === "session" && (
+            <div className="absolute inset-0">
+              <PanelGroup orientation="vertical">
+                <Panel defaultSize={50} minSize={20} id="desktop-panel">
+                  <div className="h-full focus-within:ring-1 focus-within:ring-cc-primary/30 ring-inset rounded-sm">
+                    <DesktopView sessionId={currentSessionId || ""} embedded />
+                  </div>
+                </Panel>
+                <PanelResizeHandle className="h-1.5 bg-cc-border hover:bg-cc-primary transition-colors cursor-row-resize flex items-center justify-center group">
+                  <div className="w-8 h-0.5 rounded-full bg-cc-muted group-hover:bg-cc-primary-hover transition-colors" />
+                </PanelResizeHandle>
+                <Panel defaultSize={50} minSize={20} id="chat-panel">
+                  <div className="h-full flex flex-col focus-within:ring-1 focus-within:ring-cc-primary/30 ring-inset rounded-sm">
+                    {isComputerUseSession && currentSessionId && (
+                      <AgentControls sessionId={currentSessionId} />
+                    )}
+                    <div className="flex-1 min-h-0">
+                      {currentSessionId ? (
+                        <ChatView sessionId={currentSessionId} />
+                      ) : (
+                        <HomePage key={homeResetKey} />
+                      )}
+                    </div>
+                  </div>
+                </Panel>
+              </PanelGroup>
+            </div>
+          )}
+
+          {/* Non-terminal content (normal, non-split) */}
+          {!isTerminalSession && activeView !== "desktop" && !(splitViewActive && (desktopStreamActive || desktopStatus === "connecting" || desktopStatus === "reconnecting")) && (
             <>
               {/* Chat tab — visible when activeTab is "chat" or no session */}
               <div className={`absolute inset-0 ${activeTab === "chat" || !currentSessionId ? "" : "hidden"}`}>
@@ -239,7 +286,7 @@ export default function App() {
             </>
           )}
 
-          {/* Desktop view (node-level, not session-specific — renders over any session) */}
+          {/* Desktop view — full screen (node-level, not session-specific) */}
           {activeView === "desktop" && (
             <div className="absolute inset-0">
               <DesktopView sessionId={currentSessionId || ""} />

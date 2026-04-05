@@ -19,6 +19,7 @@ dependencies = [
     "httpx>=0.27",
     "json5>=0.9",
     "mss>=10.1.0",
+    "pillow>=12.2.0",
 ]
 
 [project.optional-dependencies]

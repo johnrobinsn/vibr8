@@ -160,12 +160,16 @@ export type ContentBlock =
 
 /** Messages the browser sends to the bridge */
 export type BrowserOutgoingMessage =
-  | { type: "user_message"; content: string; session_id?: string; images?: { media_type: string; data: string }[] }
+  | { type: "user_message"; content: string; session_id?: string; images?: { media_type: string; data: string }[]; executionMode?: string }
   | { type: "permission_response"; request_id: string; behavior: "allow" | "deny"; updated_input?: Record<string, unknown>; updated_permissions?: PermissionUpdate[]; message?: string }
   | { type: "interrupt" }
   | { type: "set_model"; model: string }
   | { type: "set_permission_mode"; mode: string }
-  | { type: "rpc_response"; id: string; result?: unknown; error?: string };
+  | { type: "rpc_response"; id: string; result?: unknown; error?: string }
+  | { type: "approve" }
+  | { type: "reject" }
+  | { type: "watch_start"; prompt?: string; interval?: number }
+  | { type: "watch_stop" };
 
 /** Messages the bridge sends to the browser */
 export type BrowserIncomingMessage =
@@ -178,7 +182,7 @@ export type BrowserIncomingMessage =
   | { type: "permission_cancelled"; request_id: string }
   | { type: "tool_progress"; tool_use_id: string; tool_name: string; elapsed_time_seconds: number }
   | { type: "tool_use_summary"; summary: string; tool_use_ids: string[] }
-  | { type: "status_change"; status: "compacting" | "idle" | "running" | null }
+  | { type: "status_change"; status: "compacting" | "idle" | "running" | "watching" | "confirming" | null }
   | { type: "auth_status"; isAuthenticating: boolean; output: string[]; error?: string }
   | { type: "error"; message: string }
   | { type: "cli_disconnected" }
@@ -192,11 +196,13 @@ export type BrowserIncomingMessage =
   | { type: "voice_mode"; mode: string | null }
   | { type: "ring0_switch_ui"; sessionId: string }
   | { type: "node_switch"; nodeId: string; nodeName?: string }
-  | { type: "rpc_request"; id: string; method: string; params?: Record<string, unknown> };
+  | { type: "rpc_request"; id: string; method: string; params?: Record<string, unknown> }
+  | { type: "observation"; text: string; timestamp: number }
+  | { type: "confirm"; step: number; action_type: string; action_summary: string; thought?: string };
 
 // ─── Session State ────────────────────────────────────────────────────────────
 
-export type BackendType = "claude" | "codex" | "terminal";
+export type BackendType = "claude" | "codex" | "terminal" | "computer-use";
 
 export interface SessionState {
   session_id: string;

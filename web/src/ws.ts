@@ -317,6 +317,32 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
       } else {
         store.setSessionStatus(sessionId, data.status);
       }
+      // Clear pending confirmation when agent moves to running/idle/watching
+      if (data.status !== "confirming") {
+        store.setPendingConfirmation(null);
+      }
+      break;
+    }
+
+    case "observation": {
+      // Watch mode: agent describes what it sees
+      store.appendMessage(sessionId, {
+        id: nextId(),
+        role: "assistant",
+        content: `👁 ${data.text}`,
+        timestamp: data.timestamp ?? Date.now(),
+      });
+      break;
+    }
+
+    case "confirm": {
+      // Act mode (confirm/gated): agent asks before executing
+      store.setPendingConfirmation({
+        step: data.step,
+        actionType: data.action_type,
+        actionSummary: data.action_summary,
+        thought: data.thought ?? "",
+      });
       break;
     }
 

@@ -408,6 +408,55 @@ def create_app() -> web.Application:
 
     launcher.on_codex_adapter_created(on_codex_adapter)
 
+    # When a computer-use session is created, spin up the agent and register it
+    from server.ui_tars_agent import UITarsAgent
+    from server.desktop_target import DesktopTarget
+
+    def on_computer_use_created(session_id: str, info: object) -> None:
+        node_id = getattr(info, "nodeId", None) or ""
+        agent_client_id = f"agent-{session_id[:8]}"
+        ice_servers = webrtc_manager.get_client_ice_servers() if webrtc_manager else []
+
+        # Build signaling function — same path as browser WebRTC offers
+        if node_id and node_id != "local" and node_registry:
+            node = node_registry.get_node(node_id)
+            if not node or not node.tunnel or not node.tunnel.connected:
+                logger.error("[server] Cannot create computer-use agent: node %s not connected", node_id)
+                return
+            tunnel = node.tunnel
+
+            async def signaling_fn(sdp: str, sdp_type: str) -> dict:
+                # Same tunnel path as routes.py:1169 — browser desktop offers
+                return await tunnel.send_command({
+                    "type": "webrtc_offer",
+                    "clientId": agent_client_id,
+                    "sdp": sdp,
+                    "sdpType": sdp_type,
+                    "desktopRole": "controller",
+                    "iceServers": ice_servers,
+                }, timeout=15.0)
+        else:
+            async def signaling_fn(sdp: str, sdp_type: str) -> dict:
+                # Same local path as routes.py:1193 — WebRTCManager.handle_offer
+                return await webrtc_manager.handle_offer(
+                    agent_client_id, sdp, sdp_type,
+                    desktop=True, desktop_role="controller",
+                )
+
+        target = DesktopTarget(signaling_fn=signaling_fn, ice_servers=ice_servers)
+        agent = UITarsAgent(session_id=session_id, desktop_target=target)
+
+        async def _init_agent() -> None:
+            try:
+                await agent.start()
+                ws_bridge.register_computer_use_agent(session_id, agent)
+            except Exception:
+                logger.exception("[server] Failed to start computer-use agent for %s", session_id)
+
+        spawn(_init_agent())
+
+    launcher.on_computer_use_created(on_computer_use_created)
+
     # Auto-relaunch CLI when a browser connects to a session with no CLI
     relaunching: set[str] = set()
 

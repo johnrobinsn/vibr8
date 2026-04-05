@@ -347,8 +347,10 @@ def create_routes(
             body = {}
 
         # Remote node — forward create request via tunnel
+        # (computer-use sessions always run on the hub, targeting a remote display)
         target_node = body.get("nodeId", "")
-        if target_node and node_registry:
+        backend = body.get("backend", "claude")
+        if target_node and node_registry and backend != "computer-use":
             node = node_registry.get_node(target_node)
             if node and node.tunnel and node.tunnel.connected:
                 result = await node.tunnel.send_command({
@@ -365,8 +367,7 @@ def create_routes(
                 return web.json_response(result)
 
         try:
-            backend = body.get("backend", "claude")
-            if backend not in ("claude", "codex", "terminal"):
+            if backend not in ("claude", "codex", "terminal", "computer-use"):
                 return web.json_response({"error": f"Invalid backend: {backend}"}, status=400)
 
             if backend == "terminal":
@@ -386,6 +387,22 @@ def create_routes(
                     "createdAt": time.time() * 1000,
                     "name": name,
                 })
+
+            if backend == "computer-use":
+                # Computer-use is launched via CliLauncher (no subprocess, callback creates agent)
+                # nodeId tells the agent which node's desktop to target
+                opts = LaunchOptions(
+                    model=body.get("model"),
+                    cwd=body.get("cwd") or os.getcwd(),
+                    backendType="computer-use",
+                    nodeId=target_node or None,
+                )
+                session = launcher.launch(opts)
+                name = body.get("name") or session_names.generate_random_name()
+                session_names.set_name(session.sessionId, name)
+                result = session.to_dict()
+                result["name"] = name
+                return web.json_response(result)
 
             # Resolve environment variables
             env_vars: dict[str, str] | None = body.get("env")
@@ -660,6 +677,7 @@ def create_routes(
         backends = []
         backends.append({"id": "claude", "name": "Claude Code", "available": shutil.which("claude") is not None})
         backends.append({"id": "codex", "name": "Codex", "available": shutil.which("codex") is not None})
+        backends.append({"id": "computer-use", "name": "Computer Use", "available": True})
         backends.append({"id": "terminal", "name": "Terminal", "available": True})
         return web.json_response(backends)
 
@@ -1438,10 +1456,10 @@ def create_routes(
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
         backend = body.get("backend", "claude")
-        if backend not in ("claude", "codex"):
+        if backend not in ("claude", "codex", "computer-use"):
             return web.json_response({"error": f"Invalid backend: {backend}"}, status=400)
         cwd = body.get("cwd")
-        if not cwd:
+        if not cwd and backend != "computer-use":
             return web.json_response({"error": "cwd is required"}, status=400)
         name = body.get("name", "").strip()
         opts = LaunchOptions(
@@ -1449,6 +1467,7 @@ def create_routes(
             permissionMode=body.get("permissionMode"),
             cwd=cwd,
             backendType=backend,
+            nodeId=body.get("nodeId") or None,
         )
         try:
             session = launcher.launch(opts)
@@ -1461,6 +1480,24 @@ def create_routes(
         except Exception as e:
             logger.exception(f"[routes] Ring0 create session failed: {e}")
             return web.json_response({"error": str(e)}, status=500)
+
+    @routes.post("/api/ring0/rename-session")
+    async def ring0_rename_session(request: web.Request) -> web.Response:
+        """Rename a session (used by Ring0 MCP, auth-exempt)."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        sid = body.get("sessionId", "").strip()
+        name = body.get("name", "").strip()
+        if not sid or not name:
+            return web.json_response({"error": "sessionId and name are required"}, status=400)
+        resolved = _resolve_session_id(sid, launcher)
+        if not resolved:
+            return web.json_response({"error": f"Session {sid} not found"}, status=404)
+        session_names.set_name(resolved, name, unique=False)
+        await ws_bridge.broadcast_name_update(resolved, name, user_renamed=True)
+        return web.json_response({"ok": True, "sessionId": resolved, "name": name})
 
     _ALLOWED_SESSION_MODES = {"plan", "acceptEdits"}
 

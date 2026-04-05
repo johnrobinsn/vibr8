@@ -35,6 +35,7 @@ export function Sidebar() {
   const activeNodeId = useStore((s) => s.activeNodeId);
   const desktopStreamActive = useStore((s) => s.desktopStreamActive);
   const activeView = useStore((s) => s.activeView);
+  const splitViewActive = useStore((s) => s.splitViewActive);
   const sidebarListRef = useRef<HTMLDivElement>(null);
   const newSessionRef = useRef<HTMLButtonElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -530,6 +531,9 @@ export function Sidebar() {
                 {s.backendType === "codex" && (
                   <span className="text-[9px] px-1 py-0.5 rounded bg-purple-500/15 text-purple-600 dark:text-purple-400 shrink-0">codex</span>
                 )}
+                {s.backendType === "computer-use" && (
+                  <span className="text-[9px] px-1 py-0.5 rounded bg-orange-500/15 text-orange-600 dark:text-orange-400 shrink-0">desktop</span>
+                )}
                 {s.backendType === "terminal" && (
                   <span className="text-[9px] px-1 py-0.5 rounded bg-green-500/15 text-green-600 dark:text-green-400 shrink-0">term</span>
                 )}
@@ -718,6 +722,7 @@ export function Sidebar() {
                     {s.isRing0 && <DesktopEntry
                       active={activeView === "desktop"}
                       streamActive={desktopStreamActive}
+                      splitActive={splitViewActive}
                       onNavigate={() => {
                         useStore.getState().setActiveView("desktop");
                         if (window.innerWidth < 768) useStore.getState().setSidebarOpen(false);
@@ -732,6 +737,17 @@ export function Sidebar() {
                         }
                       }}
                       onStop={() => stopDesktopStream()}
+                      onToggleSplit={async () => {
+                        const st = useStore.getState();
+                        const willEnable = !st.splitViewActive;
+                        st.toggleSplitView();
+                        if (willEnable) {
+                          st.setActiveView("session");
+                          if (!st.desktopStreamActive) {
+                            try { await startWebRTC({ desktop: true }); } catch (err) { console.error("[desktop] Failed to start:", err); }
+                          }
+                        }
+                      }}
                     />}
                   </Fragment>
                 ))}
@@ -740,6 +756,7 @@ export function Sidebar() {
                   <DesktopEntry
                     active={activeView === "desktop"}
                     streamActive={desktopStreamActive}
+                    splitActive={splitViewActive}
                     onNavigate={() => {
                       useStore.getState().setActiveView("desktop");
                       if (window.innerWidth < 768) useStore.getState().setSidebarOpen(false);
@@ -754,6 +771,17 @@ export function Sidebar() {
                       }
                     }}
                     onStop={() => stopDesktopStream()}
+                    onToggleSplit={async () => {
+                      const st = useStore.getState();
+                      const willEnable = !st.splitViewActive;
+                      st.toggleSplitView();
+                      if (willEnable) {
+                        st.setActiveView("session");
+                        if (!st.desktopStreamActive) {
+                          try { await startWebRTC({ desktop: true }); } catch (err) { console.error("[desktop] Failed to start:", err); }
+                        }
+                      }
+                    }}
                   />
                 )}
               </div>
@@ -911,15 +939,19 @@ export function Sidebar() {
 function DesktopEntry({
   active,
   streamActive,
+  splitActive,
   onNavigate,
   onStart,
   onStop,
+  onToggleSplit,
 }: {
   active: boolean;
   streamActive: boolean;
+  splitActive: boolean;
   onNavigate: () => void;
   onStart: () => void;
   onStop: () => void;
+  onToggleSplit: () => void;
 }) {
   return (
     <div className="relative group">
@@ -932,7 +964,7 @@ function DesktopEntry({
           }
         }}
         className={`w-full px-3 py-2.5 pr-8 text-left rounded-[10px] transition-all duration-100 cursor-pointer ${
-          active
+          active || splitActive
             ? "bg-cc-active"
             : "hover:bg-cc-hover"
         }`}
@@ -955,21 +987,43 @@ function DesktopEntry({
           </span>
         </div>
       </button>
-      {/* Stop button — visible on hover or when active */}
-      {streamActive && (
+      {/* Action buttons */}
+      <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
+        {/* Split view toggle (hidden on mobile) — always visible */}
         <button
           onClick={(e) => {
             e.stopPropagation();
-            onStop();
+            onToggleSplit();
           }}
-          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md hover:bg-cc-border text-cc-muted hover:text-red-400 transition-all cursor-pointer"
-          title="Stop desktop stream"
+          className={`flex p-1 rounded-md transition-all cursor-pointer ${
+            splitActive
+              ? "bg-cc-primary/20 text-cc-primary"
+              : "hover:bg-cc-border text-cc-muted hover:text-cc-fg"
+          }`}
+          title={splitActive ? "Close split view" : "Split view"}
         >
+          {/* Horizontal split icon — two stacked rectangles */}
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
-            <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
+            <rect x="2" y="2" width="12" height="5" rx="1" />
+            <rect x="2" y="9" width="12" height="5" rx="1" />
           </svg>
         </button>
-      )}
+        {/* Stop button — only when stream is active */}
+        {streamActive && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onStop();
+            }}
+            className="p-1 rounded-md hover:bg-cc-border text-cc-muted hover:text-red-400 transition-all cursor-pointer"
+            title="Stop desktop stream"
+          >
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3.5 h-3.5">
+              <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
+            </svg>
+          </button>
+        )}
+      </div>
     </div>
   );
 }

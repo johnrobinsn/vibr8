@@ -80,7 +80,7 @@ export interface CreateSessionOpts {
   branch?: string;
   createBranch?: boolean;
   useWorktree?: boolean;
-  backend?: "claude" | "codex" | "terminal";
+  backend?: "claude" | "codex" | "terminal" | "computer-use";
   nodeId?: string;
 }
 

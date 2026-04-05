@@ -34,7 +34,7 @@ You receive voice transcripts from the user and decide how to route them.
 
 ## Your MCP Tools
 
-- **create_session** — Create a new coding session with its own working directory
+- **create_session** — Create a new session (claude, codex, or computer-use backend)
 - **list_sessions** — See all active sessions and their status
 - **send_message** — Send a message to a specific session
 - **interrupt_session** — Stop/cancel a running session (Ctrl+C equivalent)
@@ -132,6 +132,29 @@ When mirroring, the second screen shows that session's full chat with live strea
 - By default, second screens show Ring0 chat history — only push specific content when
   it adds value
 - Use session mirroring when the user wants to monitor another agent's work on a display
+
+## Desktop Agent (Computer Use)
+
+The `computer-use` backend creates sessions with a vision-language model that controls
+desktop GUIs autonomously — it sees the screen and executes mouse/keyboard actions.
+
+### When to Use
+- "Open Chrome", "Launch the terminal", "Click on X" — any GUI interaction
+- Tasks that require seeing and interacting with desktop applications
+- The user says "do this on the desktop" or "use the desktop"
+
+### How to Use
+Create a session with `backend="computer-use"` and pass the task as `initial_message`:
+```
+create_session(name="Desktop: open Chrome", backend="computer-use",
+               initial_message="open Chrome and navigate to google.com")
+```
+To send follow-up tasks to the same session, use **send_message** with its session ID.
+
+### Tips
+- Keep tasks specific: "open Chrome and navigate to google.com" > "use Chrome"
+- The agent can see the entire desktop, not just one window
+- If the agent gets stuck, interrupt it and give a more specific instruction
 """
 
 

@@ -92,6 +92,7 @@ class WsBridge:
         # Format: "{node_id}:{raw_session_id}" for remote, raw id for local
         # Hook for vibr8-node: intercepts _broadcast_to_browsers for remote forwarding
         self._broadcast_hook: Callable[..., Awaitable[None]] | None = None
+        self._computer_use_agents: dict[str, Any] = {}  # session_id → ComputerUseAgent
         self._active_tts: dict[str, Any] = {}  # session_id → TTS_OpenAI instance
         self._thinking_timers: dict[str, asyncio.TimerHandle] = {}
         self._on_cli_session_id: Callable[[str, str], None] | None = None
@@ -665,6 +666,8 @@ class WsBridge:
             return False
         if session.backend_type == "codex":
             return session.codex_adapter is not None and session.codex_adapter.is_connected()
+        if session.backend_type == "computer-use":
+            return session_id in self._computer_use_agents
         return session.cli_socket is not None
 
     def remove_session(self, session_id: str) -> None:
@@ -683,6 +686,9 @@ class WsBridge:
         if session.codex_adapter:
             await session.codex_adapter.disconnect()
             session.codex_adapter = None
+        agent = self._computer_use_agents.pop(session_id, None)
+        if agent:
+            await agent.stop()
         for ws, client_id in list(session.browser_sockets.items()):
             await ws.close()
             if client_id:
@@ -796,6 +802,55 @@ class WsBridge:
         asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
         asyncio.ensure_future(self._push_to_native_clients(session.id, "cli_connected"))
         logger.info(f"[ws-bridge] Codex adapter attached for session {session_id}")
+
+    # ── Computer-use agent attachment ──────────────────────────────────────────
+
+    def register_computer_use_agent(self, session_id: str, agent: Any) -> None:
+        """Register a ComputerUseAgent for a session."""
+        from server.ui_tars_agent import UITarsAgent
+        assert isinstance(agent, UITarsAgent)
+
+        session = self.get_or_create_session(session_id, "computer-use")
+        session.backend_type = "computer-use"
+        session.state["backend_type"] = "computer-use"
+        self._computer_use_agents[session_id] = agent
+
+        async def on_agent_message(msg: dict[str, Any]) -> None:
+            msg_type = msg.get("type")
+            if msg_type in ("assistant", "result", "observation"):
+                session.message_history.append(msg)
+                self._persist_session(session)
+            elif msg_type == "status_change":
+                status = msg.get("status", "idle")
+                session.state["is_running"] = status in ("running", "watching", "confirming")
+                self._persist_session(session)
+            # confirm, observation, etc. — all broadcast to browsers
+            await self._broadcast_to_browsers(session, msg)
+
+        agent.on_message(on_agent_message)
+
+        # Emit session_init so browsers get the right backend type
+        init_msg: dict[str, Any] = {
+            "type": "session_init",
+            "session": {
+                "session_id": session_id,
+                "backend_type": "computer-use",
+                "model": agent._model,
+                "cwd": "",
+                "tools": [],
+                "permissionMode": "bypassPermissions",
+            },
+        }
+        session.state.update(init_msg["session"])
+        self._persist_session(session)
+        asyncio.ensure_future(self._broadcast_to_browsers(session, init_msg))
+        asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
+        asyncio.ensure_future(self._push_to_native_clients(session.id, "cli_connected"))
+        logger.info("[ws-bridge] Computer-use agent registered for session %s", session_id)
+
+    def unregister_computer_use_agent(self, session_id: str) -> None:
+        """Remove a ComputerUseAgent."""
+        self._computer_use_agents.pop(session_id, None)
 
     # ── CLI WebSocket handlers ───────────────────────────────────────────
 
@@ -949,13 +1004,14 @@ class WsBridge:
                         f"node_found={node is not None} tunnel={node.tunnel is not None if node else False} "
                         f"tunnel_connected={node.tunnel.connected if node and node.tunnel else False} → {backend_connected}")
         else:
-            backend_connected = (
-                (session.codex_adapter and session.codex_adapter.is_connected())
-                if session.backend_type == "codex"
-                else session.cli_socket is not None
-            )
+            if session.backend_type == "codex":
+                backend_connected = session.codex_adapter is not None and session.codex_adapter.is_connected()
+            elif session.backend_type == "computer-use":
+                backend_connected = session_id in self._computer_use_agents
+            else:
+                backend_connected = session.cli_socket is not None
             logger.info(f"[ws-bridge] Backend check for local session {session_id[:8]}: "
-                        f"cli_socket={'yes' if session.cli_socket else 'no'} → {backend_connected}")
+                        f"backend_type={session.backend_type} → {backend_connected}")
         if not backend_connected:
             logger.warning(f"[ws-bridge] Sending cli_disconnected to browser for session {session_id[:8]} (backend not connected)")
             await self._send_to_browser(ws, {"type": "cli_disconnected"})
@@ -1476,6 +1532,54 @@ class WsBridge:
                     })
                     return
             logger.warning("[ws-bridge] Cannot route to remote node %s", node_id[:8])
+            return
+
+        # For computer-use sessions, delegate to the agent
+        if session.backend_type == "computer-use":
+            agent = self._computer_use_agents.get(session.id)
+            if not agent:
+                logger.warning("[ws-bridge] No computer-use agent for session %s", session.id)
+                return
+            msg_type = msg.get("type")
+            if msg_type == "user_message":
+                content = msg.get("content", "")
+                import time
+                source_client_id = session.browser_sockets.get(ws, "") if ws else ""
+                history_entry: dict[str, Any] = {
+                    "type": "user_message",
+                    "content": content,
+                    "timestamp": int(time.time() * 1000),
+                }
+                if source_client_id:
+                    history_entry["sourceClientId"] = source_client_id
+                session.message_history.append(history_entry)
+                self._persist_session(session)
+                # Broadcast user message to other browsers
+                await self._broadcast_to_browsers(session, {
+                    "type": "user_message",
+                    "content": content,
+                    "timestamp": history_entry["timestamp"],
+                })
+                from server.computer_use_agent import ExecutionMode
+                exec_mode_str = msg.get("executionMode", "auto")
+                try:
+                    exec_mode = ExecutionMode(exec_mode_str)
+                except ValueError:
+                    exec_mode = ExecutionMode.AUTO
+                agent.submit_task(content, mode=exec_mode)
+            elif msg_type == "interrupt":
+                agent.interrupt()
+            elif msg_type == "approve":
+                agent.approve()
+            elif msg_type == "reject":
+                agent.reject()
+            elif msg_type == "watch_start":
+                agent.watch_start(
+                    prompt=msg.get("prompt"),
+                    interval=msg.get("interval", 5.0),
+                )
+            elif msg_type == "watch_stop":
+                agent.watch_stop()
             return
 
         # For Codex sessions, delegate to the adapter
