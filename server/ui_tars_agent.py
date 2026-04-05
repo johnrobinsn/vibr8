@@ -88,7 +88,7 @@ class UITarsAgent:
 
         # Pause gate — cleared = paused, set = running
         self._pause_gate = asyncio.Event()
-        self._pause_gate.set()  # starts unpaused
+        # Starts paused — user must hit Resume to begin
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -126,6 +126,7 @@ class UITarsAgent:
             ))
             return
         self._cancel_loop()
+        self._pause_gate.set()  # auto-resume when submitting a task
         self._loop_task = asyncio.create_task(self._run_loop(task, mode))
 
     def interrupt(self) -> None:
@@ -175,6 +176,7 @@ class UITarsAgent:
         self._cancel_loop()
         self._cancel_watch()
         self._watching = True
+        self._pause_gate.set()  # auto-resume when switching to watch
         self._watch_task = asyncio.create_task(
             self._watch_loop(prompt or OBSERVE_PROMPT, interval)
         )
