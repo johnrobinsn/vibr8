@@ -42,7 +42,7 @@ interface AppState {
   cliConnected: Map<string, boolean>;
 
   // Session status
-  sessionStatus: Map<string, "idle" | "running" | "compacting" | "waiting_for_permission" | "watching" | "confirming" | null>;
+  sessionStatus: Map<string, "idle" | "running" | "compacting" | "waiting_for_permission" | "watching" | "confirming" | "paused" | null>;
 
   // Plan mode: stores previous permission mode per session so we can restore it
   previousPermissionMode: Map<string, string>;
@@ -175,7 +175,7 @@ interface AppState {
   // Connection actions
   setConnectionStatus: (sessionId: string, status: "connecting" | "connected" | "disconnected") => void;
   setCliConnected: (sessionId: string, connected: boolean) => void;
-  setSessionStatus: (sessionId: string, status: "idle" | "running" | "compacting" | "waiting_for_permission" | "watching" | "confirming" | null) => void;
+  setSessionStatus: (sessionId: string, status: "idle" | "running" | "compacting" | "waiting_for_permission" | "watching" | "confirming" | "paused" | null) => void;
   setReconnecting: (sessionId: string, value: boolean) => void;
   setReconnectGaveUp: (sessionId: string, value: boolean) => void;
 

@@ -169,7 +169,9 @@ export type BrowserOutgoingMessage =
   | { type: "approve" }
   | { type: "reject" }
   | { type: "watch_start"; prompt?: string; interval?: number }
-  | { type: "watch_stop" };
+  | { type: "watch_stop" }
+  | { type: "pause" }
+  | { type: "resume" };
 
 /** Messages the bridge sends to the browser */
 export type BrowserIncomingMessage =
@@ -182,7 +184,7 @@ export type BrowserIncomingMessage =
   | { type: "permission_cancelled"; request_id: string }
   | { type: "tool_progress"; tool_use_id: string; tool_name: string; elapsed_time_seconds: number }
   | { type: "tool_use_summary"; summary: string; tool_use_ids: string[] }
-  | { type: "status_change"; status: "compacting" | "idle" | "running" | "watching" | "confirming" | null }
+  | { type: "status_change"; status: "compacting" | "idle" | "running" | "watching" | "confirming" | "paused" | null }
   | { type: "auth_status"; isAuthenticating: boolean; output: string[]; error?: string }
   | { type: "error"; message: string }
   | { type: "cli_disconnected" }

@@ -310,7 +310,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
     case "status_change": {
       if (data.status === "compacting") {
         store.setSessionStatus(sessionId, "compacting");
-      } else if (data.status === "idle" && store.sessionStatus.get(sessionId) === "running") {
+      } else if (data.status === "idle" && (store.sessionStatus.get(sessionId) === "running" || store.sessionStatus.get(sessionId) === "paused")) {
         // Don't downgrade from running to idle via status_change —
         // only the "result" message should clear "running" status.
         // This prevents flickering when the backend sends intermediate idle states.

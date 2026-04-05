@@ -1,6 +1,6 @@
 /**
  * Agent-specific controls for computer-use sessions.
- * Shows Watch/Act mode toggle, execution mode selector, and confirm dialog.
+ * Shows Watch/Act mode toggle, pause button, execution mode selector, and confirm dialog.
  * Only rendered when the current session is a computer-use session.
  */
 import { useStore } from "../store.js";
@@ -12,6 +12,10 @@ export function AgentControls({ sessionId }: { sessionId: string }) {
   const pendingConfirmation = useStore((s) => s.pendingConfirmation);
   const setAgentMode = useStore((s) => s.setAgentMode);
   const setExecutionMode = useStore((s) => s.setExecutionMode);
+  const sessionStatus = useStore((s) => s.sessionStatus.get(sessionId));
+
+  const isPaused = sessionStatus === "paused";
+  const isRunning = sessionStatus === "running";
 
   const switchToWatch = () => {
     setAgentMode("watch");
@@ -21,6 +25,14 @@ export function AgentControls({ sessionId }: { sessionId: string }) {
   const switchToAct = () => {
     setAgentMode("act");
     sendToSession(sessionId, { type: "watch_stop" });
+  };
+
+  const togglePause = () => {
+    if (isPaused) {
+      sendToSession(sessionId, { type: "resume" });
+    } else {
+      sendToSession(sessionId, { type: "pause" });
+    }
   };
 
   const handleApprove = () => {
@@ -33,7 +45,7 @@ export function AgentControls({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="flex flex-col gap-2">
-      {/* Mode toggle + execution mode */}
+      {/* Mode toggle + pause + execution mode */}
       <div className="flex items-center gap-2 px-3 py-1.5 text-xs">
         {/* Watch / Act toggle */}
         <div className="flex rounded-md border border-cc-border overflow-hidden">
@@ -58,6 +70,20 @@ export function AgentControls({ sessionId }: { sessionId: string }) {
             Act
           </button>
         </div>
+
+        {/* Pause/Resume (visible when act loop is running or paused) */}
+        {agentMode === "act" && (isRunning || isPaused) && (
+          <button
+            onClick={togglePause}
+            className={`px-2.5 py-1 rounded-md border transition-colors ${
+              isPaused
+                ? "border-yellow-500/50 bg-yellow-500/20 text-yellow-600 dark:text-yellow-400"
+                : "border-cc-border text-cc-text-secondary hover:bg-cc-hover"
+            }`}
+          >
+            {isPaused ? "Resume" : "Pause"}
+          </button>
+        )}
 
         {/* Execution mode (only in Act mode) */}
         {agentMode === "act" && (

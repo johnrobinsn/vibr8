@@ -1573,6 +1573,10 @@ class WsBridge:
                 agent.approve()
             elif msg_type == "reject":
                 agent.reject()
+            elif msg_type == "pause":
+                agent.pause()
+            elif msg_type == "resume":
+                agent.resume()
             elif msg_type == "watch_start":
                 agent.watch_start(
                     prompt=msg.get("prompt"),

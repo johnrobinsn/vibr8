@@ -86,6 +86,10 @@ class UITarsAgent:
         self._watch_task: asyncio.Task[None] | None = None
         self._watching = False  # True when in watch mode — blocks act submissions
 
+        # Pause gate — cleared = paused, set = running
+        self._pause_gate = asyncio.Event()
+        self._pause_gate.set()  # starts unpaused
+
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -141,6 +145,28 @@ class UITarsAgent:
         if self._confirm_event:
             self._confirm_event.set()
 
+    # ── Pause / Resume ─────────────────────────────────────────────────────
+
+    def pause(self) -> None:
+        """Pause the act loop between iterations."""
+        if not self._pause_gate.is_set():
+            return  # already paused
+        self._pause_gate.clear()
+        logger.info("[ui-tars] Paused session %s", self.session_id)
+        asyncio.create_task(self._emit_status("paused"))
+
+    def resume(self) -> None:
+        """Resume a paused act loop."""
+        if self._pause_gate.is_set():
+            return  # not paused
+        self._pause_gate.set()
+        logger.info("[ui-tars] Resumed session %s", self.session_id)
+        asyncio.create_task(self._emit_status("running"))
+
+    @property
+    def paused(self) -> bool:
+        return not self._pause_gate.is_set()
+
     # ── Watch mode ────────────────────────────────────────────────────────
 
     def watch_start(self, prompt: str | None = None, interval: float = 5.0) -> None:
@@ -181,6 +207,9 @@ class UITarsAgent:
             for iteration in range(1, self._max_iterations + 1):
                 if not self._running:
                     break
+
+                # 0. Wait if paused
+                await self._pause_gate.wait()
 
                 # 1. Capture screenshot
                 frame = await self._target.get_frame()
