@@ -2260,6 +2260,12 @@ class WsBridge:
         await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": request_id})
         return True
 
+    async def send_to_browsers(self, session_id: str, msg: dict[str, Any]) -> None:
+        """Public helper: send a message to all browsers for a session by ID."""
+        session = self._sessions.get(session_id)
+        if session:
+            await self._broadcast_to_browsers(session, msg)
+
     async def _broadcast_to_browsers(self, session: Session, msg: dict[str, Any]) -> None:
         # On vibr8-node: forward to hub tunnel instead of local browsers
         if self._broadcast_hook:

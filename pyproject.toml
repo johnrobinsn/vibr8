@@ -20,6 +20,8 @@ dependencies = [
     "json5>=0.9",
     "mss>=10.1.0",
     "pillow>=12.2.0",
+    "bitsandbytes>=0.43",
+    "accelerate>=0.30",
 ]
 
 [project.optional-dependencies]

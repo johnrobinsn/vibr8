@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 import aiohttp
@@ -412,6 +413,43 @@ def create_app() -> web.Application:
     from server.ui_tars_agent import UITarsAgent
     from server.desktop_target import DesktopTarget
 
+    # Lazy-load VLM on first computer-use session (avoids ~15s + 8GB VRAM on startup)
+    _vlm_model = None
+    _vlm_loading = False
+
+    async def _get_vlm(session_id: str):
+        """Load VLM on first use.  Sends status messages to the browser session."""
+        nonlocal _vlm_model, _vlm_loading
+        if _vlm_model is not None:
+            return _vlm_model
+        if _vlm_loading:
+            # Another session is already loading — wait for it
+            while _vlm_loading:
+                await asyncio.sleep(0.5)
+            return _vlm_model
+
+        _vlm_loading = True
+        await ws_bridge.send_to_browsers(session_id, {"type": "status_change", "status": "running"})
+        await ws_bridge.send_to_browsers(session_id, {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": "Loading vision model..."},
+            "parent_tool_use_id": None,
+            "timestamp": int(time.time() * 1000),
+        })
+        try:
+            from server.vlm import load_model
+            loop = asyncio.get_running_loop()
+            _vlm_model = await loop.run_in_executor(None, load_model)
+            await ws_bridge.send_to_browsers(session_id, {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": f"Vision model ready ({_vlm_model.load_time:.1f}s, {_vlm_model.vram_usage_mb() or 0:.0f} MB VRAM)"},
+                "parent_tool_use_id": None,
+                "timestamp": int(time.time() * 1000),
+            })
+        finally:
+            _vlm_loading = False
+        return _vlm_model
+
     def on_computer_use_created(session_id: str, info: object) -> None:
         node_id = getattr(info, "nodeId", None) or ""
         agent_client_id = f"agent-{session_id[:8]}"
@@ -444,10 +482,11 @@ def create_app() -> web.Application:
                 )
 
         target = DesktopTarget(signaling_fn=signaling_fn, ice_servers=ice_servers)
-        agent = UITarsAgent(session_id=session_id, desktop_target=target)
 
         async def _init_agent() -> None:
             try:
+                vlm = await _get_vlm(session_id)
+                agent = UITarsAgent(session_id=session_id, desktop_target=target, vlm=vlm)
                 await agent.start()
                 ws_bridge.register_computer_use_agent(session_id, agent)
             except Exception:
