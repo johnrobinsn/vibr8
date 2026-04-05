@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Awaitable
 
@@ -176,11 +177,12 @@ class UITarsAgent:
                 # 1. Capture screenshot
                 frame = await self._target.get_frame()
                 if frame is None:
-                    logger.warning("[ui-tars] No frame captured, retrying...")
+                    logger.warning("[ui-tars] No frame captured (iteration %d), retrying...", iteration)
                     await asyncio.sleep(1)
                     continue
 
                 # 2. Convert to PIL Image (1000×1000 for normalized coords)
+                logger.info("[ui-tars] Got frame %dx%d, iteration %d", frame.width, frame.height, iteration)
                 image = self._frame_to_image(frame)
 
                 # 3. Run inference (blocking → thread pool)
@@ -331,6 +333,7 @@ class UITarsAgent:
     async def _infer(self, image: Image.Image, prompt: str, max_new_tokens: int = 512) -> str:
         """Run VLM inference in a thread pool (blocking GPU work)."""
         loop = asyncio.get_running_loop()
+        logger.info("[ui-tars] Starting inference (%dx%d, %d max tokens)...", image.width, image.height, max_new_tokens)
         try:
             result = await loop.run_in_executor(
                 _inference_pool,
@@ -340,13 +343,14 @@ class UITarsAgent:
                 prompt,
                 max_new_tokens,
             )
-            logger.debug(
-                "[ui-tars] Inference: %d in → %d out, %.0fms",
+            logger.info(
+                "[ui-tars] Inference done: %d in → %d out, %.0fms, result=%s",
                 result.input_tokens, result.output_tokens, result.total_ms,
+                result.text[:100] if result.text else "(empty)",
             )
             return result.text
         except Exception as exc:
-            logger.error("[ui-tars] Inference failed: %s", exc)
+            logger.error("[ui-tars] Inference failed: %s", exc, exc_info=True)
             return ""
 
     # ── Screenshot conversion ─────────────────────────────────────────────
@@ -367,12 +371,19 @@ class UITarsAgent:
         await self._emit({"type": "status_change", "status": status})
 
     async def _emit_assistant(self, content: str, iteration: int = 0) -> None:
+        # Match CLI assistant message format so the frontend handler works:
+        # needs id, content as array of blocks, parent_tool_use_id
         msg: dict[str, Any] = {
             "type": "assistant",
             "message": {
+                "id": f"agent_{uuid.uuid4().hex[:12]}",
                 "role": "assistant",
-                "content": content,
+                "model": self._vlm.model_name,
+                "content": [{"type": "text", "text": content}],
+                "stop_reason": "end_turn",
+                "type": "message",
             },
+            "parent_tool_use_id": None,
             "timestamp": int(time.time() * 1000),
         }
         if iteration:
