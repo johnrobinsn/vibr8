@@ -156,12 +156,13 @@ class UITarsAgent:
         asyncio.create_task(self._emit_status("paused"))
 
     def resume(self) -> None:
-        """Resume a paused act loop."""
+        """Resume a paused loop (act or watch)."""
         if self._pause_gate.is_set():
             return  # not paused
         self._pause_gate.set()
         logger.info("[ui-tars] Resumed session %s", self.session_id)
-        asyncio.create_task(self._emit_status("running"))
+        status = "watching" if self._watching else "running"
+        asyncio.create_task(self._emit_status(status))
 
     @property
     def paused(self) -> bool:
@@ -346,6 +347,9 @@ class UITarsAgent:
 
         try:
             while self._running:
+                # Wait if paused
+                await self._pause_gate.wait()
+
                 frame = await self._target.get_frame()
                 if frame is None:
                     await asyncio.sleep(1)

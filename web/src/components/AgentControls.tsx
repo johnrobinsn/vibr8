@@ -71,8 +71,8 @@ export function AgentControls({ sessionId }: { sessionId: string }) {
           </button>
         </div>
 
-        {/* Pause/Resume (visible when act loop is running or paused) */}
-        {agentMode === "act" && (isRunning || isPaused) && (
+        {/* Pause/Resume (visible when agent is running, watching, or paused) */}
+        {(isRunning || isPaused || sessionStatus === "watching") && (
           <button
             onClick={togglePause}
             className={`px-2.5 py-1 rounded-md border transition-colors ${
