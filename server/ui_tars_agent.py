@@ -122,7 +122,7 @@ class UITarsAgent:
         if self._watching:
             logger.info("[ui-tars] Dropped task while watching: %s", task[:80])
             asyncio.create_task(self._emit_assistant(
-                f"*Action dropped — agent is in watch mode.* Switch to Act to run tasks."
+                f"*Action dropped (watch mode):* {task}"
             ))
             return
         self._cancel_loop()
