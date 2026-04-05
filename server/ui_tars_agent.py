@@ -120,10 +120,12 @@ class UITarsAgent:
     def submit_task(self, task: str, mode: ExecutionMode = ExecutionMode.AUTO) -> None:
         """Submit a new task. Dropped if agent is in watch mode."""
         if self._watching:
-            logger.info("[ui-tars] Dropped task while watching: %s", task[:80])
-            asyncio.create_task(self._emit_assistant(
-                f"*Action dropped (watch mode):* {task}"
-            ))
+            # In watch mode, treat user prompts as observation queries
+            logger.info("[ui-tars] Watch query: %s", task[:80])
+            self._cancel_watch()
+            self._watch_task = asyncio.create_task(
+                self._watch_loop(task, interval=5.0)
+            )
             return
         self._cancel_loop()
         self._pause_gate.set()  # auto-resume when submitting a task
