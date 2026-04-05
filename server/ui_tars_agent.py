@@ -84,7 +84,7 @@ class UITarsAgent:
 
         # Watch mode state
         self._watch_task: asyncio.Task[None] | None = None
-        self._watching = False  # True when in watch mode — blocks act submissions
+        self._watching = True  # Start in watch mode (matches frontend default)
 
         # Pause gate — cleared = paused, set = running
         self._pause_gate = asyncio.Event()
