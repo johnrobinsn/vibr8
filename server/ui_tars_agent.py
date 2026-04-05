@@ -84,6 +84,7 @@ class UITarsAgent:
 
         # Watch mode state
         self._watch_task: asyncio.Task[None] | None = None
+        self._watching = False  # True when in watch mode — blocks act submissions
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -113,9 +114,14 @@ class UITarsAgent:
     # ── Act mode: task submission ─────────────────────────────────────────
 
     def submit_task(self, task: str, mode: ExecutionMode = ExecutionMode.AUTO) -> None:
-        """Submit a new task. Interrupts any running task/watch first."""
+        """Submit a new task. Dropped if agent is in watch mode."""
+        if self._watching:
+            logger.info("[ui-tars] Dropped task while watching: %s", task[:80])
+            asyncio.create_task(self._emit_assistant(
+                f"*Action dropped — agent is in watch mode.* Switch to Act to run tasks."
+            ))
+            return
         self._cancel_loop()
-        self._cancel_watch()
         self._loop_task = asyncio.create_task(self._run_loop(task, mode))
 
     def interrupt(self) -> None:
@@ -141,12 +147,14 @@ class UITarsAgent:
         """Start watch mode — periodic observation with no actions."""
         self._cancel_loop()
         self._cancel_watch()
+        self._watching = True
         self._watch_task = asyncio.create_task(
             self._watch_loop(prompt or OBSERVE_PROMPT, interval)
         )
 
     def watch_stop(self) -> None:
         """Stop watch mode."""
+        self._watching = False
         self._cancel_watch()
         asyncio.create_task(self._emit_status("idle"))
 
