@@ -835,7 +835,7 @@ class WsBridge:
             "session": {
                 "session_id": session_id,
                 "backend_type": "computer-use",
-                "model": agent._model,
+                "model": agent._vlm.model_name if hasattr(agent, '_vlm') else "ui-tars",
                 "cwd": "",
                 "tools": [],
                 "permissionMode": "bypassPermissions",
