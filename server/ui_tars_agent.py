@@ -86,14 +86,20 @@ class UITarsAgent:
         self._watch_task: asyncio.Task[None] | None = None
         self._watching = True  # Start in watch mode (matches frontend default)
 
-        # Pause gate — cleared = paused, set = running
+        # Pause gate — cleared = paused, set = running (user-controlled)
         self._pause_gate = asyncio.Event()
         # Starts paused — user must hit Resume to begin
+
+        # Connection gate — cleared = connection down, set = connected (internal)
+        self._connection_gate = asyncio.Event()
+        self._connection_gate.set()  # assume connected until told otherwise
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
         """Initialize the desktop target (WebRTC peer connection)."""
+        self._target.on_disconnect = self._on_target_disconnect
+        self._target.on_reconnect = self._on_target_reconnect
         await self._target.start()
         self._running = True
         logger.info(
@@ -123,6 +129,7 @@ class UITarsAgent:
             # In watch mode, treat user prompts as observation queries
             logger.info("[ui-tars] Watch query: %s", task[:80])
             self._cancel_watch()
+            self._pause_gate.set()  # auto-resume for observation query
             self._watch_task = asyncio.create_task(
                 self._watch_loop(task, interval=5.0)
             )
@@ -171,6 +178,24 @@ class UITarsAgent:
     def paused(self) -> bool:
         return not self._pause_gate.is_set()
 
+    # ── Desktop connection loss/restore ──────────────────────────────────
+
+    async def _on_target_disconnect(self) -> None:
+        """Called by DesktopTarget when WebRTC connection drops.
+
+        Uses _connection_gate (internal), not _pause_gate (user-controlled).
+        Does not affect the UI pause/resume button state.
+        """
+        logger.warning("[ui-tars] Desktop connection lost for session %s", self.session_id)
+        self._connection_gate.clear()
+        await self._emit_assistant("*Connection to desktop lost — agent paused*")
+
+    async def _on_target_reconnect(self) -> None:
+        """Called by DesktopTarget when WebRTC connection is restored."""
+        logger.info("[ui-tars] Desktop connection restored for session %s", self.session_id)
+        self._connection_gate.set()
+        await self._emit_assistant("*Connection restored — agent resumed*")
+
     # ── Watch mode ────────────────────────────────────────────────────────
 
     def watch_start(self, prompt: str | None = None, interval: float = 5.0) -> None:
@@ -213,8 +238,9 @@ class UITarsAgent:
                 if not self._running:
                     break
 
-                # 0. Wait if paused
+                # 0. Wait if paused (user) or connection down (internal)
                 await self._pause_gate.wait()
+                await self._connection_gate.wait()
 
                 # 1. Capture screenshot
                 frame = await self._target.get_frame()
@@ -351,8 +377,9 @@ class UITarsAgent:
 
         try:
             while self._running:
-                # Wait if paused
+                # Wait if paused (user) or connection down (internal)
                 await self._pause_gate.wait()
+                await self._connection_gate.wait()
 
                 frame = await self._target.get_frame()
                 if frame is None:

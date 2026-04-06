@@ -593,8 +593,10 @@ class WsBridge:
                 state=_make_default_state(session_id, backend_type),
             )
             self._sessions[session_id] = session
-        session.backend_type = backend_type
-        session.state["backend_type"] = backend_type
+        elif backend_type != "claude":
+            # Only overwrite if caller explicitly provides a non-default type
+            session.backend_type = backend_type
+            session.state["backend_type"] = backend_type
         return session
 
     def get_session(self, session_id: str) -> Session | None:
@@ -846,6 +848,24 @@ class WsBridge:
         asyncio.ensure_future(self._broadcast_to_browsers(session, init_msg))
         asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
         asyncio.ensure_future(self._push_to_native_clients(session.id, "cli_connected"))
+
+        # Replay any messages queued while the agent was initializing
+        if session.pending_messages:
+            import json as _json
+            pending = session.pending_messages[:]
+            session.pending_messages.clear()
+            for raw in pending:
+                try:
+                    msg = _json.loads(raw) if isinstance(raw, str) else raw
+                    if msg.get("type") == "user_message":
+                        content = msg.get("content", "")
+                        if content:
+                            logger.info("[ws-bridge] Replaying queued message for CU session %s: %s", session_id[:8], content[:60])
+                            from server.computer_use_agent import ExecutionMode
+                            agent.submit_task(content, mode=ExecutionMode.AUTO)
+                except Exception:
+                    pass
+
         logger.info("[ws-bridge] Computer-use agent registered for session %s", session_id)
 
     def unregister_computer_use_agent(self, session_id: str) -> None:

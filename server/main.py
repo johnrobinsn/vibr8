@@ -276,6 +276,11 @@ async def handle_node_ws(request: web.Request) -> web.WebSocketResponse:
     node.tunnel = tunnel
     registry.set_online(node_id, ws)
 
+    # Fire reconnect signals for any CU agents targeting this node
+    reconnect_signals = request.app.get("node_reconnect_signals", {})
+    for evt in reconnect_signals.get(node_id, []):
+        evt.set()
+
     async def on_node_message(nid: str, msg: dict) -> None:
         """Handle node-initiated messages (heartbeat, session updates, etc.)."""
         msg_type = msg.get("type", "")
@@ -413,6 +418,11 @@ def create_app() -> web.Application:
     from server.ui_tars_agent import UITarsAgent
     from server.desktop_target import DesktopTarget
 
+    # Reconnect signals per node — set when a node tunnel reconnects.
+    # Stored on app so handle_node_ws can access it via request.app.
+    _node_reconnect_signals: dict[str, list[asyncio.Event]] = {}
+    app["node_reconnect_signals"] = _node_reconnect_signals
+
     # Lazy-load VLM on first computer-use session (avoids ~15s + 8GB VRAM on startup)
     _vlm_model = None
     _vlm_loading = False
@@ -454,6 +464,11 @@ def create_app() -> web.Application:
         node_id = getattr(info, "nodeId", None) or ""
         agent_client_id = f"agent-{session_id[:8]}"
         ice_servers = webrtc_manager.get_client_ice_servers() if webrtc_manager else []
+        reconnect_signal: asyncio.Event | None = None
+
+        # Pre-create ws_bridge session with correct backend type so browser
+        # connects don't trigger CLI relaunch while VLM is still loading
+        ws_bridge.get_or_create_session(session_id, "computer-use")
 
         # Build signaling function — same path as browser WebRTC offers
         if node_id and node_id != "local" and node_registry:
@@ -461,11 +476,16 @@ def create_app() -> web.Application:
             if not node or not node.tunnel or not node.tunnel.connected:
                 logger.error("[server] Cannot create computer-use agent: node %s not connected", node_id)
                 return
-            tunnel = node.tunnel
+
+            # Dynamic tunnel lookup — gets the current tunnel at call time,
+            # not a stale reference captured at creation time.
+            _target_node_id = node_id
 
             async def signaling_fn(sdp: str, sdp_type: str) -> dict:
-                # Same tunnel path as routes.py:1169 — browser desktop offers
-                return await tunnel.send_command({
+                n = node_registry.get_node(_target_node_id) if node_registry else None
+                if not n or not n.tunnel or not n.tunnel.connected:
+                    raise ConnectionError(f"Node {_target_node_id} not connected")
+                return await n.tunnel.send_command({
                     "type": "webrtc_offer",
                     "clientId": agent_client_id,
                     "sdp": sdp,
@@ -473,6 +493,10 @@ def create_app() -> web.Application:
                     "desktopRole": "controller",
                     "iceServers": ice_servers,
                 }, timeout=15.0)
+
+            # Reconnect signal — set when this node's tunnel reconnects
+            reconnect_signal = asyncio.Event()
+            _node_reconnect_signals.setdefault(node_id, []).append(reconnect_signal)
         else:
             async def signaling_fn(sdp: str, sdp_type: str) -> dict:
                 # Same local path as routes.py:1193 — WebRTCManager.handle_offer
@@ -481,16 +505,23 @@ def create_app() -> web.Application:
                     desktop=True, desktop_role="controller",
                 )
 
-        target = DesktopTarget(signaling_fn=signaling_fn, ice_servers=ice_servers)
+        target = DesktopTarget(
+            signaling_fn=signaling_fn,
+            ice_servers=ice_servers,
+            reconnect_signal=reconnect_signal,
+        )
 
         async def _init_agent() -> None:
             try:
+                logger.info("[server] Initializing CU agent for %s (node=%s)...", session_id[:8], node_id or "local")
                 vlm = await _get_vlm(session_id)
+                logger.info("[server] VLM ready, starting desktop target for %s...", session_id[:8])
                 agent = UITarsAgent(session_id=session_id, desktop_target=target, vlm=vlm)
                 await agent.start()
+                logger.info("[server] Desktop target connected, registering agent for %s", session_id[:8])
                 ws_bridge.register_computer_use_agent(session_id, agent)
             except Exception:
-                logger.exception("[server] Failed to start computer-use agent for %s", session_id)
+                logger.exception("[server] Failed to start computer-use agent for %s", session_id[:8])
 
         spawn(_init_agent())
 
@@ -504,6 +535,19 @@ def create_app() -> web.Application:
             return
         info = launcher.get_session(session_id)
         if info and info.archived:
+            return
+        # CU sessions don't have a CLI subprocess — re-create the agent instead
+        if info and info.backendType == "computer-use":
+            if session_id not in relaunching:
+                relaunching.add(session_id)
+                logger.info("[server] Re-creating CU agent for session %s", session_id[:8])
+                on_computer_use_created(session_id, info)
+
+                async def _cu_cooldown() -> None:
+                    await asyncio.sleep(15)  # longer cooldown for VLM loading
+                    relaunching.discard(session_id)
+
+                spawn(_cu_cooldown())
             return
         if info and info.state != "starting":
             relaunching.add(session_id)

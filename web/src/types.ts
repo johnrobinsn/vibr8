@@ -55,6 +55,7 @@ export interface SdkSessionInfo {
   actualBranch?: string;
   name?: string;
   backendType?: BackendType;
+  nodeId?: string;
   lastPromptedAt?: number;
   isRing0?: boolean;
   agentState?: "idle" | "running" | "waiting_for_permission" | "compacting";

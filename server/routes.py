@@ -497,6 +497,20 @@ def create_routes(
                     raw_id = s.get("sessionId", "")
                     if raw_id:
                         s["sessionId"] = WsBridge.qualify_session_id(requested_node, raw_id)
+                # Append local CU sessions targeting this remote node
+                names = session_names.get_all_names()
+                for s in launcher.list_sessions():
+                    s_dict = s.to_dict() if hasattr(s, "to_dict") else (s if isinstance(s, dict) else s.__dict__)
+                    if s_dict.get("backendType") == "computer-use" and s_dict.get("nodeId") == requested_node:
+                        sid = s_dict.get("sessionId", "")
+                        s_dict["name"] = names.get(sid, s_dict.get("name"))
+                        lpa = ws_bridge.get_last_prompted_at(sid)
+                        if lpa:
+                            s_dict["lastPromptedAt"] = lpa
+                        bridge_session = ws_bridge._sessions.get(sid)
+                        if bridge_session:
+                            s_dict["agentState"] = ws_bridge._derive_agent_status(bridge_session)
+                        remote_sessions.append(s_dict)
                 # Sort: Ring0 pinned first, then MRU
                 remote_sessions.sort(
                     key=lambda s: (
@@ -517,6 +531,10 @@ def create_routes(
         enriched = []
         for s in sessions:
             s_dict = s.to_dict() if hasattr(s, "to_dict") else (s if isinstance(s, dict) else s.__dict__)
+            # CU sessions targeting remote nodes appear under their target node, not here
+            cu_node = s_dict.get("nodeId")
+            if s_dict.get("backendType") == "computer-use" and cu_node and cu_node != "local":
+                continue
             sid = s_dict.get("sessionId", "")
             s_dict["name"] = names.get(sid, s_dict.get("name"))
             # Enrich with MRU timestamp from WsBridge
