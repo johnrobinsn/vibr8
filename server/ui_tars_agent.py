@@ -366,7 +366,9 @@ class UITarsAgent:
                 display_text += f"({param_str})"
             display_text += "`"
         elif not action.thought:
-            display_text = f"```\n{response_text[:500]}\n```"
+            display_text = f"**Warning: unparsed action**\n```\n{response_text[:500]}\n```"
+        else:
+            display_text += f"\n\n**Warning: no action parsed**"
         return display_text
 
     # ── Watch mode: observation loop ──────────────────────────────────────

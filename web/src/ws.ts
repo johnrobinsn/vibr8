@@ -173,7 +173,11 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
       console.log(`[ws] assistant msg id=${msg.id} session=${sessionId.slice(0,8)} dup=${isDup} existing=${existingMsgs.length} sockets=${sockets.size}`);
       store.appendMessage(sessionId, chatMsg);
       store.setStreaming(sessionId, null);
-      store.setSessionStatus(sessionId, "running");
+      // CU sessions manage their own status via status_change; only set "running" for CLI
+      const assistantSession = store.sessions.get(sessionId);
+      if (assistantSession?.backend_type !== "computer-use") {
+        store.setSessionStatus(sessionId, "running");
+      }
 
       // Start timer if not already started (for non-streaming tool calls)
       if (!store.streamingStartedAt.has(sessionId)) {
@@ -220,7 +224,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
     }
 
     case "result": {
-      const r = data.data;
+      const r = data.data ?? {};
       const sessionUpdates: Partial<{ total_cost_usd: number; num_turns: number; context_used_percent: number; total_lines_added: number; total_lines_removed: number }> = {
         total_cost_usd: r.total_cost_usd,
         num_turns: r.num_turns,
@@ -308,12 +312,16 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
     }
 
     case "status_change": {
+      const currentStatus = store.sessionStatus.get(sessionId);
+      const session = store.sessions.get(sessionId);
+      const isCU = session?.backend_type === "computer-use";
       if (data.status === "compacting") {
         store.setSessionStatus(sessionId, "compacting");
-      } else if (data.status === "idle" && (store.sessionStatus.get(sessionId) === "running" || store.sessionStatus.get(sessionId) === "paused")) {
-        // Don't downgrade from running to idle via status_change —
+      } else if (data.status === "idle" && !isCU && (currentStatus === "running" || currentStatus === "paused")) {
+        // Don't downgrade from running to idle via status_change for CLI sessions —
         // only the "result" message should clear "running" status.
         // This prevents flickering when the backend sends intermediate idle states.
+        // CU sessions use status_change as the authoritative source.
       } else {
         store.setSessionStatus(sessionId, data.status);
       }

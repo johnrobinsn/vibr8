@@ -1574,12 +1574,6 @@ class WsBridge:
                     history_entry["sourceClientId"] = source_client_id
                 session.message_history.append(history_entry)
                 self._persist_session(session)
-                # Broadcast user message to other browsers
-                await self._broadcast_to_browsers(session, {
-                    "type": "user_message",
-                    "content": content,
-                    "timestamp": history_entry["timestamp"],
-                })
                 from server.computer_use_agent import ExecutionMode
                 exec_mode_str = msg.get("executionMode", "auto")
                 try:

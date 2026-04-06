@@ -123,7 +123,7 @@ def _parse_drag(text: str, r: ParsedAction) -> ParsedAction | None:
 
 
 def _parse_type(text: str, r: ParsedAction) -> ParsedAction | None:
-    m = re.search(r"type\((?:content|text)='(.+?)'\)", text)
+    m = re.search(r"type\((?:content|text)=['\"](.+?)['\"]\)", text)
     if m:
         r.action_type = "type"
         r.params = {"content": m.group(1)}
@@ -133,7 +133,7 @@ def _parse_type(text: str, r: ParsedAction) -> ParsedAction | None:
 
 def _parse_hotkey(text: str, r: ParsedAction) -> ParsedAction | None:
     # hotkey(key='...') or press(key='...')
-    m = re.search(r"(?:hotkey|press)\(key='(.+?)'\)", text)
+    m = re.search(r"(?:hotkey|press)\(key=['\"](.+?)['\"]\)", text)
     if m:
         r.action_type = "hotkey"
         r.params = {"key": m.group(1)}
