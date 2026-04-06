@@ -154,6 +154,7 @@ async def handle_playground_ws(request: web.Request) -> web.WebSocketResponse:
                             silero_vad_threshold=float(data.get("sileroVadThreshold", 0.4)),
                             eou_threshold=float(data.get("eouThreshold", 0.15)),
                             eou_max_retries=int(data.get("eouMaxRetries", 3)),
+                            eou_retry_delay_ms=float(data.get("eouRetryDelayMs", 100.0)),
                             min_segment_duration=float(data.get("minSegmentDuration", 0.4)),
                         )
                         # Update STT params for this client's connection

@@ -9,6 +9,7 @@ const DEFAULT_PARAMS: Omit<VoiceProfile, "id" | "name" | "user" | "isActive" | "
   sileroVadThreshold: 0.4,
   eouThreshold: 0.15,
   eouMaxRetries: 3,
+  eouRetryDelayMs: 100,
   minSegmentDuration: 0.4,
 };
 
@@ -27,6 +28,7 @@ const SLIDERS: SliderDef[] = [
   { key: "sileroVadThreshold", label: "Silero VAD", min: 0.0, max: 1.0, step: 0.05 },
   { key: "eouThreshold", label: "EOU Threshold", min: 0.0, max: 1.0, step: 0.01 },
   { key: "eouMaxRetries", label: "EOU Max Retries", min: 1, max: 10, step: 1 },
+  { key: "eouRetryDelayMs", label: "EOU Retry Delay", min: 0, max: 500, step: 10, unit: "ms" },
   { key: "minSegmentDuration", label: "Min Segment", min: 0.1, max: 2.0, step: 0.1, unit: "s" },
 ];
 

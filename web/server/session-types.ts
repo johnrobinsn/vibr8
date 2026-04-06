@@ -189,7 +189,8 @@ export type BrowserIncomingMessage =
   | { type: "error"; message: string }
   | { type: "cli_disconnected" }
   | { type: "cli_connected" }
-  | { type: "user_message"; content: string; timestamp: number; eventMeta?: { eventType: string; summary?: string; ui: "visible" | "collapsed" | "hidden" } }
+  | { type: "user_message"; content: string; timestamp: number; source?: string; eventMeta?: { eventType: string; summary?: string; ui: "visible" | "collapsed" | "hidden" } }
+  | { type: "voice_transcript_preview"; transcript: string | null }
   | { type: "message_history"; messages: BrowserIncomingMessage[]; archivedMessageCount?: number }
   | { type: "session_name_update"; name: string; userRenamed?: boolean }
   | { type: "guard_state"; enabled: boolean }

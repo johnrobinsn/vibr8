@@ -188,6 +188,7 @@ export interface VoiceProfile {
   sileroVadThreshold: number;
   eouThreshold: number;
   eouMaxRetries: number;
+  eouRetryDelayMs: number;
   minSegmentDuration: number;
   isActive: boolean;
   createdAt?: number;

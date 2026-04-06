@@ -368,6 +368,7 @@ function AssistantAvatar() {
 export function MessageFeed({ sessionId }: { sessionId: string }) {
   const messages = useStore((s) => s.messages.get(sessionId) ?? EMPTY_MESSAGES);
   const streamingText = useStore((s) => s.streaming.get(sessionId));
+  const voicePreview = useStore((s) => s.voicePreview.get(sessionId));
   const streamingStartedAt = useStore((s) => s.streamingStartedAt.get(sessionId));
   const streamingOutputTokens = useStore((s) => s.streamingOutputTokens.get(sessionId));
   const sessionStatus = useStore((s) => s.sessionStatus.get(sessionId));
@@ -443,9 +444,9 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
         el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
       }
     }
-  }, [messages.length, streamingText]);
+  }, [messages.length, streamingText, voicePreview]);
 
-  if (messages.length === 0 && !streamingText) {
+  if (messages.length === 0 && !streamingText && !voicePreview) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-4 select-none px-6">
         <div className="w-14 h-14 rounded-2xl bg-cc-card border border-cc-border flex items-center justify-center">
@@ -486,6 +487,18 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
             </div>
           )}
           <FeedEntries entries={visibleEntries} />
+
+          {/* Voice transcript preview (interim, before EOU confirmation) */}
+          {voicePreview && (
+            <div className="flex justify-end animate-[fadeSlideIn_0.2s_ease-out]">
+              <div className="max-w-[85%] sm:max-w-[80%] px-3 sm:px-4 py-2.5 rounded-[14px] rounded-br-[4px] bg-cc-user-bubble/60 text-cc-fg/70">
+                <pre className="text-[13px] sm:text-[14px] whitespace-pre-wrap break-words font-sans-ui leading-relaxed">
+                  {voicePreview}
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-cc-primary ml-1.5 align-middle animate-pulse" />
+                </pre>
+              </div>
+            </div>
+          )}
 
           {/* Streaming indicator */}
           {streamingText && (

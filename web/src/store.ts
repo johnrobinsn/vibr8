@@ -30,6 +30,9 @@ interface AppState {
   // Streaming partial text per session
   streaming: Map<string, string>;
 
+  // Voice transcript preview per session (interim, not yet submitted)
+  voicePreview: Map<string, string>;
+
   // Streaming stats: start time + output tokens
   streamingStartedAt: Map<string, number>;
   streamingOutputTokens: Map<string, number>;
@@ -150,6 +153,7 @@ interface AppState {
   updateLastAssistantMessage: (sessionId: string, updater: (msg: ChatMessage) => ChatMessage) => void;
   setStreaming: (sessionId: string, text: string | null) => void;
   setStreamingStats: (sessionId: string, stats: { startedAt?: number; outputTokens?: number } | null) => void;
+  setVoicePreview: (sessionId: string, text: string | null) => void;
 
   // Permission actions
   addPermission: (sessionId: string, perm: PermissionRequest) => void;
@@ -254,6 +258,7 @@ export const useStore = create<AppState>((set) => ({
   messages: new Map(),
   archivedCount: new Map(),
   streaming: new Map(),
+  voicePreview: new Map(),
   streamingStartedAt: new Map(),
   streamingOutputTokens: new Map(),
   pendingPermissions: new Map(),
@@ -408,6 +413,8 @@ export const useStore = create<AppState>((set) => ({
       messages.delete(sessionId);
       const streaming = new Map(s.streaming);
       streaming.delete(sessionId);
+      const voicePreview = new Map(s.voicePreview);
+      voicePreview.delete(sessionId);
       const streamingStartedAt = new Map(s.streamingStartedAt);
       streamingStartedAt.delete(sessionId);
       const streamingOutputTokens = new Map(s.streamingOutputTokens);
@@ -441,6 +448,7 @@ export const useStore = create<AppState>((set) => ({
         sessions,
         messages,
         streaming,
+        voicePreview,
         streamingStartedAt,
         streamingOutputTokens,
         connectionStatus,
@@ -548,6 +556,17 @@ export const useStore = create<AppState>((set) => ({
         streaming.set(sessionId, text);
       }
       return { streaming };
+    }),
+
+  setVoicePreview: (sessionId, text) =>
+    set((s) => {
+      const voicePreview = new Map(s.voicePreview);
+      if (text === null) {
+        voicePreview.delete(sessionId);
+      } else {
+        voicePreview.set(sessionId, text);
+      }
+      return { voicePreview };
     }),
 
   setStreamingStats: (sessionId, stats) =>
@@ -761,6 +780,7 @@ export const useStore = create<AppState>((set) => ({
     messages: new Map(),
     archivedCount: new Map(),
     streaming: new Map(),
+    voicePreview: new Map(),
     streamingStartedAt: new Map(),
     streamingOutputTokens: new Map(),
     pendingPermissions: new Map(),
@@ -790,6 +810,7 @@ export const useStore = create<AppState>((set) => ({
       currentSessionId: null,
       messages: new Map(),
       streaming: new Map(),
+      voicePreview: new Map(),
       streamingStartedAt: new Map(),
       streamingOutputTokens: new Map(),
       pendingPermissions: new Map(),

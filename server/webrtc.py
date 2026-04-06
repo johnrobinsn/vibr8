@@ -592,6 +592,12 @@ class WebRTCManager:
         """
 
         async def _on_stt_event(stt, event_type: str, data) -> None:
+            # Resolve the target session dynamically
+            def _resolve_session() -> str | None:
+                if self._ws_bridge:
+                    return self._ws_bridge._client_sessions.get(client_id)
+                return None
+
             if event_type == "final_transcript":
                 transcript = data["transcript"].strip()
                 logger.info("[stt] client %s transcript: %s", client_id, transcript)
@@ -607,12 +613,6 @@ class WebRTCManager:
 
                 if not transcript or not self._ws_bridge:
                     return
-
-                # Resolve the target session dynamically
-                def _resolve_session() -> str | None:
-                    if self._ws_bridge:
-                        return self._ws_bridge._client_sessions.get(client_id)
-                    return None
 
                 # Helper to submit text through Ring0 or the client's current session.
                 async def _submit_text(text: str) -> None:
@@ -784,6 +784,22 @@ class WebRTCManager:
                 self.barge_in(client_id)
             elif event_type == "voice_not_detected":
                 logger.debug("[stt] client %s: voice ended", client_id)
+            elif event_type == "interim_transcript":
+                # Suppress during voice modes (note mode, etc.)
+                if self.get_voice_mode(client_id):
+                    return
+                if not self._ws_bridge:
+                    return
+                target_sid = None
+                if self._ring0_manager and self._ring0_manager.is_enabled:
+                    target_sid = self._ring0_manager.session_id
+                if not target_sid:
+                    target_sid = _resolve_session()
+                if target_sid:
+                    await self._ws_bridge.send_to_browsers(target_sid, {
+                        "type": "voice_transcript_preview",
+                        "transcript": data["transcript"],
+                    })
 
         return _on_stt_event
 

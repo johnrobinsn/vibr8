@@ -68,6 +68,7 @@ def create_profile(username: str, data: dict) -> dict:
         "sileroVadThreshold": float(data.get("sileroVadThreshold", 0.4)),
         "eouThreshold": float(data.get("eouThreshold", 0.15)),
         "eouMaxRetries": int(data.get("eouMaxRetries", 3)),
+        "eouRetryDelayMs": float(data.get("eouRetryDelayMs", 100.0)),
         "minSegmentDuration": float(data.get("minSegmentDuration", 0.4)),
         "isActive": bool(data.get("isActive", False)),
         "createdAt": now,
@@ -86,7 +87,8 @@ def update_profile(username: str, profile_id: str, data: dict) -> dict | None:
 
     # Update mutable fields
     for key in ("name", "micGain", "vadThresholdDb", "sileroVadThreshold",
-                "eouThreshold", "eouMaxRetries", "minSegmentDuration", "isActive"):
+                "eouThreshold", "eouMaxRetries", "eouRetryDelayMs",
+                "minSegmentDuration", "isActive"):
         if key in data:
             existing[key] = data[key]
     existing["updatedAt"] = time.time()
@@ -172,5 +174,6 @@ def get_stt_params(username: str, profile_id: str | None = None):
         silero_vad_threshold=prof.get("sileroVadThreshold", 0.4),
         eou_threshold=prof.get("eouThreshold", 0.15),
         eou_max_retries=prof.get("eouMaxRetries", 3),
+        eou_retry_delay_ms=prof.get("eouRetryDelayMs", 100.0),
         min_segment_duration=prof.get("minSegmentDuration", 0.4),
     )

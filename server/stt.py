@@ -13,6 +13,7 @@ import dataclasses
 import logging
 import re
 import threading
+import time
 import warnings
 from collections import Counter
 from dataclasses import dataclass
@@ -52,6 +53,7 @@ class STTParams:
     silero_vad_threshold: float = 0.4
     eou_threshold: float = 0.15
     eou_max_retries: int = 3
+    eou_retry_delay_ms: float = 100.0
     min_segment_duration: float = 0.4
     verbose: bool = False
 
@@ -258,6 +260,7 @@ class STT:
             def __init__(self) -> None:
                 self.state = STT.State.IDLE
                 self.eou_counter = 0
+                self.eou_retry_at: float = 0.0
 
                 def process_segment(s: list, b: np.ndarray) -> None:
                     s.append(b)
@@ -274,6 +277,14 @@ class STT:
                             logger.debug("[stt] Discarding short segment: %.2fs", duration)
                         s.clear()
                         return
+
+                    # Grace period: skip Whisper re-evaluation if we're still within
+                    # the retry delay window. Just accumulate audio and wait.
+                    if self.eou_retry_at > 0:
+                        elapsed_ms = (time.monotonic() - self.eou_retry_at) * 1000
+                        if elapsed_ms < params.eou_retry_delay_ms:
+                            self.state = STT.State.SEGMENT_N
+                            return
 
                     combined = np.concatenate(s, axis=0)
                     float_buf = combined.astype(np.float32) / np.iinfo(np.int16).max
@@ -292,6 +303,7 @@ class STT:
                         else:
                             logger.info("[stt] Filtered hallucination: %r", text)
                         s.clear()
+                        self.eou_retry_at = 0.0
                         stt._notify_listeners("voice_not_detected", None)
                         return
 
@@ -304,6 +316,7 @@ class STT:
                         else:
                             logger.info("[stt] Filtered non-Latin hallucination: %r", text)
                         s.clear()
+                        self.eou_retry_at = 0.0
                         stt._notify_listeners("voice_not_detected", None)
                         return
 
@@ -318,6 +331,7 @@ class STT:
                             else:
                                 logger.info("[stt] Filtered repetition-loop hallucination: %r", text)
                             s.clear()
+                            self.eou_retry_at = 0.0
                             stt._notify_listeners("voice_not_detected", None)
                             return
 
@@ -331,8 +345,14 @@ class STT:
                     if eou_prob < params.eou_threshold and self.eou_counter < params.eou_max_retries:
                         if params.verbose:
                             logger.info("[stt-verbose] EOU below threshold, continuing (retry %d)", self.eou_counter + 1)
+                        stt._notify_listeners("interim_transcript", {
+                            "transcript": text,
+                            "eouProb": float(eou_prob),
+                            "retry": self.eou_counter,
+                        })
                         self.state = STT.State.SEGMENT_N
                         self.eou_counter += 1
+                        self.eou_retry_at = time.monotonic()
                         return
 
                     if params.verbose:
@@ -343,6 +363,7 @@ class STT:
                     params_dict.pop("verbose", None)
 
                     stt._notify_listeners("voice_not_detected", None)
+                    self.eou_retry_at = 0.0
                     stt._notify_listeners("final_transcript", {
                         "timeBegin": stt._segment_time_begin,
                         "timeEnd": stt._segment_time_end,
@@ -361,6 +382,7 @@ class STT:
                     s.append(b)
                     stt._notify_listeners("voice_was_detected", None)
                     self.eou_counter = 0
+                    self.eou_retry_at = 0.0
 
                 self.transitions = {
                     (STT.State.IDLE, STT.Event.VOICE_NOT_DETECTED): Transition(

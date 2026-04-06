@@ -904,6 +904,14 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         timestamp: Date.now(),
         eventMeta: data.eventMeta,
       });
+      if (data.source === "voice") {
+        store.setVoicePreview(sessionId, null);
+      }
+      break;
+    }
+
+    case "voice_transcript_preview": {
+      store.setVoicePreview(sessionId, data.transcript ?? null);
       break;
     }
 
