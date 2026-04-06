@@ -142,12 +142,27 @@ def _parse_hotkey(text: str, r: ParsedAction) -> ParsedAction | None:
 
 
 def _parse_scroll(text: str, r: ParsedAction) -> ParsedAction | None:
+    # start_box first: scroll(start_box='(x,y)', direction='dir')
     m = re.search(
         r"scroll\(start_box='?\((\d+),\s*(\d+)\)'?,\s*direction='(\w+)'\)", text,
     )
     if m:
         r.action_type = "scroll"
         r.params = {"x": int(m.group(1)), "y": int(m.group(2)), "direction": m.group(3)}
+        return r
+    # direction first: scroll(direction='dir', start_box='(x,y)')
+    m = re.search(
+        r"scroll\(direction='(\w+)',\s*start_box='?\((\d+),\s*(\d+)\)'?\)", text,
+    )
+    if m:
+        r.action_type = "scroll"
+        r.params = {"x": int(m.group(2)), "y": int(m.group(3)), "direction": m.group(1)}
+        return r
+    # direction only: scroll(direction='dir')
+    m = re.search(r"scroll\(direction='(\w+)'\)", text)
+    if m:
+        r.action_type = "scroll"
+        r.params = {"x": 500, "y": 500, "direction": m.group(1)}
         return r
     return None
 
