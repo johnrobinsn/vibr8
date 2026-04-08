@@ -494,9 +494,6 @@ class WsBridge:
             # Restore MRU timestamp
             if p.lastPromptedAt:
                 session.last_prompted_at = p.lastPromptedAt
-            # Restore pen state from persisted session
-            if state.get("controlledBy") == "user":
-                session.controlled_by = "user"
             # Initialize dedup sets from active history
             session._dedup_msg_ids = {
                 e.get("msg_id") for e in session.message_history if e.get("msg_id")

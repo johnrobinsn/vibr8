@@ -598,11 +598,8 @@ class WebRTCManager:
                     return self._ws_bridge._client_sessions.get(client_id)
                 return None
 
-            if event_type == "final_transcript":
-                transcript = data["transcript"].strip()
-                logger.info("[stt] client %s transcript: %s", client_id, transcript)
-
-                # Log segment audio if available
+            if event_type == "segment_confirmed":
+                # Log individual segment audio (moved from final_transcript)
                 audio = data.get("audio")
                 voice_log = self._voice_loggers.get(client_id)
                 if voice_log and audio is not None:
@@ -611,11 +608,17 @@ class WebRTCManager:
                     except Exception:
                         logger.exception("[voice-log] Failed to log segment")
 
+            elif event_type == "final_transcript":
+                transcript = data["transcript"].strip()
+                logger.info("[stt] client %s transcript: %s", client_id, transcript)
+
                 if not transcript or not self._ws_bridge:
                     return
 
                 # Helper to submit text through Ring0 or the client's current session.
                 async def _submit_text(text: str) -> None:
+                    logger.info("[stt] SUBMIT to model: client=%s text=%r eou=%.4f",
+                                client_id, text, data.get("eouProb", -1))
                     if self._ring0_manager and self._ring0_manager.is_enabled:
                         # Check if a remote node is active — route to its Ring0
                         if self._node_registry:

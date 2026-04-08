@@ -13,7 +13,6 @@ import dataclasses
 import logging
 import re
 import threading
-import time
 import warnings
 from collections import Counter
 from dataclasses import dataclass
@@ -53,8 +52,8 @@ class STTParams:
     silero_vad_threshold: float = 0.4
     eou_threshold: float = 0.15
     eou_max_retries: int = 3
-    eou_retry_delay_ms: float = 100.0
     min_segment_duration: float = 0.4
+    prompt_timeout_ms: int = 1500
     verbose: bool = False
 
 # Common Whisper hallucination patterns on silence/noise
@@ -98,6 +97,7 @@ class STT:
         SILENCE_0 = auto()
         SILENCE_1 = auto()
         SILENCE_2 = auto()
+        PROMPT_WAIT = auto()
 
     def __init__(self, sample_rate: int, num_channels: int = 1, params: STTParams | None = None) -> None:
         self._sample_rate = sample_rate
@@ -237,13 +237,28 @@ class STT:
             self._idle_silence_time = 0.0
 
     def flush(self) -> None:
-        """Reset the state machine and emit a 'flushed' event."""
+        """Reset the state machine and emit a 'flushed' event.
+
+        If prompt segments have been accumulated (PROMPT_WAIT state),
+        emit a final_transcript with the joined segments before resetting.
+        """
+        # Submit any accumulated prompt segments
+        sm = self._state_machine
+        if sm.prompt_segments:
+            joined = " ".join(sm.prompt_segments)
+            logger.info("[stt] FINAL (flush) prompt_segments=%d text=%r",
+                        len(sm.prompt_segments), joined)
+            self._notify_listeners("final_transcript", {
+                "transcript": joined,
+            })
+            sm.prompt_segments.clear()
+            sm.prompt_wait_counter = 0
         self._segment = []
         self._capture_time = 0.0
         self._segment_time_begin = 0.0
         self._segment_time_end = 0.0
         self._idle_silence_time = 0.0
-        self._state_machine.state = STT.State.IDLE
+        sm.state = STT.State.IDLE
         self._notify_listeners("flushed", None)
 
     # ── State machine ────────────────────────────────────────────────────
@@ -260,7 +275,8 @@ class STT:
             def __init__(self) -> None:
                 self.state = STT.State.IDLE
                 self.eou_counter = 0
-                self.eou_retry_at: float = 0.0
+                self.prompt_segments: list[str] = []
+                self.prompt_wait_counter = 0
 
                 def process_segment(s: list, b: np.ndarray) -> None:
                     s.append(b)
@@ -277,14 +293,6 @@ class STT:
                             logger.debug("[stt] Discarding short segment: %.2fs", duration)
                         s.clear()
                         return
-
-                    # Grace period: skip Whisper re-evaluation if we're still within
-                    # the retry delay window. Just accumulate audio and wait.
-                    if self.eou_retry_at > 0:
-                        elapsed_ms = (time.monotonic() - self.eou_retry_at) * 1000
-                        if elapsed_ms < params.eou_retry_delay_ms:
-                            self.state = STT.State.SEGMENT_N
-                            return
 
                     combined = np.concatenate(s, axis=0)
                     float_buf = combined.astype(np.float32) / np.iinfo(np.int16).max
@@ -303,7 +311,6 @@ class STT:
                         else:
                             logger.info("[stt] Filtered hallucination: %r", text)
                         s.clear()
-                        self.eou_retry_at = 0.0
                         stt._notify_listeners("voice_not_detected", None)
                         return
 
@@ -316,7 +323,6 @@ class STT:
                         else:
                             logger.info("[stt] Filtered non-Latin hallucination: %r", text)
                         s.clear()
-                        self.eou_retry_at = 0.0
                         stt._notify_listeners("voice_not_detected", None)
                         return
 
@@ -331,7 +337,6 @@ class STT:
                             else:
                                 logger.info("[stt] Filtered repetition-loop hallucination: %r", text)
                             s.clear()
-                            self.eou_retry_at = 0.0
                             stt._notify_listeners("voice_not_detected", None)
                             return
 
@@ -343,6 +348,8 @@ class STT:
                                     eou_prob, params.eou_threshold, self.eou_counter, params.eou_max_retries)
 
                     if eou_prob < params.eou_threshold and self.eou_counter < params.eou_max_retries:
+                        logger.info("[stt] INTERIM eou=%.4f thr=%.4f retry=%d/%d text=%r",
+                                    eou_prob, params.eou_threshold, self.eou_counter, params.eou_max_retries, text)
                         if params.verbose:
                             logger.info("[stt-verbose] EOU below threshold, continuing (retry %d)", self.eou_counter + 1)
                         stt._notify_listeners("interim_transcript", {
@@ -352,7 +359,6 @@ class STT:
                         })
                         self.state = STT.State.SEGMENT_N
                         self.eou_counter += 1
-                        self.eou_retry_at = time.monotonic()
                         return
 
                     if params.verbose:
@@ -362,9 +368,10 @@ class STT:
                     params_dict = dataclasses.asdict(params)
                     params_dict.pop("verbose", None)
 
+                    logger.info("[stt] SEGMENT_CONFIRMED eou=%.4f thr=%.4f retries_used=%d/%d text=%r",
+                                eou_prob, params.eou_threshold, self.eou_counter, params.eou_max_retries, text)
                     stt._notify_listeners("voice_not_detected", None)
-                    self.eou_retry_at = 0.0
-                    stt._notify_listeners("final_transcript", {
+                    stt._notify_listeners("segment_confirmed", {
                         "timeBegin": stt._segment_time_begin,
                         "timeEnd": stt._segment_time_end,
                         "transcript": text,
@@ -372,6 +379,19 @@ class STT:
                         "params": params_dict,
                         "eouProb": float(eou_prob),
                     })
+
+                    # Accumulate segment for prompt assembly
+                    self.prompt_segments.append(text.strip())
+                    joined = " ".join(self.prompt_segments)
+                    stt._notify_listeners("interim_transcript", {
+                        "transcript": joined,
+                        "eouProb": float(eou_prob),
+                        "retry": -1,  # -1 signals this is a confirmed segment preview
+                    })
+
+                    # Enter PROMPT_WAIT: wait for more speech or timeout
+                    self.prompt_wait_counter = 0
+                    self.state = STT.State.PROMPT_WAIT
                     s.clear()
 
                 def capture_segment(s: list, b: np.ndarray) -> None:
@@ -382,7 +402,30 @@ class STT:
                     s.append(b)
                     stt._notify_listeners("voice_was_detected", None)
                     self.eou_counter = 0
-                    self.eou_retry_at = 0.0
+
+                def prompt_wait_resume(s: list, b: np.ndarray) -> None:
+                    """Speaker resumed during prompt wait — start a new segment."""
+                    s.append(b)
+                    stt._segment_time_begin = stt._capture_time
+                    stt._notify_listeners("voice_was_detected", None)
+                    self.eou_counter = 0
+                    self.prompt_wait_counter = 0
+
+                def prompt_wait_silence(s: list, b: np.ndarray) -> None:
+                    """Silence during prompt wait — check if timeout expired."""
+                    params = stt._params
+                    self.prompt_wait_counter += 1
+                    timeout_frames = max(1, params.prompt_timeout_ms // 160)
+                    if self.prompt_wait_counter >= timeout_frames:
+                        joined = " ".join(self.prompt_segments)
+                        logger.info("[stt] FINAL prompt_segments=%d text=%r",
+                                    len(self.prompt_segments), joined)
+                        stt._notify_listeners("final_transcript", {
+                            "transcript": joined,
+                        })
+                        self.prompt_segments.clear()
+                        self.prompt_wait_counter = 0
+                        self.state = STT.State.IDLE
 
                 self.transitions = {
                     (STT.State.IDLE, STT.Event.VOICE_NOT_DETECTED): Transition(
@@ -420,6 +463,13 @@ class STT:
                     ),
                     (STT.State.SILENCE_2, STT.Event.VOICE_WAS_DETECTED): Transition(
                         STT.State.SEGMENT_N, lambda s, b: s.append(b),
+                    ),
+                    (STT.State.PROMPT_WAIT, STT.Event.VOICE_WAS_DETECTED): Transition(
+                        STT.State.SEGMENT_N, prompt_wait_resume,
+                    ),
+                    # prompt_wait_silence sets self.state to IDLE when timeout expires
+                    (STT.State.PROMPT_WAIT, STT.Event.VOICE_NOT_DETECTED): Transition(
+                        STT.State.PROMPT_WAIT, prompt_wait_silence,
                     ),
                 }
 
