@@ -70,3 +70,40 @@ export interface NodeInfo {
   sessionCount: number;
   ring0Enabled: boolean;
 }
+
+export interface AndroidDeviceInfo {
+  id: string;
+  name: string;
+  nodeType: "android";
+  connectionMode: "usb" | "ip" | "mdns";
+  deviceId: string;
+  status: "online" | "offline" | "unauthorized";
+  ip: string | null;
+  port: number | null;
+  capabilities: {
+    canRunSessions: boolean;
+    hasDisplay: boolean;
+    nodeType: string;
+    model?: string;
+    manufacturer?: string;
+    androidVersion?: string;
+    screenWidth?: number;
+    screenHeight?: number;
+  };
+  canRunSessions: boolean;
+  hasDisplay: boolean;
+  lastSeen: number;
+}
+
+export interface DiscoveredDevice {
+  serial: string;
+  model: string;
+  status: string;
+  transportId: string;
+}
+
+export interface MdnsDevice {
+  name: string;
+  ip: string;
+  port: number;
+}

@@ -95,6 +95,20 @@ UITarsAgent (Act/Watch modes, server/ui_tars_agent.py)
 
 **Coordinates**: UI-TARS normalizes to 1000×1000 grid → `execute_action()` converts to 0.0-1.0 fractions → target converts to absolute pixels.
 
+### Pen System (`server/ws_bridge.py`)
+
+Per-session ownership control that prevents Ring0 and the user from stepping on each other. Each session has `controlled_by: "ring0" | "user"` (default: `"ring0"`).
+
+**Taking the pen**: When a user sends a message directly from the browser UI (identified by `source_client_id`), the session's pen automatically transfers to the user. This is implicit — no explicit "take pen" action needed.
+
+**What the pen suppresses**: When the user holds the pen for a session, **both** Ring0 message sends **and** Ring0 event notifications for that session are suppressed. This is by design — the user is actively working in that session and doesn't want Ring0 interfering or reacting to state changes.
+
+**Auto-release**: The pen returns to Ring0 after 5 minutes of idle (no new user messages). The timer resets on each user message and when the session goes idle after finishing work.
+
+**Explicit release**: Ring0 or the frontend can release the pen via `POST /api/sessions/{id}/pen` with `controlledBy: "ring0"`.
+
+**Key invariant**: The pen check in `_notify_ring0_state_change` must stay — removing it causes Ring0 to react to sessions the user is directly controlling, which creates interference.
+
 ## Voice Commands (`server/webrtc.py`)
 
 Guard word **"vibr8"** (or **"vibrate"**) triggers commands only when followed by a known keyword. If no command matches, the entire transcript passes through unmodified (guard word included). When a command matches, any pre-text before the guard word is submitted as input first.

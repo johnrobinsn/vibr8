@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { SessionState, PermissionRequest, ChatMessage, SdkSessionInfo, TaskItem, NodeInfo } from "./types.js";
+import type { SessionState, PermissionRequest, ChatMessage, SdkSessionInfo, TaskItem, NodeInfo, AndroidDeviceInfo } from "./types.js";
 
 function getClientId(): string {
   if (typeof window === "undefined") return crypto.randomUUID();
@@ -116,6 +116,9 @@ interface AppState {
   nodes: NodeInfo[];
   activeNodeId: string;
 
+  // Android devices
+  androidDevices: AndroidDeviceInfo[];
+
   // Playground state
   playgroundActive: boolean;
   playgroundSessionId: string | null;
@@ -221,6 +224,7 @@ interface AppState {
   // Node actions
   setNodes: (nodes: NodeInfo[]) => void;
   setActiveNode: (nodeId: string) => void;
+  setAndroidDevices: (devices: AndroidDeviceInfo[]) => void;
   clearSessionState: () => void;
 
   // Playground actions
@@ -317,6 +321,7 @@ export const useStore = create<AppState>((set) => ({
   secondScreenDarkMode: localStorage.getItem("cc-second-screen-dark-mode") !== "false",
   nodes: [],
   activeNodeId: "local",
+  androidDevices: [],
   playgroundActive: false,
   playgroundSessionId: null,
   playgroundSegments: [],
@@ -772,6 +777,7 @@ export const useStore = create<AppState>((set) => ({
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
   setNodes: (nodes) => set({ nodes }),
   setActiveNode: (nodeId) => set({ activeNodeId: nodeId }),
+  setAndroidDevices: (devices) => set({ androidDevices: devices }),
   clearSessionState: () => {
     console.log(`[store] clearSessionState — resetting cliConnected/connectionStatus maps`);
     return set({

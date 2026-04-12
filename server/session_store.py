@@ -36,6 +36,7 @@ class PersistedSession:
     archived: Optional[bool] = None
     name: Optional[str] = None
     lastPromptedAt: Optional[float] = None  # ms since epoch
+    associatedNodeId: Optional[str] = None  # For sessions on host targeting an Android node
 
     # -- Serialization helpers ------------------------------------------------
 
@@ -53,6 +54,8 @@ class PersistedSession:
             d["name"] = self.name
         if self.lastPromptedAt is not None:
             d["lastPromptedAt"] = self.lastPromptedAt
+        if self.associatedNodeId is not None:
+            d["associatedNodeId"] = self.associatedNodeId
         return d
 
     @classmethod
@@ -69,6 +72,7 @@ class PersistedSession:
             archived=data.get("archived"),
             name=data.get("name"),
             lastPromptedAt=data.get("lastPromptedAt"),
+            associatedNodeId=data.get("associatedNodeId"),
         )
 
 

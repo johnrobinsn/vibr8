@@ -1,4 +1,4 @@
-import type { SdkSessionInfo, NodeInfo } from "./types.js";
+import type { SdkSessionInfo, NodeInfo, AndroidDeviceInfo, DiscoveredDevice, MdnsDevice } from "./types.js";
 
 const BASE = "/api";
 
@@ -467,6 +467,38 @@ export const api = {
     del(`/auth/device-tokens/${encodeURIComponent(tokenId)}`),
   confirmPairing: (code: string, name: string) =>
     post<{ ok: boolean; type: string }>("/pairing/confirm", { code, name }),
+
+  // Android Devices
+  listAndroidDevices: () => get<AndroidDeviceInfo[]>("/android/devices"),
+
+  registerAndroidDevice: (data: { name: string; connectionMode: string; deviceId: string; ip?: string; port?: number }) =>
+    post<AndroidDeviceInfo>("/android/devices", data),
+
+  updateAndroidDevice: (nodeId: string, data: { name?: string; ip?: string; port?: number; connectionMode?: string; deviceId?: string }) =>
+    put<AndroidDeviceInfo>(`/android/devices/${encodeURIComponent(nodeId)}`, data),
+
+  deleteAndroidDevice: (nodeId: string) =>
+    del(`/android/devices/${encodeURIComponent(nodeId)}`),
+
+  discoverAndroidDevices: () =>
+    get<{ usb: DiscoveredDevice[]; mdns: MdnsDevice[] }>("/android/discover"),
+
+  connectAndroidDevice: (nodeId: string) =>
+    post<{ ok: boolean; status: string }>("/android/connect", { nodeId }),
+
+  disconnectAndroidDevice: (nodeId: string) =>
+    post<{ ok: boolean }>(`/android/disconnect/${encodeURIComponent(nodeId)}`),
+
+  androidDeviceStatus: (nodeId: string) =>
+    get<{ online: boolean; node: AndroidDeviceInfo }>(`/android/devices/${encodeURIComponent(nodeId)}/status`),
+
+  androidWebrtcOffer: (nodeId: string, offer: { sdp: string; type: string }) =>
+    post<{ sdp: string; type: string }>(`/android/devices/${encodeURIComponent(nodeId)}/webrtc/offer`, {
+      sdp: offer.sdp,
+      type: offer.type,
+    }),
+
+  listAllNodes: () => get<Array<NodeInfo & { nodeType?: string; connectionMode?: string; deviceId?: string; capabilities?: Record<string, unknown> }>>("/nodes/all"),
 
   // Admin
   restartServer: () => post("/admin/restart"),

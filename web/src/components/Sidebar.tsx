@@ -32,6 +32,7 @@ export function Sidebar() {
   const pendingPermissions = useStore((s) => s.pendingPermissions);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const nodes = useStore((s) => s.nodes);
+  const androidDevices = useStore((s) => s.androidDevices);
   const activeNodeId = useStore((s) => s.activeNodeId);
   const desktopStreamActive = useStore((s) => s.desktopStreamActive);
   const activeView = useStore((s) => s.activeView);
@@ -82,10 +83,11 @@ export function Sidebar() {
     let isFirstPoll = true;
     async function poll() {
       try {
-        const [list, ring0Status, nodeList] = await Promise.all([
+        const [list, ring0Status, nodeList, androidList] = await Promise.all([
           api.listSessions(activeNodeId),
           api.getRing0Status().catch(() => ({ enabled: false, eventsMuted: false, sessionId: null })),
           api.listNodes().catch(() => []),
+          api.listAndroidDevices().catch(() => []),
         ]);
         if (active) {
           setRing0SessionId(ring0Status.sessionId ?? null);
@@ -94,6 +96,7 @@ export function Sidebar() {
           if (nodeList.length > 0) {
             useStore.getState().setNodes(nodeList);
           }
+          useStore.getState().setAndroidDevices(androidList);
           // Hydrate session names from server (server is source of truth for auto-generated names)
           const store = useStore.getState();
           for (const s of list) {
@@ -689,8 +692,8 @@ export function Sidebar() {
       {/* Session list */}
       <div className="flex-1 overflow-hidden relative">
         <div ref={sidebarListRef} className="h-full overflow-y-auto px-2 pb-14" data-session-list>
-          {/* Node switcher — only shown when remote nodes exist */}
-          {nodes.length > 1 && (
+          {/* Node switcher — only shown when remote nodes or android devices exist */}
+          {(nodes.length > 1 || androidDevices.length > 0) && (
             <div className="px-3 pt-2 pb-1">
               <select
                 value={activeNodeId}
@@ -702,6 +705,15 @@ export function Sidebar() {
                     {n.name} {n.status === "offline" ? "(offline)" : ""}
                   </option>
                 ))}
+                {androidDevices.length > 0 && (
+                  <optgroup label="Android">
+                    {androidDevices.map((d) => (
+                      <option key={d.id} value={d.id} disabled={d.status !== "online"}>
+                        {d.name} {d.status !== "online" ? `(${d.status})` : ""}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </div>
           )}

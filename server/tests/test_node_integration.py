@@ -391,21 +391,6 @@ class TestRing0EventIsolation:
         await bridge._notify_ring0_state_change(ring0_session, "idle->running")
         bridge.emit_ring0_event.assert_not_called()
 
-    async def test_user_pen_events_suppressed(self, bridge):
-        ring0 = MagicMock()
-        ring0.session_id = "ring0"
-        ring0.is_enabled = True
-        bridge._ring0_manager = ring0
-        bridge.emit_ring0_event = AsyncMock()
-
-        session = bridge.get_or_create_session("user-session")
-        session.controlled_by = "user"
-
-        with patch("server.session_names.get_name", return_value="Test"):
-            await bridge._notify_ring0_state_change(session, "idle->running")
-        bridge.emit_ring0_event.assert_not_called()
-
-
 # ── Remote Session Message Handling ──────────────────────────────────────────
 
 

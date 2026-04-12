@@ -1,9 +1,9 @@
-"""UI-TARS agent — vision-language model that controls desktop GUIs.
+"""UI-TARS agent — vision-language model that controls GUIs.
 
-Takes screenshots via WebRTC (DesktopTarget), runs in-process inference
-via HuggingFace Transformers (no external server), parses model output
-(Thought/Action), and executes actions back through the same WebRTC
-data channel.
+Takes screenshots via a target (DesktopTarget for desktop WebRTC, or
+AdbTarget for Android via scrcpy), runs in-process inference via
+HuggingFace Transformers, parses model output (Thought/Action), and
+executes actions back through the target's inject() method.
 
 Implements the ComputerUseAgent protocol with Watch and Act modes.
 Ported from /mntc/code/v1/src/v1/agent.py.
@@ -16,15 +16,24 @@ import logging
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, Protocol, runtime_checkable
 
 import av
 from PIL import Image
 
 from server.computer_use_agent import ExecutionMode
-from server.desktop_target import DesktopTarget
 from server.ui_tars_actions import parse_action, execute_action
 from server.vlm import LoadedModel, run_inference
+
+
+@runtime_checkable
+class AgentTarget(Protocol):
+    """Interface for any target the agent can control (desktop or Android)."""
+
+    async def start(self) -> Any: ...
+    async def stop(self) -> None: ...
+    async def get_frame(self) -> av.VideoFrame | None: ...
+    async def inject(self, event: dict[str, Any]) -> None: ...
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +72,13 @@ class UITarsAgent:
     def __init__(
         self,
         session_id: str,
-        desktop_target: DesktopTarget,
+        target: AgentTarget,
         vlm: LoadedModel,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
         wait_after_action: float = DEFAULT_WAIT_AFTER_ACTION,
     ) -> None:
         self.session_id = session_id
-        self._target = desktop_target
+        self._target = target
         self._vlm = vlm
         self._max_iterations = max_iterations
         self._wait_after_action = wait_after_action

@@ -3,8 +3,9 @@ import { VoiceProfiles } from "./VoiceProfiles.js";
 import { VoiceLogs } from "./VoiceLogs.js";
 import { ApiKeys } from "./ApiKeys.js";
 import { Devices } from "./DeviceTokens.js";
+import { AndroidDevices } from "./AndroidDevices.js";
 
-type Tab = "voice-profiles" | "voice-logs" | "api-keys" | "devices";
+type Tab = "voice-profiles" | "voice-logs" | "api-keys" | "devices" | "android";
 
 export function SettingsPage() {
   // Support deep-linking to a tab via hash fragment: #settings/api-keys
@@ -13,7 +14,7 @@ export function SettingsPage() {
     const match = hash.match(/^#\/settings\/(.+)$/);
     if (match) {
       const t = match[1] as Tab;
-      if (["voice-profiles", "voice-logs", "api-keys", "devices"].includes(t)) return t;
+      if (["voice-profiles", "voice-logs", "api-keys", "devices", "android"].includes(t)) return t;
     }
     return "voice-profiles";
   };
@@ -43,6 +44,7 @@ export function SettingsPage() {
             { id: "voice-logs" as Tab, label: "Voice Logs" },
             { id: "api-keys" as Tab, label: "API Keys" },
             { id: "devices" as Tab, label: "Devices" },
+            { id: "android" as Tab, label: "Android" },
           ]).map((t) => (
             <button
               key={t.id}
@@ -65,6 +67,7 @@ export function SettingsPage() {
         {tab === "voice-logs" && <VoiceLogs />}
         {tab === "api-keys" && <ApiKeys />}
         {tab === "devices" && <Devices />}
+        {tab === "android" && <AndroidDevices />}
       </div>
     </div>
   );

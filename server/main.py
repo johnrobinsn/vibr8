@@ -370,6 +370,9 @@ def create_app() -> web.Application:
     ring0_manager = Ring0Manager(PORT, auth_manager=auth_manager)
     node_registry = NodeRegistry()
 
+    from server.android_registry import AndroidRegistry
+    android_registry = AndroidRegistry()
+
     # Track background tasks so we can cancel them on shutdown.
     background_tasks: set[asyncio.Task] = set()
 
@@ -418,6 +421,7 @@ def create_app() -> web.Application:
     # When a computer-use session is created, spin up the agent and register it
     from server.ui_tars_agent import UITarsAgent
     from server.desktop_target import DesktopTarget
+    from server.adb_target import AdbTarget
 
     # Reconnect signals per node — set when a node tunnel reconnects.
     # Stored on app so handle_node_ws can access it via request.app.
@@ -471,6 +475,46 @@ def create_app() -> web.Application:
         # connects don't trigger CLI relaunch while VLM is still loading
         ws_bridge.get_or_create_session(session_id, "computer-use")
 
+        # Check if target is an Android device (ADB/scrcpy path)
+        android_node = None
+        android_registry = app.get("android_registry")
+        if node_id and android_registry:
+            android_node = android_registry.get_node(node_id)
+
+        if android_node:
+            # Android target — use scrcpy via AdbTarget
+            if android_node.status != "online":
+                logger.error("[server] Cannot create CU agent: Android device %s is offline", android_node.name)
+                return
+
+            # Get or start scrcpy client for this device
+            if not android_node.scrcpy_client:
+                from server.scrcpy_client import ScrcpyClient
+                android_node.scrcpy_client = ScrcpyClient(
+                    device_id=android_node.device_id,
+                    max_size=1080,
+                    max_fps=30,
+                )
+
+            target = AdbTarget(scrcpy_client=android_node.scrcpy_client)
+
+            async def _init_agent() -> None:
+                try:
+                    logger.info("[server] Initializing Android CU agent for %s (device=%s)...",
+                                session_id[:8], android_node.name)
+                    vlm = await _get_vlm(session_id)
+                    logger.info("[server] VLM ready, starting ADB target for %s...", session_id[:8])
+                    agent = UITarsAgent(session_id=session_id, target=target, vlm=vlm)
+                    await agent.start()
+                    logger.info("[server] ADB target connected, registering agent for %s", session_id[:8])
+                    ws_bridge.register_computer_use_agent(session_id, agent)
+                except Exception:
+                    logger.exception("[server] Failed to start Android CU agent for %s", session_id[:8])
+
+            spawn(_init_agent())
+            return
+
+        # Desktop target — existing WebRTC path
         # Build signaling function — same path as browser WebRTC offers
         if node_id and node_id != "local" and node_registry:
             node = node_registry.get_node(node_id)
@@ -517,7 +561,7 @@ def create_app() -> web.Application:
                 logger.info("[server] Initializing CU agent for %s (node=%s)...", session_id[:8], node_id or "local")
                 vlm = await _get_vlm(session_id)
                 logger.info("[server] VLM ready, starting desktop target for %s...", session_id[:8])
-                agent = UITarsAgent(session_id=session_id, desktop_target=target, vlm=vlm)
+                agent = UITarsAgent(session_id=session_id, target=target, vlm=vlm)
                 await agent.start()
                 logger.info("[server] Desktop target connected, registering agent for %s", session_id[:8])
                 ws_bridge.register_computer_use_agent(session_id, agent)
@@ -627,6 +671,7 @@ def create_app() -> web.Application:
     app["auth_manager"] = auth_manager
     app["ring0_manager"] = ring0_manager
     app["node_registry"] = node_registry
+    app["android_registry"] = android_registry
     app["request_restart"] = request_restart
 
     # ── Startup / Shutdown hooks ──────────────────────────────────────────
@@ -695,6 +740,16 @@ def create_app() -> web.Application:
 
         spawn(_heartbeat_checker())
 
+        # Start Android device status polling
+        await android_registry.start_polling(interval=5.0)
+
+        # Start mDNS discovery for ADB devices (if zeroconf is installed)
+        from server.mdns_discovery import MdnsDiscovery
+        mdns = MdnsDiscovery()
+        app["mdns_discovery"] = mdns
+        if mdns.available:
+            await mdns.start()
+
         # Auto-launch ring0 session if it was previously enabled
         if ring0_manager.is_enabled:
             logger.info("[server] Ring0 was enabled — auto-launching session")
@@ -718,6 +773,12 @@ def create_app() -> web.Application:
         # This is critical for Ring0's MCP subprocess which loads ring0_mcp.py
         # at startup — without this, code changes never take effect.
         await launcher.kill_all()
+
+        # Shutdown Android registry and mDNS discovery
+        await android_registry.shutdown()
+        mdns = app.get("mdns_discovery")
+        if mdns:
+            await mdns.stop()
 
         if _restart["requested"]:
             # Fast path: skip graceful WebSocket close (10s timeout per socket).

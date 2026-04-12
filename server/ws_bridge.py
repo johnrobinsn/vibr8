@@ -77,6 +77,7 @@ class Session:
     pen_taken_at: float = 0  # time.time() when user took pen
     _pen_timeout: Any = None  # asyncio.TimerHandle for auto-release
     last_prompted_at: float = 0  # ms since epoch, updated on every user prompt
+    associated_node_id: str = ""  # For sessions running on host but targeting an Android node
 
 
 # ── Bridge ───────────────────────────────────────────────────────────────────
@@ -821,8 +822,15 @@ class WsBridge:
                 self._persist_session(session)
             elif msg_type == "status_change":
                 status = msg.get("status", "idle")
-                session.state["is_running"] = status in ("running", "watching", "confirming")
+                was_running = session.state.get("is_running")
+                now_running = status in ("running", "watching", "confirming")
+                session.state["is_running"] = now_running
                 self._persist_session(session)
+                # Notify Ring0 of state transitions
+                if now_running and not was_running:
+                    asyncio.ensure_future(self._notify_ring0_state_change(session, "idle→running"))
+                elif was_running and not now_running:
+                    asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
             # confirm, observation, etc. — all broadcast to browsers
             await self._broadcast_to_browsers(session, msg)
 
@@ -1936,11 +1944,11 @@ class WsBridge:
         # Don't notify Ring0 about its own session
         if session.id == ring0.session_id:
             return
+        # Don't notify Ring0 when user has taken the pen (pen system)
+        if session.controlled_by == "user":
+            return
         # Don't notify hub Ring0 about remote node sessions (they handle their own)
         if self._is_remote_session(session.id):
-            return
-        # Suppress notifications while user has the pen
-        if session.controlled_by == "user":
             return
         from server import session_names
         from server.ring0_events import Ring0Event

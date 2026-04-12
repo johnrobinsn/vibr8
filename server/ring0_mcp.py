@@ -75,6 +75,7 @@ async def create_session(
     project_dir: str = "",
     model: str = "",
     initial_message: str = "",
+    node_id: str = "",
 ) -> str:
     """Create a new session.
 
@@ -82,13 +83,16 @@ async def create_session(
         name: Human-readable session name (e.g., "auth refactor", "frontend tests",
               "Desktop: open Chrome").
         backend: Backend type — "claude" (default), "codex", or "computer-use".
-                 Use "computer-use" for desktop GUI tasks (opens apps, clicks, types).
+                 Use "computer-use" for desktop/Android GUI tasks (opens apps, clicks, types).
         project_dir: Working directory for the session. Only used for claude/codex backends.
                      If empty, creates /mntc/code/{slugified-name}.
         model: Optional model override (e.g., "claude-sonnet-4-6").
         initial_message: Optional first message to send to the session after creation.
                          For computer-use sessions, this is the task to execute
                          (e.g., "open Chrome and go to google.com").
+        node_id: Optional node ID to target. For Android nodes (which can't run sessions
+                 locally), the session runs on the host but is associated with the node.
+                 For desktop nodes, the session runs on the remote node.
     """
     if backend not in ("claude", "codex", "computer-use"):
         return f"Error: backend must be 'claude', 'codex', or 'computer-use', got '{backend}'."
@@ -96,6 +100,8 @@ async def create_session(
     body: dict[str, Any] = {"backend": backend, "name": name}
     if model:
         body["model"] = model
+    if node_id:
+        body["nodeId"] = node_id
 
     if backend == "computer-use":
         # Computer-use doesn't need a working directory
@@ -1063,6 +1069,62 @@ async def get_node_environment() -> str:
         f"Display: {'available' if info['display'] else 'headless'}",
     ]
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def switch_ring0_model(model: str) -> str:
+    """Switch Ring0 to a different Claude model. This will kill the current session
+    and start a fresh one with the new model.
+
+    Accepts full model IDs (e.g. "claude-sonnet-4-6") or friendly aliases:
+    - "haiku" → claude-haiku-4-5-20251001
+    - "sonnet" → claude-sonnet-4-6
+    - "opus" → claude-opus-4-6
+
+    WARNING: Calling this tool will terminate your current session. Save any
+    important context to memory files BEFORE calling this tool.
+
+    Args:
+        model: Model ID or alias (e.g. "haiku", "sonnet", "opus", or full model ID)
+    """
+    # Resolve aliases locally for the confirmation message
+    aliases = {
+        "haiku": "claude-haiku-4-5-20251001",
+        "sonnet": "claude-sonnet-4-6",
+        "opus": "claude-opus-4-6",
+    }
+    resolved = aliases.get(model.lower().strip(), model.strip())
+
+    result = await _post("/ring0/switch-model", {"model": model})
+    if result.get("error"):
+        return f"Error: {result['error']}"
+
+    previous = result.get("previous", "unknown")
+    return (
+        f"Model switch initiated: {previous} → {resolved}\n"
+        f"This session will terminate in ~1.5 seconds. "
+        f"A new Ring0 session will start with {resolved}."
+    )
+
+
+@mcp.tool()
+async def get_ring0_model() -> str:
+    """Get the current Ring0 model name.
+
+    Use this when the user asks "what model are you on" or "which model".
+    """
+    # Check env var first (set by Ring0Manager when launching)
+    model = os.environ.get("RING0_MODEL")
+    if model:
+        return f"Current model: {model}"
+
+    # Fall back to REST API
+    status = await _get("/ring0/status")
+    model = status.get("model")
+    if model:
+        return f"Current model: {model}"
+
+    return "Model not specified — using the default Claude model."
 
 
 if __name__ == "__main__":

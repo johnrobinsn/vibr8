@@ -32,6 +32,14 @@ RING0_SYSTEM_PROMPT = """\
 You are Ring0, a meta-agent that orchestrates other Claude Code sessions in vibr8.
 You receive voice transcripts from the user and decide how to route them.
 
+## Memory
+
+At the start of every conversation, read your memory files:
+1. Read `~/.vibr8/ring0/memory/MEMORY.md` for the index
+2. Read any relevant topic files linked from the index
+
+This is mandatory — never ask the user where something is if it might be in memory.
+
 ## Your MCP Tools
 
 - **create_session** — Create a new session (claude, codex, or computer-use backend)
@@ -43,6 +51,26 @@ You receive voice transcripts from the user and decide how to route them.
 - **get_active_clients** — List all connected browser clients
 - **query_client** — Query a specific client's state (e.g., what session they're viewing)
 - **get_node_environment** — Get info about this node (name, OS, container, display status)
+- **switch_ring0_model** — Switch your own model (kills this session, starts fresh with new model)
+- **get_ring0_model** — Check which model you are currently running
+
+## Model Switching
+
+You can switch which Claude model you run on. Recognize these voice patterns:
+- **Switch requests:** "switch to haiku", "use opus", "switch model to sonnet", "go to haiku"
+- **Model queries:** "what model are you using", "which model", "what model is this"
+
+**Aliases:** "haiku" → claude-haiku-4-5-20251001, "sonnet" → claude-sonnet-4-6, "opus" → claude-opus-4-6
+
+**For model queries:** Simply tell the user your current model. Check the `CLAUDE_MODEL` \
+environment variable, or if unavailable, state which model you believe you are.
+
+**For switch requests:**
+1. Save any important in-progress context to memory files first
+2. Tell the user what you're saving and which model you're switching to
+3. Call `switch_ring0_model` with the target model
+4. This will kill your current session and start a fresh one — your response after calling \
+the tool is the last thing you'll say in this session
 
 ## Client Identity
 
@@ -186,6 +214,10 @@ class Ring0Manager:
     def session_id(self) -> str:
         return self._session_id
 
+    @property
+    def model(self) -> Optional[str]:
+        return self._model
+
     def _get_service_token(self) -> Optional[str]:
         """Get or create a service token for Ring0 MCP API calls."""
         if not self._auth_manager or not self._auth_manager.enabled:
@@ -272,6 +304,22 @@ class Ring0Manager:
         logger.info("[ring0] Created session %s in %s", session_id, work_dir)
         return session_id
 
+    async def switch_model(self, model: str, launcher: CliLauncher, ws_bridge: WsBridge) -> str:
+        """Switch Ring0 to a different model. Kills current session and starts fresh."""
+        old_model = self._model
+        self._model = model
+        self._cli_session_id = None  # Fresh conversation, don't resume
+        self._save_state()
+        logger.info("[ring0] Switching model: %s → %s", old_model, model)
+
+        # Kill the current session
+        await launcher.kill(self._session_id)
+
+        # Start a fresh session with the new model
+        session_id = await self.ensure_session(launcher, ws_bridge)
+        logger.info("[ring0] Model switch complete — session %s running %s", session_id, model)
+        return session_id
+
     def _write_config_files(self, work_dir: Path) -> Path:
         """Write CLAUDE.md and MCP config to the Ring0 working directory."""
         claude_md = work_dir / "CLAUDE.md"
@@ -289,6 +337,7 @@ class Ring0Manager:
                     "env": {
                         "VIBR8_PORT": str(self._port),
                         **({} if not self._get_service_token() else {"VIBR8_TOKEN": self._get_service_token()}),
+                        **({"RING0_MODEL": self._model} if self._model else {}),
                     },
                 }
             }

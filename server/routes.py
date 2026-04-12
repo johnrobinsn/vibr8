@@ -350,7 +350,19 @@ def create_routes(
         # (computer-use sessions always run on the hub, targeting a remote display)
         target_node = body.get("nodeId", "")
         backend = body.get("backend", "claude")
-        if target_node and node_registry and backend != "computer-use":
+
+        # Check if target is an Android node (can't run sessions locally)
+        android_registry = request.app.get("android_registry")
+        android_node = android_registry.get_node(target_node) if android_registry and target_node else None
+
+        if android_node:
+            if backend in ("claude", "codex"):
+                # Android node can't run Claude/Codex — create on host with associatedNodeId
+                body.pop("nodeId", None)
+                body["associatedNodeId"] = target_node
+            # computer-use sessions for Android nodes also run on host (with nodeId passed through)
+
+        elif target_node and node_registry and backend != "computer-use":
             node = node_registry.get_node(target_node)
             if node and node.tunnel and node.tunnel.connected:
                 result = await node.tunnel.send_command({
@@ -484,6 +496,34 @@ def create_routes(
     @routes.get("/api/sessions")
     async def list_sessions(request: web.Request) -> web.Response:
         requested_node = request.rel_url.query.get("nodeId", "")
+
+        # Android node — return host sessions associated with this node
+        android_registry = request.app.get("android_registry")
+        if requested_node and android_registry and android_registry.get_node(requested_node):
+            names = session_names.get_all_names()
+            r0_id = ring0_manager.session_id if ring0_manager else None
+            associated = []
+            for s in launcher.list_sessions():
+                s_dict = s.to_dict() if hasattr(s, "to_dict") else (s if isinstance(s, dict) else s.__dict__)
+                sid = s_dict.get("sessionId", "")
+                # Include sessions associated with this Android node, or CU sessions targeting it
+                bridge_session = ws_bridge._sessions.get(sid)
+                associated_nid = bridge_session.associated_node_id if bridge_session else ""
+                cu_node = s_dict.get("nodeId", "")
+                if associated_nid != requested_node and cu_node != requested_node:
+                    continue
+                s_dict["name"] = names.get(sid, s_dict.get("name"))
+                s_dict["associatedNodeId"] = requested_node
+                lpa = ws_bridge.get_last_prompted_at(sid)
+                if lpa:
+                    s_dict["lastPromptedAt"] = lpa
+                if r0_id and sid == r0_id:
+                    s_dict["isRing0"] = True
+                if bridge_session:
+                    s_dict["agentState"] = ws_bridge._derive_agent_status(bridge_session)
+                associated.append(s_dict)
+            associated.sort(key=lambda s: (0 if s.get("isRing0") else 1, -(s.get("lastPromptedAt") or s.get("createdAt") or 0)))
+            return web.json_response(associated)
 
         # Remote node — fetch sessions via tunnel
         if requested_node and node_registry:
@@ -1271,6 +1311,7 @@ def create_routes(
             "enabled": ring0_manager.is_enabled,
             "eventsMuted": ring0_manager.events_muted,
             "sessionId": ring0_manager.session_id,
+            "model": ring0_manager.model,
         })
 
     @routes.post("/api/ring0/toggle")
@@ -1300,6 +1341,39 @@ def create_routes(
         muted = bool(body.get("muted", False))
         ring0_manager.set_events_muted(muted)
         return web.json_response({"ok": True, "eventsMuted": muted})
+
+    @routes.post("/api/ring0/switch-model")
+    async def ring0_switch_model(request: web.Request) -> web.Response:
+        """Switch Ring0 to a different model. Kills session and starts fresh."""
+        if ring0_manager is None:
+            return web.json_response({"error": "Ring0 not available"}, status=501)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        model = body.get("model", "").strip()
+        if not model:
+            return web.json_response({"error": "model is required"}, status=400)
+
+        # Resolve friendly aliases
+        aliases = {
+            "haiku": "claude-haiku-4-5-20251001",
+            "sonnet": "claude-sonnet-4-6",
+            "opus": "claude-opus-4-6",
+        }
+        resolved = aliases.get(model.lower(), model)
+
+        # Schedule the switch asynchronously so the HTTP response gets back
+        # to the MCP subprocess before we kill the Ring0 CLI process.
+        async def _do_switch() -> None:
+            import asyncio
+            await asyncio.sleep(1.5)
+            await ring0_manager.switch_model(resolved, launcher, ws_bridge)
+
+        import asyncio
+        asyncio.create_task(_do_switch())
+
+        return web.json_response({"ok": True, "model": resolved, "previous": ring0_manager.model})
 
     @routes.post("/api/ring0/send-message")
     async def ring0_send_message(request: web.Request) -> web.Response:
@@ -2036,6 +2110,246 @@ def create_routes(
         if node_registry.revoke_api_key(key_id):
             return web.json_response({"ok": True})
         return web.json_response({"error": "Key not found"}, status=404)
+
+    # ── Android Devices ──────────────────────────────────────────────────
+
+    @routes.get("/api/android/devices")
+    async def list_android_devices(request: web.Request) -> web.Response:
+        """List all registered Android devices."""
+        android_registry = request.app.get("android_registry")
+        if not android_registry:
+            return web.json_response({"error": "Android registry not available"}, status=503)
+        return web.json_response([n.to_api_dict() for n in android_registry.get_all_nodes()])
+
+    @routes.post("/api/android/devices")
+    async def register_android_device(request: web.Request) -> web.Response:
+        """Register a new Android device."""
+        android_registry = request.app.get("android_registry")
+        if not android_registry:
+            return web.json_response({"error": "Android registry not available"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        name = body.get("name", "").strip()
+        connection_mode = body.get("connectionMode", "usb")
+        device_id = body.get("deviceId", "").strip()
+        ip = body.get("ip", "").strip() or None
+        port = body.get("port")
+        if not name:
+            return web.json_response({"error": "Name is required"}, status=400)
+        if not device_id and connection_mode == "usb":
+            return web.json_response({"error": "Device ID is required for USB"}, status=400)
+        if not ip and connection_mode in ("ip", "mdns"):
+            return web.json_response({"error": "IP address is required"}, status=400)
+
+        # For IP/mDNS, construct device_id from ip:port
+        if connection_mode in ("ip", "mdns") and ip:
+            p = port or 5555
+            device_id = f"{ip}:{p}"
+
+        try:
+            node = android_registry.register(name, connection_mode, device_id, ip=ip, port=port)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=409)
+
+        # Try to connect and get device info
+        await android_registry.check_device(node.id)
+        return web.json_response(node.to_api_dict(), status=201)
+
+    @routes.put("/api/android/devices/{node_id}")
+    async def update_android_device(request: web.Request) -> web.Response:
+        """Update an Android device's settings."""
+        android_registry = request.app.get("android_registry")
+        if not android_registry:
+            return web.json_response({"error": "Android registry not available"}, status=503)
+        node_id = request.match_info["node_id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        node = android_registry.update(node_id, **body)
+        if not node:
+            return web.json_response({"error": "Device not found"}, status=404)
+        return web.json_response(node.to_api_dict())
+
+    @routes.delete("/api/android/devices/{node_id}")
+    async def delete_android_device(request: web.Request) -> web.Response:
+        """Remove an Android device."""
+        android_registry = request.app.get("android_registry")
+        if not android_registry:
+            return web.json_response({"error": "Android registry not available"}, status=503)
+        node_id = request.match_info["node_id"]
+        if android_registry.unregister(node_id):
+            return web.json_response({"ok": True})
+        return web.json_response({"error": "Device not found"}, status=404)
+
+    @routes.get("/api/android/discover")
+    async def discover_android_devices(request: web.Request) -> web.Response:
+        """Discover ADB devices (USB + mDNS) not yet registered."""
+        android_registry = request.app.get("android_registry")
+        if not android_registry:
+            return web.json_response({"error": "Android registry not available"}, status=503)
+
+        # USB devices
+        usb_devices = await android_registry.discover_devices()
+
+        # mDNS devices
+        mdns = request.app.get("mdns_discovery")
+        mdns_devices = []
+        if mdns and mdns.available:
+            registered_ips = set()
+            for n in android_registry.get_all_nodes():
+                if n.ip:
+                    registered_ips.add(n.ip)
+            for dev in mdns.get_discovered():
+                if dev.ip not in registered_ips:
+                    mdns_devices.append(dev.to_dict())
+
+        return web.json_response({"usb": usb_devices, "mdns": mdns_devices})
+
+    @routes.post("/api/android/connect")
+    async def connect_android_device(request: web.Request) -> web.Response:
+        """Connect to an Android device (for IP/mDNS nodes)."""
+        android_registry = request.app.get("android_registry")
+        if not android_registry:
+            return web.json_response({"error": "Android registry not available"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        node_id = body.get("nodeId", "")
+        node = android_registry.get_node(node_id)
+        if not node:
+            return web.json_response({"error": "Device not found"}, status=404)
+        success = await android_registry.connect_device(node)
+        return web.json_response({"ok": success, "status": node.status})
+
+    @routes.post("/api/android/disconnect/{node_id}")
+    async def disconnect_android_device(request: web.Request) -> web.Response:
+        """Disconnect a wireless ADB device."""
+        android_registry = request.app.get("android_registry")
+        if not android_registry:
+            return web.json_response({"error": "Android registry not available"}, status=503)
+        node_id = request.match_info["node_id"]
+        await android_registry.disconnect_device(node_id)
+        return web.json_response({"ok": True})
+
+    @routes.get("/api/android/devices/{node_id}/status")
+    async def android_device_status(request: web.Request) -> web.Response:
+        """Check connection health of an Android device."""
+        android_registry = request.app.get("android_registry")
+        if not android_registry:
+            return web.json_response({"error": "Android registry not available"}, status=503)
+        node_id = request.match_info["node_id"]
+        node = android_registry.get_node(node_id)
+        if not node:
+            return web.json_response({"error": "Device not found"}, status=404)
+        online = await android_registry.check_device(node_id)
+        return web.json_response({"online": online, "status": node.status, "capabilities": node.capabilities})
+
+    @routes.post("/api/android/devices/{node_id}/webrtc/offer")
+    async def android_webrtc_offer(request: web.Request) -> web.Response:
+        """Handle WebRTC offer for Android screen streaming.
+
+        The hub creates a WebRTC peer connection with a ScrcpyVideoTrack
+        as the video source, then returns the SDP answer.
+        """
+        android_registry = request.app.get("android_registry")
+        if not android_registry:
+            return web.json_response({"error": "Android registry not available"}, status=503)
+        node_id = request.match_info["node_id"]
+        node = android_registry.get_node(node_id)
+        if not node:
+            return web.json_response({"error": "Device not found"}, status=404)
+        if node.status != "online":
+            return web.json_response({"error": "Device is offline"}, status=503)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        sdp = body.get("sdp", "")
+        sdp_type = body.get("sdpType", "offer")
+        if not sdp:
+            return web.json_response({"error": "SDP is required"}, status=400)
+
+        try:
+            from aiortc import RTCPeerConnection, RTCSessionDescription
+            from server.scrcpy_client import ScrcpyClient
+            from server.scrcpy_track import ScrcpyVideoTrack
+
+            # Get or start scrcpy client for this device
+            if not node.scrcpy_client:
+                node.scrcpy_client = ScrcpyClient(
+                    device_id=node.device_id,
+                    max_size=1080,
+                    max_fps=30,
+                )
+            if not node.scrcpy_client.running:
+                await node.scrcpy_client.start()
+
+            # Create WebRTC peer connection
+            ice_servers = webrtc_manager.get_client_ice_servers() if webrtc_manager else []
+            from aiortc import RTCConfiguration, RTCIceServer
+            config = RTCConfiguration(
+                iceServers=[RTCIceServer(urls=s.get("urls", []), username=s.get("username"), credential=s.get("credential"))
+                            for s in ice_servers] if ice_servers else []
+            )
+            pc = RTCPeerConnection(configuration=config)
+
+            # Add video track
+            video_track = ScrcpyVideoTrack(node.scrcpy_client, target_fps=30)
+            pc.addTrack(video_track)
+
+            # Set remote description (browser's offer)
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=sdp_type))
+
+            # Create and set local description (our answer)
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+
+            return web.json_response({
+                "sdp": pc.localDescription.sdp,
+                "sdpType": pc.localDescription.type,
+            })
+        except Exception:
+            logger.exception("[routes] Android WebRTC offer failed for %s", node_id)
+            return web.json_response({"error": "WebRTC setup failed"}, status=500)
+
+    # Also include Android nodes in the combined /api/nodes list
+    @routes.get("/api/nodes/all")
+    async def list_all_nodes(request: web.Request) -> web.Response:
+        """List all nodes (desktop + Android) with their capabilities."""
+        result: list[dict[str, Any]] = []
+
+        # Local node
+        if node_registry:
+            local = node_registry.local_node
+            local_dict = local.to_api_dict()
+            local_dict["nodeType"] = "desktop"
+            local_dict["canRunSessions"] = True
+            local_dict["hasDisplay"] = True
+            result.append(local_dict)
+
+            # Remote desktop nodes
+            for node in node_registry.get_all_nodes():
+                if node.id == "local":
+                    continue
+                d = node.to_api_dict()
+                d["nodeType"] = "desktop"
+                d["canRunSessions"] = True
+                d["hasDisplay"] = True
+                result.append(d)
+
+        # Android nodes
+        android_registry = request.app.get("android_registry")
+        if android_registry:
+            for node in android_registry.get_all_nodes():
+                result.append(node.to_api_dict())
+
+        return web.json_response(result)
 
     return routes
 
