@@ -807,8 +807,8 @@ class WsBridge:
 
     def register_computer_use_agent(self, session_id: str, agent: Any) -> None:
         """Register a ComputerUseAgent for a session."""
-        from server.ui_tars_agent import UITarsAgent
-        assert isinstance(agent, UITarsAgent)
+        from server.computer_use_agent import ComputerUseAgent
+        assert isinstance(agent, ComputerUseAgent)
 
         session = self.get_or_create_session(session_id, "computer-use")
         session.backend_type = "computer-use"
@@ -842,7 +842,7 @@ class WsBridge:
             "session": {
                 "session_id": session_id,
                 "backend_type": "computer-use",
-                "model": agent._vlm.model_name if hasattr(agent, '_vlm') else "ui-tars",
+                "model": agent.model_name,
                 "cwd": "",
                 "tools": [],
                 "permissionMode": "bypassPermissions",

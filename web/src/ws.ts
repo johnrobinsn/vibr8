@@ -911,7 +911,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
     }
 
     case "voice_transcript_preview": {
-      store.setVoicePreview(sessionId, data.transcript ?? null);
+      store.setVoicePreview(sessionId, data.transcript || null);
       break;
     }
 

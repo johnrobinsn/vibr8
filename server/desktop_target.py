@@ -80,6 +80,9 @@ class DesktopTarget:
         self.on_disconnect: Callable[[], Awaitable[None]] | None = None
         self.on_reconnect: Callable[[], Awaitable[None]] | None = None
 
+        # Frame subscribers — synchronous callbacks fired on every new frame
+        self._frame_callbacks: list[Callable[[av.VideoFrame], None]] = []
+
     @property
     def native_width(self) -> int:
         return self._native_width
@@ -123,6 +126,11 @@ class DesktopTarget:
     async def get_frame(self) -> av.VideoFrame | None:
         """Return the most recently received video frame."""
         return self._latest_frame
+
+    def on_frame(self, callback: Callable[[av.VideoFrame], None]) -> Callable[[], None]:
+        """Subscribe to raw frames from the drain loop. Returns unsubscribe function."""
+        self._frame_callbacks.append(callback)
+        return lambda: self._frame_callbacks.remove(callback) if callback in self._frame_callbacks else None
 
     async def inject(self, event: dict) -> None:
         """Send an input event on the data channel (same as browser)."""
@@ -246,6 +254,11 @@ class DesktopTarget:
             try:
                 frame = await track.recv()
                 self._latest_frame = frame
+                for cb in self._frame_callbacks:
+                    try:
+                        cb(frame)
+                    except Exception:
+                        pass  # never let a subscriber break the drain loop
                 # Update resolution if it changes (e.g. display resize)
                 if frame.width != self._native_width or frame.height != self._native_height:
                     self._native_width = frame.width

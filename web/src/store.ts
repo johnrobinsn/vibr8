@@ -104,8 +104,8 @@ interface AppState {
   // Command palette
   commandPaletteOpen: boolean;
 
-  // Second screen pushed content
-  secondScreenContent: { type: string; content: string; filename?: string; nodeId?: string } | null;
+  // Second screen pushed content (_pushId auto-increments to force remount on each push)
+  secondScreenContent: { type: string; content: string; filename?: string; nodeId?: string; _pushId?: number } | null;
   mirroredSessionId: string | null;
   secondScreenScale: number;
   secondScreenTvSafe: number; // 0 = off, >0 = padding percent
@@ -128,7 +128,7 @@ interface AppState {
 
   // Actions
   setClientRole: (role: "primary" | "secondscreen") => void;
-  setSecondScreenContent: (content: { type: string; content: string; filename?: string; nodeId?: string } | null) => void;
+  setSecondScreenContent: (content: { type: string; content: string; filename?: string; nodeId?: string; _pushId?: number } | null) => void;
   setMirroredSessionId: (id: string | null) => void;
   setSecondScreenScale: (scale: number) => void;
   setSecondScreenTvSafe: (padding: number) => void;
@@ -304,10 +304,7 @@ export const useStore = create<AppState>((set) => ({
   activeAudioInputLabel: null,
   pendingFocus: null,
   commandPaletteOpen: false,
-  secondScreenContent: (() => {
-    const raw = localStorage.getItem("cc-second-screen-content");
-    try { return raw ? JSON.parse(raw) : null; } catch { return null; }
-  })(),
+  secondScreenContent: null,
   mirroredSessionId: null,
   secondScreenScale: parseFloat(localStorage.getItem("cc-second-screen-scale") || "1.5"),
   secondScreenClientName: null,
@@ -331,11 +328,11 @@ export const useStore = create<AppState>((set) => ({
   setClientRole: (role) => set({ clientRole: role }),
   setSecondScreenContent: (content) => {
     if (content) {
-      localStorage.setItem("cc-second-screen-content", JSON.stringify(content));
+      const prevId = useStore.getState().secondScreenContent?._pushId ?? 0;
+      set({ secondScreenContent: { ...content, _pushId: prevId + 1 } });
     } else {
-      localStorage.removeItem("cc-second-screen-content");
+      set({ secondScreenContent: null });
     }
-    set({ secondScreenContent: content });
   },
   setMirroredSessionId: (id) => set({ mirroredSessionId: id }),
   setSecondScreenScale: (scale) => {

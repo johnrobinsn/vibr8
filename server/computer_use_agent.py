@@ -34,6 +34,13 @@ class ComputerUseAgent(Protocol):
 
     session_id: str
 
+    # ── Metadata ─────────────────────────────────────────────────────────
+
+    @property
+    def model_name(self) -> str:
+        """Human-readable model identifier for display."""
+        ...
+
     # ── Lifecycle ────────────────────────────────────────────────────────
 
     async def start(self) -> None:

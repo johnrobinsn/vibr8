@@ -146,7 +146,8 @@ export function Devices() {
         api.listDeviceTokens(),
         api.secondScreenList(),
       ]);
-      setTokens(tokenRes.tokens);
+      // Filter out device tokens created for second screens (they show in the screens section)
+      setTokens(tokenRes.tokens.filter((t: TokenInfo) => !t.name.startsWith("Second Screen (")));
       setScreens(screenList);
     } catch {
       // ignore load errors — one or both may fail if auth disabled

@@ -16,24 +16,14 @@ import logging
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Awaitable, Protocol, runtime_checkable
+from typing import Any, Callable, Awaitable
 
-import av
 from PIL import Image
 
+from server.agent_registry import AgentTarget, StatusCallback
 from server.computer_use_agent import ExecutionMode
 from server.ui_tars_actions import parse_action, execute_action
 from server.vlm import LoadedModel, run_inference
-
-
-@runtime_checkable
-class AgentTarget(Protocol):
-    """Interface for any target the agent can control (desktop or Android)."""
-
-    async def start(self) -> Any: ...
-    async def stop(self) -> None: ...
-    async def get_frame(self) -> av.VideoFrame | None: ...
-    async def inject(self, event: dict[str, Any]) -> None: ...
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +92,11 @@ class UITarsAgent:
         # Connection gate — cleared = connection down, set = connected (internal)
         self._connection_gate = asyncio.Event()
         self._connection_gate.set()  # assume connected until told otherwise
+
+    @property
+    def model_name(self) -> str:
+        """Human-readable model identifier for display."""
+        return self._vlm.model_name
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -484,3 +479,89 @@ class UITarsAgent:
             "iterations": iterations,
             "timestamp": int(time.time() * 1000),
         })
+
+
+# ── Factory & Registration ───────────────────────────────────────────────
+
+# VLM singleton — lazy-loaded on first session, shared across all UITarsAgent instances.
+_vlm_model: LoadedModel | None = None
+_vlm_loading: bool = False
+
+
+async def _get_vlm(status_cb: StatusCallback | None) -> LoadedModel:
+    """Load VLM on first use. Sends status messages via callback."""
+    global _vlm_model, _vlm_loading
+    if _vlm_model is not None:
+        return _vlm_model
+    if _vlm_loading:
+        while _vlm_loading:
+            await asyncio.sleep(0.5)
+        assert _vlm_model is not None
+        return _vlm_model
+
+    _vlm_loading = True
+    if status_cb:
+        await status_cb({"type": "status_change", "status": "running"})
+        await status_cb({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": "Loading vision model..."},
+            "parent_tool_use_id": None,
+            "timestamp": int(time.time() * 1000),
+        })
+    try:
+        from server.vlm import load_model
+        loop = asyncio.get_running_loop()
+        _vlm_model = await loop.run_in_executor(None, load_model)
+        if status_cb:
+            await status_cb({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": f"Vision model ready ({_vlm_model.load_time:.1f}s, {_vlm_model.vram_usage_mb() or 0:.0f} MB VRAM)",
+                },
+                "parent_tool_use_id": None,
+                "timestamp": int(time.time() * 1000),
+            })
+    finally:
+        _vlm_loading = False
+    return _vlm_model
+
+
+async def create_ui_tars_agent(
+    session_id: str,
+    target: AgentTarget,
+    config: dict[str, Any],
+    status_cb: StatusCallback | None = None,
+) -> UITarsAgent:
+    """Factory function for UITarsAgent. Handles lazy VLM loading."""
+    vlm = await _get_vlm(status_cb)
+    agent = UITarsAgent(
+        session_id=session_id,
+        target=target,
+        vlm=vlm,
+        max_iterations=config.get("max_iterations", DEFAULT_MAX_ITERATIONS),
+        wait_after_action=config.get("wait_after_action", DEFAULT_WAIT_AFTER_ACTION),
+    )
+    return agent
+
+
+# Register with the agent registry
+from server.agent_registry import register_agent_type, AgentTypeInfo
+
+register_agent_type(AgentTypeInfo(
+    type_id="ui-tars",
+    display_name="UI-TARS 7B (local GPU)",
+    factory=create_ui_tars_agent,
+    resource_type="local-gpu",
+    config_schema={
+        "type": "object",
+        "properties": {
+            "max_iterations": {"type": "integer", "default": DEFAULT_MAX_ITERATIONS},
+            "wait_after_action": {"type": "number", "default": DEFAULT_WAIT_AFTER_ACTION},
+        },
+    },
+    default_config={
+        "max_iterations": DEFAULT_MAX_ITERATIONS,
+        "wait_after_action": DEFAULT_WAIT_AFTER_ACTION,
+    },
+))

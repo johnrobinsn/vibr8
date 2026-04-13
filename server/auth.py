@@ -45,6 +45,8 @@ PUBLIC_PREFIXES = (
     "/api/pairing/status/",
     "/api/ring0/",
     "/api/nodes/register",
+    "/api/second-screen/pair-code",
+    "/api/second-screen/status",
     "/assets/",
     "/sw.js",
     "/manifest.json",
@@ -325,8 +327,14 @@ class AuthManager:
             entry["pairedUser"] = username
             entry["name"] = name
             client_id = entry.get("clientId", "")
-            logger.info("[auth] Confirmed second-screen pairing for user %s, client %s", username, client_id[:8])
-            return {"type": "second-screen", "clientId": client_id, "pairedUser": username}
+            # Create a device token so the second screen can authenticate API calls
+            token_result = self.create_device_token(username, f"Second Screen ({name})")
+            entry["token"] = token_result["token"]
+            entry["tokenId"] = token_result["tokenId"]
+            logger.info("[auth] Confirmed second-screen pairing for user %s, client %s, token %s",
+                        username, client_id[:8], token_result["tokenId"])
+            return {"type": "second-screen", "clientId": client_id, "pairedUser": username,
+                    "token": token_result["token"], "tokenId": token_result["tokenId"]}
 
     def get_pairing_status(self, code: str, ip: str) -> dict:
         """Check pairing status. Returns {status, ...}. Single-use token delivery for native."""
@@ -345,8 +353,9 @@ class AuthManager:
         else:  # second-screen
             client_id = entry.get("clientId", "")
             paired_user = entry.get("pairedUser", "")
-            del self._pairing_codes[code]
-            return {"status": "complete", "clientId": client_id, "pairedUser": paired_user}
+            token = entry.get("token", "")
+            del self._pairing_codes[code]  # single-use
+            return {"status": "complete", "clientId": client_id, "pairedUser": paired_user, "token": token}
 
     def _purge_expired_pairings(self) -> None:
         now = time.time()

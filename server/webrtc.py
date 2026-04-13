@@ -598,6 +598,21 @@ class WebRTCManager:
                     return self._ws_bridge._client_sessions.get(client_id)
                 return None
 
+            async def _clear_voice_preview() -> None:
+                """Send empty preview to clear stale interim text from the UI."""
+                if not self._ws_bridge:
+                    return
+                target_sid = None
+                if self._ring0_manager and self._ring0_manager.is_enabled:
+                    target_sid = self._ring0_manager.session_id
+                if not target_sid:
+                    target_sid = _resolve_session()
+                if target_sid:
+                    await self._ws_bridge.send_to_browsers(target_sid, {
+                        "type": "voice_transcript_preview",
+                        "transcript": "",
+                    })
+
             if event_type == "segment_confirmed":
                 # Log individual segment audio (moved from final_transcript)
                 audio = data.get("audio")
@@ -779,6 +794,8 @@ class WebRTCManager:
                 if self.is_guard_enabled(client_id):
                     if not guard_word_found:
                         logger.info("[guard] client %s: no guard word, discarding", client_id)
+                        # Clear any stale interim preview from the UI
+                        await _clear_voice_preview()
                         return
 
                 await _submit_text(transcript)
@@ -791,6 +808,11 @@ class WebRTCManager:
                 # Suppress during voice modes (note mode, etc.)
                 if self.get_voice_mode(client_id):
                     return
+                # Suppress if guard is enabled and no guard word in interim text
+                if self.is_guard_enabled(client_id):
+                    text = data.get("transcript", "")
+                    if not self._find_guard_word(text):
+                        return
                 if not self._ws_bridge:
                     return
                 target_sid = None

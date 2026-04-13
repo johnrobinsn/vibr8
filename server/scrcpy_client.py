@@ -94,6 +94,9 @@ class ScrcpyClient:
         self._video_reader: asyncio.StreamReader | None = None
         self._control_writer: asyncio.StreamWriter | None = None
 
+        # Frame subscribers — synchronous callbacks fired on every decoded frame
+        self._frame_callbacks: list[Any] = []
+
     @property
     def screen_width(self) -> int:
         return self._screen_width
@@ -204,6 +207,11 @@ class ScrcpyClient:
     async def get_frame(self) -> av.VideoFrame | None:
         """Return the most recent decoded video frame (non-blocking)."""
         return self._latest_frame
+
+    def on_frame(self, callback: Any) -> Any:
+        """Subscribe to raw decoded frames. Returns unsubscribe function."""
+        self._frame_callbacks.append(callback)
+        return lambda: self._frame_callbacks.remove(callback) if callback in self._frame_callbacks else None
 
     # ── Input injection ───────────────────────────────────────────────────
 
@@ -462,6 +470,11 @@ class ScrcpyClient:
                         frames = codec.decode(packet)
                         for frame in frames:
                             self._latest_frame = frame
+                            for cb in self._frame_callbacks:
+                                try:
+                                    cb(frame)
+                                except Exception:
+                                    pass
                     except av.error.InvalidDataError:
                         # Corrupt frame — skip
                         pass
@@ -504,6 +517,11 @@ class ScrcpyClient:
                             self._screen_width = frame.width
                             self._screen_height = frame.height
                         self._latest_frame = frame
+                        for cb in self._frame_callbacks:
+                            try:
+                                cb(frame)
+                            except Exception:
+                                pass
                 except av.error.InvalidDataError:
                     pass
             self._codec_ctx = new_ctx

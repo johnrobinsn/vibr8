@@ -419,57 +419,31 @@ def create_app() -> web.Application:
     launcher.on_codex_adapter_created(on_codex_adapter)
 
     # When a computer-use session is created, spin up the agent and register it
-    from server.ui_tars_agent import UITarsAgent
     from server.desktop_target import DesktopTarget
     from server.adb_target import AdbTarget
+    from server.agent_registry import get_agent_type
+
+    # Trigger agent registration by importing agent modules
+    import server.ui_tars_agent  # noqa: F401 — registers "ui-tars" agent type
 
     # Reconnect signals per node — set when a node tunnel reconnects.
     # Stored on app so handle_node_ws can access it via request.app.
     _node_reconnect_signals: dict[str, list[asyncio.Event]] = {}
     app["node_reconnect_signals"] = _node_reconnect_signals
 
-    # Lazy-load VLM on first computer-use session (avoids ~15s + 8GB VRAM on startup)
-    _vlm_model = None
-    _vlm_loading = False
-
-    async def _get_vlm(session_id: str):
-        """Load VLM on first use.  Sends status messages to the browser session."""
-        nonlocal _vlm_model, _vlm_loading
-        if _vlm_model is not None:
-            return _vlm_model
-        if _vlm_loading:
-            # Another session is already loading — wait for it
-            while _vlm_loading:
-                await asyncio.sleep(0.5)
-            return _vlm_model
-
-        _vlm_loading = True
-        await ws_bridge.send_to_browsers(session_id, {"type": "status_change", "status": "running"})
-        await ws_bridge.send_to_browsers(session_id, {
-            "type": "assistant",
-            "message": {"role": "assistant", "content": "Loading vision model..."},
-            "parent_tool_use_id": None,
-            "timestamp": int(time.time() * 1000),
-        })
-        try:
-            from server.vlm import load_model
-            loop = asyncio.get_running_loop()
-            _vlm_model = await loop.run_in_executor(None, load_model)
-            await ws_bridge.send_to_browsers(session_id, {
-                "type": "assistant",
-                "message": {"role": "assistant", "content": f"Vision model ready ({_vlm_model.load_time:.1f}s, {_vlm_model.vram_usage_mb() or 0:.0f} MB VRAM)"},
-                "parent_tool_use_id": None,
-                "timestamp": int(time.time() * 1000),
-            })
-        finally:
-            _vlm_loading = False
-        return _vlm_model
-
     def on_computer_use_created(session_id: str, info: object) -> None:
         node_id = getattr(info, "nodeId", None) or ""
+        agent_type_id = getattr(info, "agentType", None) or "ui-tars"
+        agent_config = getattr(info, "agentConfig", None) or {}
         agent_client_id = f"agent-{session_id[:8]}"
         ice_servers = webrtc_manager.get_client_ice_servers() if webrtc_manager else []
         reconnect_signal: asyncio.Event | None = None
+
+        # Look up agent type from registry
+        agent_type = get_agent_type(agent_type_id)
+        if not agent_type:
+            logger.error("[server] Unknown agent type %r for session %s", agent_type_id, session_id[:8])
+            return
 
         # Pre-create ws_bridge session with correct backend type so browser
         # connects don't trigger CLI relaunch while VLM is still loading
@@ -497,19 +471,19 @@ def create_app() -> web.Application:
                 )
 
             target = AdbTarget(scrcpy_client=android_node.scrcpy_client)
+            _factory = agent_type.factory
 
             async def _init_agent() -> None:
                 try:
-                    logger.info("[server] Initializing Android CU agent for %s (device=%s)...",
-                                session_id[:8], android_node.name)
-                    vlm = await _get_vlm(session_id)
-                    logger.info("[server] VLM ready, starting ADB target for %s...", session_id[:8])
-                    agent = UITarsAgent(session_id=session_id, target=target, vlm=vlm)
+                    logger.info("[server] Initializing %s agent for %s (device=%s)...",
+                                agent_type_id, session_id[:8], android_node.name)
+                    status_cb = lambda msg: ws_bridge.send_to_browsers(session_id, msg)
+                    agent = await _factory(session_id, target, agent_config, status_cb)
                     await agent.start()
-                    logger.info("[server] ADB target connected, registering agent for %s", session_id[:8])
+                    logger.info("[server] Agent started, registering for %s", session_id[:8])
                     ws_bridge.register_computer_use_agent(session_id, agent)
                 except Exception:
-                    logger.exception("[server] Failed to start Android CU agent for %s", session_id[:8])
+                    logger.exception("[server] Failed to start CU agent for %s", session_id[:8])
 
             spawn(_init_agent())
             return
@@ -555,15 +529,15 @@ def create_app() -> web.Application:
             ice_servers=ice_servers,
             reconnect_signal=reconnect_signal,
         )
+        _factory = agent_type.factory
 
         async def _init_agent() -> None:
             try:
-                logger.info("[server] Initializing CU agent for %s (node=%s)...", session_id[:8], node_id or "local")
-                vlm = await _get_vlm(session_id)
-                logger.info("[server] VLM ready, starting desktop target for %s...", session_id[:8])
-                agent = UITarsAgent(session_id=session_id, target=target, vlm=vlm)
+                logger.info("[server] Initializing %s agent for %s (node=%s)...", agent_type_id, session_id[:8], node_id or "local")
+                status_cb = lambda msg: ws_bridge.send_to_browsers(session_id, msg)
+                agent = await _factory(session_id, target, agent_config, status_cb)
                 await agent.start()
-                logger.info("[server] Desktop target connected, registering agent for %s", session_id[:8])
+                logger.info("[server] Agent started, registering for %s", session_id[:8])
                 ws_bridge.register_computer_use_agent(session_id, agent)
             except Exception:
                 logger.exception("[server] Failed to start computer-use agent for %s", session_id[:8])

@@ -15,6 +15,7 @@ export function DesktopView({ sessionId: _sessionId, embedded = false }: { sessi
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showToolbar, setShowToolbar] = useState(true);
   const [videoResolution, setVideoResolution] = useState<{ w: number; h: number } | null>(null);
+  const [videoReady, setVideoReady] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // ── Virtual keyboard state ──────────────────────────────────────────────
@@ -60,12 +61,17 @@ export function DesktopView({ sessionId: _sessionId, embedded = false }: { sessi
     const video = videoRef.current;
     if (!video) return;
     if (desktopRemoteStream) {
+      setVideoReady(false);
       video.srcObject = desktopRemoteStream;
+      const onLoadedData = () => setVideoReady(true);
+      video.addEventListener("loadeddata", onLoadedData);
       video.play().catch(() => {});
       // Auto-focus container so keyboard events work immediately
       containerRef.current?.focus();
+      return () => video.removeEventListener("loadeddata", onLoadedData);
     } else {
       video.srcObject = null;
+      setVideoReady(false);
     }
   }, [desktopRemoteStream]);
 
@@ -440,7 +446,7 @@ export function DesktopView({ sessionId: _sessionId, embedded = false }: { sessi
         playsInline
         muted
         style={videoStyle}
-        className={`w-full h-full ${scaleMode === "fit" ? "object-contain" : "object-cover"} cursor-default`}
+        className={`w-full h-full ${scaleMode === "fit" ? "object-contain" : "object-cover"} cursor-default${!videoReady ? " invisible" : ""}`}
         onMouseMove={handleMouseMove}
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}

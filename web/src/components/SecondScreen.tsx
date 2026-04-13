@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { useStore } from "../store.js";
-import { api } from "../api.js";
+import { api, setDeviceToken, getDeviceToken } from "../api.js";
 import { MessageFeed } from "./MessageFeed.js";
 import { MarkdownContent } from "./MessageBubble.js";
 import { handleMessage } from "../ws.js";
@@ -36,9 +36,11 @@ export function SecondScreen() {
   const tvSafe = useStore((s) => s.secondScreenTvSafe);
   const secondScreenDarkMode = useStore((s) => s.secondScreenDarkMode);
 
-  // Set client role to secondscreen on mount
+  // Set client role to secondscreen on mount; clear any stale pushed content
   useEffect(() => {
     useStore.getState().setClientRole("secondscreen");
+    useStore.getState().setSecondScreenContent(null);
+    localStorage.removeItem("cc-second-screen-content"); // clean up legacy persistence
     return () => {
       useStore.getState().setClientRole("primary");
     };
@@ -94,6 +96,9 @@ export function SecondScreen() {
         const status = await api.secondScreenStatus(clientId);
         if (cancelled) return;
         if (status.paired && status.role === "secondscreen" && status.pairedUser) {
+          if ((status as Record<string, unknown>).deviceToken) {
+            setDeviceToken((status as Record<string, unknown>).deviceToken as string);
+          }
           setPairingState("paired");
           setPairedUser(status.pairedUser);
           return;
@@ -136,7 +141,9 @@ export function SecondScreen() {
     function connect() {
       if (!alive) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const url = `${proto}//${location.host}/ws/browser/${RING0_SESSION_ID}?clientId=${encodeURIComponent(clientId)}&role=secondscreen`;
+      const token = getDeviceToken();
+      const tokenParam = token ? `&token=${encodeURIComponent(token)}` : "";
+      const url = `${proto}//${location.host}/ws/browser/${RING0_SESSION_ID}?clientId=${encodeURIComponent(clientId)}&role=secondscreen${tokenParam}`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
@@ -199,7 +206,9 @@ export function SecondScreen() {
     function connect() {
       if (!alive) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const url = `${proto}//${location.host}/ws/browser/${mirroredSessionId}?clientId=${encodeURIComponent(clientId)}&role=secondscreen&mirror=true`;
+      const token = getDeviceToken();
+      const tokenParam = token ? `&token=${encodeURIComponent(token)}` : "";
+      const url = `${proto}//${location.host}/ws/browser/${mirroredSessionId}?clientId=${encodeURIComponent(clientId)}&role=secondscreen&mirror=true${tokenParam}`;
       const ws = new WebSocket(url);
       mirrorWsRef.current = ws;
 
@@ -248,6 +257,10 @@ export function SecondScreen() {
       try {
         const status = await api.secondScreenStatus(clientId);
         if (status.paired && status.role === "secondscreen") {
+          // Store device token if provided (single-use delivery from server)
+          if ((status as Record<string, unknown>).deviceToken) {
+            setDeviceToken((status as Record<string, unknown>).deviceToken as string);
+          }
           setPairingState("paired");
           setPairedUser(status.pairedUser ?? null);
           setPairingCode(null);
@@ -262,6 +275,7 @@ export function SecondScreen() {
 
   const handleUnpair = useCallback(async () => {
     await api.secondScreenUnpair(clientId);
+    setDeviceToken(null);
     setPairingState("unpaired");
     setPairedUser(null);
     setPairingCode(null);
@@ -377,7 +391,7 @@ export function SecondScreen() {
       ) : (
         <div className="flex-1 flex flex-col min-h-0" style={{ zoom: scale }}>
           {pushedContent ? (
-            <PushedContentView content={pushedContent} onHome={handleGoHome} />
+            <PushedContentView key={pushedContent._pushId ?? 0} content={pushedContent} onHome={handleGoHome} />
           ) : (
             <MessageFeed sessionId={displaySessionId} />
           )}
@@ -611,7 +625,9 @@ function DesktopViewer({ onHome, nodeId }: { onHome: () => void; nodeId?: string
       return;
     }
 
-    const viewerId = viewerIdRef.current;
+    // Unique ID per effect invocation so StrictMode cleanup only kills its own connection
+    const viewerId = `ss-viewer-${crypto.randomUUID()}`;
+    viewerIdRef.current = viewerId;
     let cancelled = false;
 
     connectDesktopViewer(viewerId, nodeId)

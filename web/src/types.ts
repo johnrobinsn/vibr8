@@ -56,6 +56,7 @@ export interface SdkSessionInfo {
   name?: string;
   backendType?: BackendType;
   nodeId?: string;
+  agentType?: string;
   lastPromptedAt?: number;
   isRing0?: boolean;
   agentState?: "idle" | "running" | "waiting_for_permission" | "compacting";

@@ -288,19 +288,26 @@ def create_routes(
         # Handle second-screen registration
         if result["type"] == "second-screen":
             client_id = result["clientId"]
-            _second_screen_pairings[client_id] = {
+            device_token = result.get("token", "")
+            pairing_entry: dict[str, Any] = {
                 "pairedUser": username,
                 "pairedAt": time.time(),
                 "enabled": True,
             }
+            if device_token:
+                pairing_entry["pendingToken"] = device_token
+            _second_screen_pairings[client_id] = pairing_entry
             _save_pairings()
-            # Push notification to second screen via WebSocket
+            # Push notification to second screen via WebSocket (includes device token)
             ws = ws_bridge._ws_by_client.get(client_id)
             if ws and not ws.closed:
-                await ws.send_str(json.dumps({
+                pair_msg: dict[str, Any] = {
                     "type": "second_screen_paired",
                     "pairedUser": username,
-                }))
+                }
+                if device_token:
+                    pair_msg["deviceToken"] = device_token
+                await ws.send_str(json.dumps(pair_msg))
             from server.ring0_events import Ring0Event
             await ws_bridge.emit_ring0_event(Ring0Event(fields={
                 "type": "second_screen_paired",
@@ -408,6 +415,8 @@ def create_routes(
                     cwd=body.get("cwd") or os.getcwd(),
                     backendType="computer-use",
                     nodeId=target_node or None,
+                    agentType=body.get("agentType"),
+                    agentConfig=body.get("agentConfig"),
                 )
                 session = launcher.launch(opts)
                 name = body.get("name") or session_names.generate_random_name()
@@ -492,6 +501,20 @@ def create_routes(
         except Exception as e:
             logger.exception(f"[routes] Failed to create session: {e}")
             return web.json_response({"error": str(e)}, status=500)
+
+    @routes.get("/api/agents")
+    async def list_agents(request: web.Request) -> web.Response:
+        from server.agent_registry import list_agent_types
+        agents = []
+        for info in list_agent_types():
+            agents.append({
+                "id": info.type_id,
+                "name": info.display_name,
+                "resourceType": info.resource_type,
+                "configSchema": info.config_schema,
+                "defaultConfig": info.default_config,
+            })
+        return web.json_response(agents)
 
     @routes.get("/api/sessions")
     async def list_sessions(request: web.Request) -> web.Response:
@@ -1885,18 +1908,27 @@ def create_routes(
             client_id = entry["secondScreenClientId"]
             _pairing_codes.pop(code)
 
-        _second_screen_pairings[client_id] = {
+        # Extract device token if auth created one
+        device_token = result.get("token", "") if auth_manager and auth_manager.enabled else ""
+
+        pairing_entry: dict[str, Any] = {
             "pairedUser": username,
             "pairedAt": time.time(),
             "enabled": True,
         }
+        if device_token:
+            pairing_entry["pendingToken"] = device_token  # single-use, cleared after delivery
+        _second_screen_pairings[client_id] = pairing_entry
         _save_pairings()
         ws = ws_bridge._ws_by_client.get(client_id)
         if ws and not ws.closed:
-            await ws.send_str(json.dumps({
+            pair_msg: dict[str, Any] = {
                 "type": "second_screen_paired",
                 "pairedUser": username,
-            }))
+            }
+            if device_token:
+                pair_msg["deviceToken"] = device_token
+            await ws.send_str(json.dumps(pair_msg))
         from server.ring0_events import Ring0Event
         await ws_bridge.emit_ring0_event(Ring0Event(fields={
             "type": "second_screen_paired",
@@ -1915,12 +1947,18 @@ def create_routes(
         # Check if this client is a paired second screen
         pairing = _second_screen_pairings.get(client_id)
         if pairing:
-            return web.json_response({
+            resp: dict[str, Any] = {
                 "paired": True,
                 "role": "secondscreen",
                 "pairedUser": pairing["pairedUser"],
                 "pairedAt": pairing["pairedAt"],
-            })
+            }
+            # Deliver device token (single-use: cleared after first delivery)
+            pending_token = pairing.pop("pendingToken", None)
+            if pending_token:
+                resp["deviceToken"] = pending_token
+                _save_pairings()
+            return web.json_response(resp)
 
         # Check if the requesting user has any second screens paired
         username = request.get("auth_user")

@@ -2,8 +2,38 @@ import type { SdkSessionInfo, NodeInfo, AndroidDeviceInfo, DiscoveredDevice, Mdn
 
 const BASE = "/api";
 
+// Device token for second screen authentication (set after pairing)
+let _deviceToken: string | null = null;
+
+export function setDeviceToken(token: string | null): void {
+  _deviceToken = token;
+  if (token) {
+    localStorage.setItem("vibr8_device_token", token);
+  } else {
+    localStorage.removeItem("vibr8_device_token");
+  }
+}
+
+export function getDeviceToken(): string | null {
+  if (_deviceToken) return _deviceToken;
+  const stored = localStorage.getItem("vibr8_device_token");
+  if (stored) _deviceToken = stored;
+  return _deviceToken;
+}
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...extra };
+  const token = getDeviceToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
+
 function checkAuth(res: Response): void {
   if (res.status === 401) {
+    // Don't reload if we're a second screen device — the token may have been revoked
+    if (getDeviceToken()) {
+      throw new Error("Device token rejected");
+    }
     window.location.reload();
     throw new Error("Session expired");
   }
@@ -12,7 +42,7 @@ function checkAuth(res: Response): void {
 async function post<T = unknown>(path: string, body?: object): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: body ? JSON.stringify(body) : undefined,
   });
   checkAuth(res);
@@ -24,7 +54,7 @@ async function post<T = unknown>(path: string, body?: object): Promise<T> {
 }
 
 async function get<T = unknown>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
   checkAuth(res);
   if (!res.ok) throw new Error(res.statusText);
   return res.json();
@@ -33,7 +63,7 @@ async function get<T = unknown>(path: string): Promise<T> {
 async function put<T = unknown>(path: string, body?: object): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -46,7 +76,7 @@ async function put<T = unknown>(path: string, body?: object): Promise<T> {
 async function patch<T = unknown>(path: string, body?: object): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -59,7 +89,7 @@ async function patch<T = unknown>(path: string, body?: object): Promise<T> {
 async function del<T = unknown>(path: string, body?: object): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: "DELETE",
-    headers: body ? { "Content-Type": "application/json" } : undefined,
+    headers: authHeaders(body ? { "Content-Type": "application/json" } : undefined),
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -82,6 +112,8 @@ export interface CreateSessionOpts {
   useWorktree?: boolean;
   backend?: "claude" | "codex" | "terminal" | "computer-use";
   nodeId?: string;
+  agentType?: string;
+  agentConfig?: Record<string, unknown>;
 }
 
 export interface BackendInfo {
@@ -240,6 +272,9 @@ export const api = {
 
   listSessions: (nodeId?: string) =>
     get<SdkSessionInfo[]>(nodeId ? `/sessions?nodeId=${encodeURIComponent(nodeId)}` : "/sessions"),
+
+  listAgents: () =>
+    get<{ id: string; name: string; resourceType: string; configSchema: Record<string, unknown>; defaultConfig: Record<string, unknown> }[]>("/agents"),
 
   killSession: (sessionId: string) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/kill`),

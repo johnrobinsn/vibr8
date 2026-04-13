@@ -49,6 +49,8 @@ class SdkSessionInfo:
     nodeId: Optional[str] = None
     backendType: Optional[BackendType] = None
     mcpConfig: Optional[str] = None
+    agentType: Optional[str] = None
+    agentConfig: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -87,6 +89,8 @@ class LaunchOptions:
     sessionId: Optional[str] = None
     resumeSessionId: Optional[str] = None
     nodeId: Optional[str] = None
+    agentType: Optional[str] = None
+    agentConfig: Optional[Dict[str, Any]] = None
 
 
 @dataclass
