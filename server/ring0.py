@@ -50,9 +50,12 @@ This is mandatory — never ask the user where something is if it might be in me
 - **get_session_output** — Read recent messages from a session
 - **get_active_clients** — List all connected browser clients
 - **query_client** — Query a specific client's state (e.g., what session they're viewing)
+- **switch_audio** — Switch audio to bluetooth, speaker, handset, or default
 - **get_node_environment** — Get info about this node (name, OS, container, display status)
 - **switch_ring0_model** — Switch your own model (kills this session, starts fresh with new model)
 - **get_ring0_model** — Check which model you are currently running
+- **create_task** / **list_tasks** / **update_task** / **delete_task** / **run_task** — Manage scheduled background tasks
+- **list_queue** / **get_queue_item** / **review_queue_item** — Manage the task review queue
 
 ## Model Switching
 
@@ -77,6 +80,15 @@ the tool is the last thing you'll say in this session
 Each voice message is prefixed with `[from client <clientId>]`. This identifies which
 browser tab sent the message. You can use this clientId with the `query_client` tool
 to find out what session that client is currently viewing (their default routing target).
+
+## Audio Device Switching
+
+When the user asks to switch audio devices (e.g., "switch to bluetooth", "use the speaker",
+"go to handset"), always use the **switch_audio** tool. Do NOT use query_client with
+set_audio_input or set_audio_output directly — switch_audio handles device discovery and
+label matching automatically.
+
+Targets: `bluetooth`, `speaker`, `handset`, `default`.
 
 ## Node Awareness
 
@@ -183,6 +195,58 @@ To send follow-up tasks to the same session, use **send_message** with its sessi
 - Keep tasks specific: "open Chrome and navigate to google.com" > "use Chrome"
 - The agent can see the entire desktop, not just one window
 - If the agent gets stuck, interrupt it and give a more specific instruction
+
+## Scheduled Tasks & Review Queue
+
+You can create and manage background tasks that run on a schedule (hourly, daily, \
+weekly, or one-shot). Tasks execute in sandboxed Claude sessions with access to bash, \
+file I/O, web search, agentmail, gws, and checkm8. Results accumulate in a review queue.
+
+### Tools
+- **create_task** — Schedule a new background task
+- **list_tasks** — See all tasks with next run times
+- **update_task** — Modify a task (enable/disable, schedule, priority, prompt)
+- **delete_task** — Remove a task permanently
+- **run_task** — Execute a task immediately (manual trigger, useful for testing)
+- **list_queue** — See pending results waiting for review
+- **get_queue_item** — Read full output of a result
+- **review_queue_item** — Mark result as done/defer/delegate/followup
+
+### Creating Tasks
+When a user says "check X every morning", create a task with an appropriate schedule \
+and prompt. The prompt should be self-contained instructions for the execution session. \
+If the task needs a specific project directory (for CLAUDE.md context, scripts, etc.), \
+set `project_dir`. Example: a daily job search runs in `/mntc/code/sita-job-search/`.
+
+### Priority
+Infer priority from context — default to "normal". Respect explicit cues:
+- "high priority" or "important" → `high`
+- "urgent" → `urgent` (results interrupt the user immediately)
+Don't quiz the user about priority.
+
+### Re-engagement
+When you receive `[event user_returned]` with `pending_tasks > 0`, announce the count \
+briefly: "3 tasks available for review." Don't list them unless asked. Calibrate your \
+greeting to `away_seconds` — a quick return vs. first thing in the morning.
+
+### Review Flow
+When the user says "review tasks" or "what's pending":
+1. Call **list_queue** to see pending items
+2. Present one-line summaries in priority order
+3. When the user picks one, call **get_queue_item** to read the full output
+4. Present the findings conversationally
+5. Wait for their decision: done, defer (come back later), delegate, or followup
+6. Call **review_queue_item** with the chosen action
+7. If the action is delegate or followup, ask what they want done and handle it \
+(create a session, send an email, add a todo, etc.)
+
+### Rollup
+If a result shows `run_count > 1`, mention it: "This has run N times since last review." \
+The user may want to adjust the schedule.
+
+### Urgent Tasks
+When you receive `[event task_completed]` with priority "urgent", announce the result \
+immediately via voice. Keep it to one sentence. Don't wait for the user to ask.
 """
 
 
@@ -336,6 +400,7 @@ class Ring0Manager:
                     "args": ["run", "--project", str(server_dir), "--no-sync", "python", mcp_script],
                     "env": {
                         "VIBR8_PORT": str(self._port),
+                        "VIBR8_SCHEME": "https" if (server_dir / "certs" / "cert.pem").exists() else "http",
                         **({} if not self._get_service_token() else {"VIBR8_TOKEN": self._get_service_token()}),
                         **({"RING0_MODEL": self._model} if self._model else {}),
                     },

@@ -22,7 +22,6 @@ from typing import Any, Callable, Optional
 import numpy as np
 import torch
 from scipy.signal import resample_poly
-from transformers import pipeline
 
 warnings.filterwarnings("ignore", message=".*logits.*", category=UserWarning)
 logging.getLogger("transformers").setLevel(logging.ERROR)
@@ -124,21 +123,49 @@ class STT:
                 repo_or_dir="snakers4/silero-vad",
                 model="silero_vad",
                 force_reload=False,
+                trust_repo=True,
             )
             STT.shared_resources["vad"] = model
             logger.info("[stt] Silero VAD loaded")
 
-        if "asr" not in STT.shared_resources:
-            logger.info("[stt] Loading Whisper...")
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            asr = pipeline(
-                "automatic-speech-recognition",
-                model="openai/whisper-large-v3",
-                device=device,
-                generate_kwargs={"language": "en", "task": "transcribe"},
+        if "asr_model" not in STT.shared_resources:
+            # Requires transformers <5.0 — 5.x has an UnboundLocalError in
+            # WhisperAttention.forward (is_updated) when using assisted generation
+            # with DynamicCache. See HF issues #31987, #34626.
+            from transformers import AutoModelForSpeechSeq2Seq, AutoModelForCausalLM, AutoProcessor
+
+            device = "cuda"
+            torch_dtype = torch.float16
+
+            logger.info("[stt] Loading whisper-large-v3...")
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                "openai/whisper-large-v3",
+                torch_dtype=torch_dtype,
+                low_cpu_mem_usage=True,
+                use_safetensors=True,
+                attn_implementation="sdpa",
             )
-            STT.shared_resources["asr"] = asr
-            logger.info("[stt] Whisper loaded (device=%s)", device)
+            model.to(device)
+            model.eval()
+            processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
+            logger.info("[stt] whisper-large-v3 loaded (fp16, %s)", device)
+
+            logger.info("[stt] Loading distil-large-v3 (assistant)...")
+            assistant = AutoModelForCausalLM.from_pretrained(
+                "distil-whisper/distil-large-v3",
+                torch_dtype=torch_dtype,
+                low_cpu_mem_usage=True,
+                use_safetensors=True,
+                attn_implementation="sdpa",
+            )
+            assistant.to(device)
+            assistant.eval()
+            logger.info("[stt] distil-large-v3 loaded (fp16, %s)", device)
+
+            STT.shared_resources["asr_model"] = model
+            STT.shared_resources["asr_processor"] = processor
+            STT.shared_resources["assistant_model"] = assistant
+            logger.info("[stt] Speculative decoding ready (whisper-large-v3 + distil-large-v3, fp16)")
 
         if "eou" not in STT.shared_resources:
             logger.info("[stt] Loading EOU model...")
@@ -148,6 +175,23 @@ class STT:
     @staticmethod
     def unload_shared_resources() -> None:
         STT.shared_resources = {}
+
+    @staticmethod
+    def _transcribe(audio: np.ndarray) -> str:
+        model = STT.shared_resources["asr_model"]
+        processor = STT.shared_resources["asr_processor"]
+        assistant = STT.shared_resources.get("assistant_model")
+
+        inputs = processor(audio, sampling_rate=WHISPER_SAMPLE_RATE, return_tensors="pt")
+        input_features = inputs.input_features.to(device=model.device, dtype=model.dtype)
+
+        gen_kwargs = {"language": "en", "task": "transcribe"}
+        if assistant is not None:
+            gen_kwargs["assistant_model"] = assistant
+
+        with torch.inference_mode():
+            out = model.generate(input_features, **gen_kwargs)
+        return processor.batch_decode(out, skip_special_tokens=True)[0]
 
     # ── Listener management ──────────────────────────────────────────────
 
@@ -297,8 +341,7 @@ class STT:
                     combined = np.concatenate(s, axis=0)
                     float_buf = combined.astype(np.float32) / np.iinfo(np.int16).max
 
-                    asr = STT.shared_resources["asr"]
-                    text = asr(float_buf, return_timestamps=True)["text"]
+                    text = STT._transcribe(float_buf)
 
                     if params.verbose:
                         logger.info("[stt-verbose] Whisper raw: %r  duration=%.2fs", text, duration)

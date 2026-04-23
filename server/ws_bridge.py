@@ -115,6 +115,9 @@ class WsBridge:
         self._client_metadata: dict[str, dict[str, Any]] = {}
         self._CLIENTS_PATH = Path.home() / ".vibr8" / "clients.json"
         self._load_client_metadata()
+        # User re-engagement tracking for scheduled tasks
+        self._last_user_interaction: float = 0.0  # time.time() of last user-originated message to Ring0
+        self._task_scheduler: Any = None  # TaskScheduler (set via setter)
 
     # ── Native WebSocket (Android foreground service) ───────────────────
 
@@ -320,6 +323,9 @@ class WsBridge:
 
     def set_node_registry(self, registry: Any) -> None:
         self._node_registry = registry
+
+    def set_task_scheduler(self, scheduler: Any) -> None:
+        self._task_scheduler = scheduler
 
     # ── Remote node session management ────────────────────────────────────
     # Node identity is embedded in the session ID: "{node_id}:{raw_id}" for remote.
@@ -1853,6 +1859,10 @@ class WsBridge:
         if source_client_id:
             logger.info("[ws-bridge] Message from client=%s for session %s", source_client_id, session_id)
 
+        # Check for user re-engagement with Ring0 (for scheduled task notifications)
+        if source_client_id and self._ring0_manager and session_id == self._ring0_manager.session_id:
+            await self._check_user_reengagement()
+
         msg = {"type": "user_message", "content": text}
         await self._handle_user_message(session, msg, source_client_id=source_client_id)
         # Schedule thinking tone after a delay — gives the agent time to
@@ -1868,6 +1878,44 @@ class WsBridge:
         if source_client_id:
             broadcast["sourceClientId"] = source_client_id
         await self._broadcast_to_browsers(session, broadcast)
+
+    # ── User re-engagement tracking ────────────────────────────────────
+
+    REENGAGEMENT_THRESHOLD = 30  # seconds of absence before "user_returned" fires
+
+    async def _check_user_reengagement(self) -> None:
+        """Check if user is re-engaging after a period of absence.
+
+        Fires a user_returned event if the user has been away and there are
+        pending items in the task queue.
+        """
+        now = time.time()
+        away_seconds = now - self._last_user_interaction if self._last_user_interaction > 0 else 0
+        self._last_user_interaction = now
+
+        if away_seconds < self.REENGAGEMENT_THRESHOLD:
+            return
+
+        scheduler = self._task_scheduler
+        if not scheduler:
+            return
+
+        pending_count = scheduler.queue.count_pending()
+        if pending_count == 0:
+            return
+
+        highest_priority = scheduler.queue.highest_pending_priority()
+
+        logger.info("[ws-bridge] User returned after %ds, %d pending task(s)",
+                     int(away_seconds), pending_count)
+
+        from server.ring0_events import Ring0Event
+        await self.emit_ring0_event(Ring0Event(fields={
+            "type": "user_returned",
+            "away_seconds": str(int(away_seconds)),
+            "pending_tasks": str(pending_count),
+            "highest_priority": highest_priority,
+        }))
 
     # ── Ring0 event notifications ────────────────────────────────────────
 

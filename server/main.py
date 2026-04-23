@@ -22,9 +22,16 @@ from server.ws_bridge import WsBridge
 from server.auto_namer import generate_session_title, AutoNamerOptions
 from server import session_names
 from server.routes import create_routes
-from server.webrtc import WebRTCManager
 from server.terminal import TerminalManager
+
+try:
+    from server.webrtc import WebRTCManager
+    HAS_WEBRTC = True
+except ImportError:
+    WebRTCManager = None  # type: ignore[assignment,misc]
+    HAS_WEBRTC = False
 from server.ring0 import Ring0Manager
+from server.ring0_scheduler import TaskScheduler
 from server.ring0_events import Ring0EventRouter
 from server.node_registry import NodeRegistry
 from server.node_tunnel import NodeTunnel
@@ -53,7 +60,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("/mntc/code/vibr8/server.log", mode="a"),
+        logging.FileHandler(
+            os.environ.get("VIBR8_LOG_FILE", str(Path(__file__).parent.parent / "server.log")),
+            mode="a",
+        ),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -365,13 +375,17 @@ def create_app() -> web.Application:
     if ice_servers:
         logger.info("[server] Loaded %d ICE server(s)", len(ice_servers))
 
-    webrtc_manager = WebRTCManager(ice_servers=ice_servers)
+    webrtc_manager = WebRTCManager(ice_servers=ice_servers) if HAS_WEBRTC else None
     terminal_manager = TerminalManager()
     ring0_manager = Ring0Manager(PORT, auth_manager=auth_manager)
+    task_scheduler = TaskScheduler()
     node_registry = NodeRegistry()
 
-    from server.android_registry import AndroidRegistry
-    android_registry = AndroidRegistry()
+    try:
+        from server.android_registry import AndroidRegistry
+        android_registry = AndroidRegistry()
+    except ImportError:
+        android_registry = None
 
     # Track background tasks so we can cancel them on shutdown.
     background_tasks: set[asyncio.Task] = set()
@@ -385,14 +399,18 @@ def create_app() -> web.Application:
 
     # Wire up stores and managers
     ws_bridge.set_store(session_store)
-    ws_bridge.set_webrtc_manager(webrtc_manager)
+    if webrtc_manager:
+        ws_bridge.set_webrtc_manager(webrtc_manager)
     ws_bridge.set_ring0_manager(ring0_manager)
     ws_bridge.set_ring0_event_router(Ring0EventRouter())
     ws_bridge.set_node_registry(node_registry)
-    webrtc_manager.set_ws_bridge(ws_bridge)
-    webrtc_manager.set_ring0_manager(ring0_manager)
-    webrtc_manager.set_launcher(launcher)
-    webrtc_manager.set_node_registry(node_registry)
+    ws_bridge.set_task_scheduler(task_scheduler)
+    task_scheduler.set_dependencies(launcher, ws_bridge)
+    if webrtc_manager:
+        webrtc_manager.set_ws_bridge(ws_bridge)
+        webrtc_manager.set_ring0_manager(ring0_manager)
+        webrtc_manager.set_launcher(launcher)
+        webrtc_manager.set_node_registry(node_registry)
     launcher.set_store(session_store)
 
     # Restore persisted state
@@ -419,12 +437,14 @@ def create_app() -> web.Application:
     launcher.on_codex_adapter_created(on_codex_adapter)
 
     # When a computer-use session is created, spin up the agent and register it
-    from server.desktop_target import DesktopTarget
-    from server.adb_target import AdbTarget
-    from server.agent_registry import get_agent_type
-
-    # Trigger agent registration by importing agent modules
-    import server.ui_tars_agent  # noqa: F401 — registers "ui-tars" agent type
+    try:
+        from server.desktop_target import DesktopTarget
+        from server.adb_target import AdbTarget
+        from server.agent_registry import get_agent_type
+        import server.ui_tars_agent  # noqa: F401 — registers "ui-tars" agent type
+        HAS_COMPUTER_USE = True
+    except ImportError:
+        HAS_COMPUTER_USE = False
 
     # Reconnect signals per node — set when a node tunnel reconnects.
     # Stored on app so handle_node_ws can access it via request.app.
@@ -544,7 +564,8 @@ def create_app() -> web.Application:
 
         spawn(_init_agent())
 
-    launcher.on_computer_use_created(on_computer_use_created)
+    if HAS_COMPUTER_USE:
+        launcher.on_computer_use_created(on_computer_use_created)
 
     # Auto-relaunch CLI when a browser connects to a session with no CLI
     relaunching: set[str] = set()
@@ -556,7 +577,7 @@ def create_app() -> web.Application:
         if info and info.archived:
             return
         # CU sessions don't have a CLI subprocess — re-create the agent instead
-        if info and info.backendType == "computer-use":
+        if HAS_COMPUTER_USE and info and info.backendType == "computer-use":
             if session_id not in relaunching:
                 relaunching.add(session_id)
                 logger.info("[server] Re-creating CU agent for session %s", session_id[:8])
@@ -616,7 +637,8 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/browser/{session_id}", handle_browser_ws)
     app.router.add_get("/ws/native/{client_id}", handle_native_ws)
     app.router.add_get("/ws/terminal/{session_id}", handle_terminal_ws)
-    app.router.add_get("/ws/playground/{client_id}", handle_playground_ws)
+    if HAS_WEBRTC:
+        app.router.add_get("/ws/playground/{client_id}", handle_playground_ws)
     app.router.add_get("/ws/node/{node_id}", handle_node_ws)
 
     # REST API
@@ -630,6 +652,12 @@ def create_app() -> web.Application:
             app.router.add_static("/assets", dist_dir / "assets")
 
             async def spa_fallback(request: web.Request) -> web.StreamResponse:
+                # Serve static files from dist/ if they exist on disk
+                rel = request.match_info.get("path", "")
+                if rel:
+                    candidate = dist_dir / rel
+                    if candidate.is_file() and dist_dir in candidate.resolve().parents:
+                        return web.FileResponse(candidate)
                 return web.FileResponse(dist_dir / "index.html")
 
             # Catch-all for SPA routing
@@ -644,6 +672,7 @@ def create_app() -> web.Application:
     app["terminal_manager"] = terminal_manager
     app["auth_manager"] = auth_manager
     app["ring0_manager"] = ring0_manager
+    app["task_scheduler"] = task_scheduler
     app["node_registry"] = node_registry
     app["android_registry"] = android_registry
     app["request_restart"] = request_restart
@@ -662,7 +691,8 @@ def create_app() -> web.Application:
             except Exception:
                 logger.exception("[server] Failed to preload STT models")
 
-        spawn(_preload_stt())
+        if HAS_WEBRTC:
+            spawn(_preload_stt())
 
         # Suppress noisy aioice STUN retry errors on closed transports.
         loop = asyncio.get_event_loop()
@@ -715,7 +745,8 @@ def create_app() -> web.Application:
         spawn(_heartbeat_checker())
 
         # Start Android device status polling
-        await android_registry.start_polling(interval=5.0)
+        if android_registry:
+            await android_registry.start_polling(interval=5.0)
 
         # Start mDNS discovery for ADB devices (if zeroconf is installed)
         from server.mdns_discovery import MdnsDiscovery
@@ -728,6 +759,9 @@ def create_app() -> web.Application:
         if ring0_manager.is_enabled:
             logger.info("[server] Ring0 was enabled — auto-launching session")
             spawn(ring0_manager.ensure_session(launcher, ws_bridge))
+
+        # Start scheduled task runner
+        await task_scheduler.start()
 
     app.on_startup.append(on_startup)
 
@@ -743,13 +777,17 @@ def create_app() -> web.Application:
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
 
+        # Stop scheduled task runner
+        await task_scheduler.stop()
+
         # Always kill CLI processes so they respawn fresh with updated code.
         # This is critical for Ring0's MCP subprocess which loads ring0_mcp.py
         # at startup — without this, code changes never take effect.
         await launcher.kill_all()
 
         # Shutdown Android registry and mDNS discovery
-        await android_registry.shutdown()
+        if android_registry:
+            await android_registry.shutdown()
         mdns = app.get("mdns_discovery")
         if mdns:
             await mdns.stop()
@@ -760,7 +798,8 @@ def create_app() -> web.Application:
             logger.info("[server] Restart — skipping graceful close for speed")
         else:
             await terminal_manager.close_all()
-            await webrtc_manager.close_all()
+            if webrtc_manager:
+                await webrtc_manager.close_all()
             await ws_bridge.close_all()
         logger.info("[server] Shutdown complete")
 
@@ -791,15 +830,32 @@ def request_restart() -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _get_ssl_context():
+    """Load SSL context from certs/ directory if available."""
+    import ssl
+    cert_dir = Path(__file__).parent.parent / "certs"
+    cert_file = cert_dir / "cert.pem"
+    key_file = cert_dir / "key.pem"
+    if cert_file.exists() and key_file.exists():
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(cert_file), str(key_file))
+        logger.info("[server] SSL enabled (cert: %s)", cert_file)
+        return ctx
+    return None
+
+
 def main() -> None:
     try:
         app = create_app()
-        logger.info(f"Server running on http://localhost:{PORT}")
-        logger.info(f"  CLI WebSocket:     ws://localhost:{PORT}/ws/cli/:sessionId")
-        logger.info(f"  Browser WebSocket: ws://localhost:{PORT}/ws/browser/:sessionId")
+        ssl_ctx = _get_ssl_context()
+        scheme = "https" if ssl_ctx else "http"
+        ws_scheme = "wss" if ssl_ctx else "ws"
+        logger.info(f"Server running on {scheme}://localhost:{PORT}")
+        logger.info(f"  CLI WebSocket:     {ws_scheme}://localhost:{PORT}/ws/cli/:sessionId")
+        logger.info(f"  Browser WebSocket: {ws_scheme}://localhost:{PORT}/ws/browser/:sessionId")
         if os.environ.get("NODE_ENV") != "production":
             logger.info("Dev mode: frontend at http://localhost:5174")
-        web.run_app(app, host="0.0.0.0", port=PORT, print=None, shutdown_timeout=2.0, reuse_address=True)
+        web.run_app(app, host="0.0.0.0", port=PORT, print=None, shutdown_timeout=2.0, reuse_address=True, ssl_context=ssl_ctx)
     except Exception:
         logger.exception("[server] Fatal error during startup/run")
         sys.exit(1)

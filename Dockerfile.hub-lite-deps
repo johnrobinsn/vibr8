@@ -1,0 +1,20 @@
+# Hub lite deps layer — ML stack on base-deps (no GUI/desktop).
+# For users who want a lighter image without virtual desktop (~2GB smaller).
+# Build: docker build -f Dockerfile.hub-lite-deps -t vibr8-hub:lite-deps .
+# Requires: vibr8-node:base-deps (Dockerfile.node-base-deps)
+
+FROM vibr8-node:base-deps
+
+USER root
+
+# Hub system deps (openssl for cert generation)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Hub Python deps (ML stack + full server deps)
+COPY requirements-hub.txt /tmp/requirements-hub.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-hub.txt && \
+    rm /tmp/requirements-hub.txt
+
+USER vibr8

@@ -873,6 +873,31 @@ def create_routes(
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
+    @routes.post("/api/sessions/{session_id}/upload")
+    async def session_upload(request: web.Request) -> web.Response:
+        session_id = request.match_info["session_id"]
+        session = bridge.get_session(session_id)
+        if not session:
+            return web.json_response({"error": "Session not found"}, status=404)
+        cwd = session.state.get("cwd", "")
+        if not cwd:
+            return web.json_response({"error": "Session has no cwd"}, status=400)
+        reader = await request.multipart()
+        field = await reader.next()
+        if not field or field.name != "file":
+            return web.json_response({"error": "No file field"}, status=400)
+        filename = field.filename or f"upload-{int(time.time())}"
+        tmp_dir = Path(cwd) / ".vibr8-uploads"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        dest = tmp_dir / filename
+        with open(dest, "wb") as f:
+            while True:
+                chunk = await field.read_chunk()
+                if not chunk:
+                    break
+                f.write(chunk)
+        return web.json_response({"ok": True, "path": str(dest)})
+
     @routes.post("/api/fs/mkdir")
     async def fs_mkdir(request: web.Request) -> web.Response:
         try:
@@ -1677,6 +1702,121 @@ def create_routes(
             client_id = pair[0] if pair else ""
         webrtc_manager.set_guard_enabled(client_id, enabled)
         return web.json_response({"ok": True, "clientId": client_id, "enabled": enabled})
+
+    # ── Scheduled Tasks & Queue ────────────────────────────────────────
+
+    @routes.post("/api/ring0/tasks")
+    async def ring0_create_task(request: web.Request) -> web.Response:
+        scheduler = request.app.get("task_scheduler")
+        if not scheduler:
+            return web.json_response({"error": "Scheduler not available"}, status=501)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        name = body.get("name", "")
+        prompt = body.get("prompt", "")
+        if not name or not prompt:
+            return web.json_response({"error": "name and prompt are required"}, status=400)
+        task = scheduler.create_task(
+            name=name,
+            prompt=prompt,
+            schedule=body.get("schedule", "daily"),
+            priority=body.get("priority", "normal"),
+            schedule_hour=int(body.get("schedule_hour", 9)),
+            schedule_minute=int(body.get("schedule_minute", 0)),
+            schedule_day=int(body.get("schedule_day", 0)),
+            project_dir=body.get("project_dir", ""),
+            model=body.get("model", ""),
+            run_if_missed=bool(body.get("run_if_missed", True)),
+        )
+        return web.json_response(task.to_dict())
+
+    @routes.get("/api/ring0/tasks")
+    async def ring0_list_tasks(request: web.Request) -> web.Response:
+        scheduler = request.app.get("task_scheduler")
+        if not scheduler:
+            return web.json_response({"error": "Scheduler not available"}, status=501)
+        tasks = scheduler.list_tasks()
+        return web.json_response([t.to_dict() for t in tasks])
+
+    @routes.put("/api/ring0/tasks/{task_id}")
+    async def ring0_update_task(request: web.Request) -> web.Response:
+        scheduler = request.app.get("task_scheduler")
+        if not scheduler:
+            return web.json_response({"error": "Scheduler not available"}, status=501)
+        task_id = request.match_info["task_id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        task = scheduler.update_task(task_id, **body)
+        if not task:
+            return web.json_response({"error": "Task not found"}, status=404)
+        return web.json_response(task.to_dict())
+
+    @routes.delete("/api/ring0/tasks/{task_id}")
+    async def ring0_delete_task(request: web.Request) -> web.Response:
+        scheduler = request.app.get("task_scheduler")
+        if not scheduler:
+            return web.json_response({"error": "Scheduler not available"}, status=501)
+        task_id = request.match_info["task_id"]
+        if not scheduler.delete_task(task_id):
+            return web.json_response({"error": "Task not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    @routes.post("/api/ring0/tasks/{task_id}/run")
+    async def ring0_run_task(request: web.Request) -> web.Response:
+        scheduler = request.app.get("task_scheduler")
+        if not scheduler:
+            return web.json_response({"error": "Scheduler not available"}, status=501)
+        task_id = request.match_info["task_id"]
+        err = await scheduler.execute_task_now(task_id)
+        if err:
+            return web.json_response({"error": err}, status=400)
+        return web.json_response({"ok": True, "message": "Task execution started"})
+
+    @routes.get("/api/ring0/queue")
+    async def ring0_list_queue(request: web.Request) -> web.Response:
+        scheduler = request.app.get("task_scheduler")
+        if not scheduler:
+            return web.json_response({"error": "Scheduler not available"}, status=501)
+        status_filter = request.query.get("status", "pending")
+        if status_filter == "pending":
+            results = scheduler.queue.list_pending()
+        elif status_filter == "reviewed":
+            results = scheduler.queue.list_reviewed()
+        else:
+            results = scheduler.queue.list_all()
+        return web.json_response([r.to_dict() for r in results])
+
+    @routes.get("/api/ring0/queue/{result_id}")
+    async def ring0_get_queue_item(request: web.Request) -> web.Response:
+        scheduler = request.app.get("task_scheduler")
+        if not scheduler:
+            return web.json_response({"error": "Scheduler not available"}, status=501)
+        result_id = request.match_info["result_id"]
+        result = scheduler.queue.get(result_id)
+        if not result:
+            return web.json_response({"error": "Result not found"}, status=404)
+        return web.json_response(result.to_dict())
+
+    @routes.post("/api/ring0/queue/{result_id}/review")
+    async def ring0_review_queue_item(request: web.Request) -> web.Response:
+        scheduler = request.app.get("task_scheduler")
+        if not scheduler:
+            return web.json_response({"error": "Scheduler not available"}, status=501)
+        result_id = request.match_info["result_id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        action = body.get("action", "done")
+        if action not in ("done", "defer", "delegate", "followup"):
+            return web.json_response({"error": "Invalid action"}, status=400)
+        if not scheduler.queue.mark_reviewed(result_id, action):
+            return web.json_response({"error": "Result not found"}, status=404)
+        return web.json_response({"ok": True, "action": action})
 
     # ── Voice Profiles ──────────────────────────────────────────────────
 

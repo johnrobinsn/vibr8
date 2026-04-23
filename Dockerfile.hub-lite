@@ -1,0 +1,58 @@
+# Hub lite code layer — same server, no desktop/GPU.
+# Build: docker build -f Dockerfile.hub-lite -t vibr8-hub:lite .
+# Requires: vibr8-hub:lite-deps (Dockerfile.hub-lite-deps)
+
+# ── Stage 1: Build frontend ──────────────────────────────────────────────────
+FROM oven/bun:latest AS frontend-build
+WORKDIR /build
+COPY web/package.json web/bun.lock* ./
+RUN bun install --frozen-lockfile
+COPY web/ .
+RUN bun run build
+# Output: /build/dist/
+
+# ── Stage 2: Final hub image (lite — no GUI, no NVIDIA) ──────────────────────
+FROM vibr8-hub:lite-deps
+
+USER root
+
+# Copy server code
+COPY server/ /app/server/
+COPY pyproject.toml /app/pyproject.toml
+
+# Copy built frontend (production static assets)
+COPY --from=frontend-build /build/dist /app/web/dist
+
+# Copy Ring0 event config example
+COPY ring0-events.example.json5 /app/ring0-events.example.json5
+
+# Copy entrypoint
+COPY bin/hub-entrypoint.sh /app/bin/hub-entrypoint.sh
+RUN chmod +x /app/bin/hub-entrypoint.sh
+
+# MCP tools (staged by build script into build context)
+COPY tools/ /opt/tools/
+RUN if [ -f /opt/tools/agentmail/requirements.txt ]; then \
+        pip install --no-cache-dir -r /opt/tools/agentmail/requirements.txt; \
+    fi && \
+    if [ -f /opt/tools/checkm8/cli/requirements.txt ]; then \
+        pip install --no-cache-dir -r /opt/tools/checkm8/cli/requirements.txt; \
+    fi
+
+# Create runtime directories
+RUN mkdir -p /data /code && \
+    chown -R vibr8:vibr8 /app /data /code /opt/tools
+
+# Environment
+ENV PYTHONPATH="/app"
+ENV NODE_ENV="production"
+ENV PORT="3456"
+ENV VIBR8_LOG_FILE="/data/server.log"
+ENV VIBR8_DOCKER="1"
+
+USER vibr8
+WORKDIR /app
+EXPOSE 3456
+
+ENTRYPOINT ["/app/bin/hub-entrypoint.sh"]
+CMD ["serve"]

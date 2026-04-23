@@ -8,9 +8,10 @@ to produce a ``ComputerUseAgent`` instance.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, runtime_checkable
 
-import av
+if TYPE_CHECKING:
+    import av
 
 
 @runtime_checkable

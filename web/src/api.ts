@@ -99,6 +99,25 @@ async function del<T = unknown>(path: string, body?: object): Promise<T> {
   return res.json();
 }
 
+async function uploadFile(sessionId: string, file: File): Promise<{ path: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  const headers: Record<string, string> = {};
+  const token = getDeviceToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(`${BASE}/sessions/${sessionId}/upload`, {
+    method: "POST",
+    headers,
+    body: form,
+  });
+  checkAuth(res);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || res.statusText);
+  }
+  return res.json();
+}
+
 export interface CreateSessionOpts {
   model?: string;
   permissionMode?: string;
@@ -373,6 +392,9 @@ export const api = {
     put<{ ok: boolean; path: string }>("/fs/write", { path, content }),
   mkdir: (path: string) =>
     post<{ ok: boolean; path: string }>("/fs/mkdir", { path }),
+  uploadToSession: (sessionId: string, file: File) =>
+    uploadFile(sessionId, file),
+
   deleteFile: (path: string) =>
     post<{ ok: boolean }>("/fs/delete", { path }),
   rename: (oldPath: string, newPath: string) =>

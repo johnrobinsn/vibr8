@@ -22,10 +22,14 @@ export default defineConfig({
       },
     }),
     proxy: {
-      "/api": "http://localhost:3456",
+      "/api": {
+        target: hasCerts ? "https://localhost:3456" : "http://localhost:3456",
+        secure: false,
+      },
       "/ws": {
-        target: "ws://localhost:3456",
+        target: hasCerts ? "wss://localhost:3456" : "ws://localhost:3456",
         ws: true,
+        secure: false,
         configure: (proxy) => {
           // Suppress TLS socket errors when backend closes WS connections
           proxy.on("error", () => {});

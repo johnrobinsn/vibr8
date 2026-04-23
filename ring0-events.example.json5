@@ -51,6 +51,14 @@
   //   Fields: (none)
   //   Fired when voice note mode exits via "vibr8 done"
   //
+  // task_completed
+  //   Fields: task, taskId, status, priority, pendingCount
+  //   Fired when a scheduled task finishes execution
+  //
+  // user_returned
+  //   Fields: away_seconds, pending_tasks, highest_priority
+  //   Fired when the user re-engages after being away (>30s) and tasks are pending
+  //
 
   "rules": [
     // ── Don't send noisy events to LLM but show in UI ────────────────
@@ -77,6 +85,21 @@
     //   "send": false,
     //   "summary": "second screen: ${evt.type}",
     //   "ui": "collapsed"
+    // },
+
+    // ── Scheduled tasks: urgent completions go to Ring0, others suppressed ──
+    // {
+    //   "match": { "type": "task_completed", "priority": "urgent" },
+    //   "template": "[urgent task] ${evt.task} completed",
+    //   "ui": "visible"
+    // },
+    // { "match": { "type": "task_completed" }, "send": false, "ui": "hidden" },
+
+    // ── User re-engagement: notify Ring0 of pending tasks ───────────
+    // {
+    //   "match": { "type": "user_returned" },
+    //   "template": "[user returned after ${evt.away_seconds}s] ${evt.pending_tasks} task(s) pending (highest: ${evt.highest_priority})",
+    //   "ui": "hidden"
     // },
 
     // ── Catch-all: drop everything ───────────────────────────────────

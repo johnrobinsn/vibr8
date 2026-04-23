@@ -19,8 +19,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 PORT = int(os.environ.get("VIBR8_PORT", "3456"))
-BASE_URL = f"http://localhost:{PORT}/api"
+_SCHEME = os.environ.get("VIBR8_SCHEME", "http")
+BASE_URL = f"{_SCHEME}://localhost:{PORT}/api"
 _TOKEN = os.environ.get("VIBR8_TOKEN")
+_VERIFY_SSL = _SCHEME != "https"  # Disable for self-signed certs
 
 mcp = FastMCP("vibr8")
 
@@ -32,14 +34,14 @@ def _auth_headers() -> dict[str, str]:
 
 
 async def _get(path: str) -> dict[str, Any]:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=_VERIFY_SSL) as client:
         r = await client.get(f"{BASE_URL}{path}", headers=_auth_headers(), timeout=10)
         r.raise_for_status()
         return r.json()
 
 
 async def _post(path: str, body: dict | None = None) -> dict[str, Any]:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=_VERIFY_SSL) as client:
         r = await client.post(f"{BASE_URL}{path}", json=body, headers=_auth_headers(), timeout=30)
         if r.status_code >= 400:
             try:
@@ -50,8 +52,19 @@ async def _post(path: str, body: dict | None = None) -> dict[str, Any]:
 
 
 async def _put(path: str, body: dict | None = None) -> dict[str, Any]:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=_VERIFY_SSL) as client:
         r = await client.put(f"{BASE_URL}{path}", json=body, headers=_auth_headers(), timeout=10)
+        if r.status_code >= 400:
+            try:
+                return r.json()
+            except Exception:
+                return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
+        return r.json()
+
+
+async def _delete(path: str) -> dict[str, Any]:
+    async with httpx.AsyncClient(verify=_VERIFY_SSL) as client:
+        r = await client.delete(f"{BASE_URL}{path}", headers=_auth_headers(), timeout=10)
         if r.status_code >= 400:
             try:
                 return r.json()
@@ -479,6 +492,102 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
 
 
 @mcp.tool()
+async def switch_audio(target: str, client_id: str = "") -> str:
+    """Switch audio input/output to a high-level device category.
+
+    Automatically resolves the correct device by scanning available audio devices
+    and matching by label. Prefer this over raw query_client set_audio_input calls.
+
+    Args:
+        target: Device category — "bluetooth", "speaker", "handset", or "default".
+            - bluetooth: Bluetooth headset/earbuds (prioritizes "Bluetooth" in label)
+            - speaker: Phone speaker or external speaker (prioritizes "Speakerphone" or "Speaker")
+            - handset: Phone earpiece (prioritizes "Earpiece" or "Handset earpiece")
+            - default: Reset to system default device
+        client_id: Optional client ID, name, or prefix. If empty, auto-resolves to the
+            first online client.
+    """
+    target = target.lower().strip()
+
+    if client_id:
+        resolved, err = await _resolve_client(client_id)
+    else:
+        clients = await _get("/clients")
+        online = [c for c in (clients or []) if c.get("online")]
+        if not online:
+            return "Error: no online clients."
+        resolved, err = online[0]["clientId"], None
+    if err:
+        return err
+
+    devices_result = await _post("/ring0/query-client", {
+        "clientId": resolved, "method": "list_audio_devices",
+    })
+    if devices_result.get("error"):
+        return f"Error listing devices: {devices_result['error']}"
+
+    all_devices = devices_result.get("result", {})
+    inputs = all_devices.get("inputs", [])
+    outputs = all_devices.get("outputs", [])
+
+    if not inputs and not outputs:
+        available = json.dumps(all_devices, indent=2)
+        return f"Error: no audio devices found. Raw response: {available}"
+
+    if target == "default":
+        input_dev = next((d for d in inputs if d.get("deviceId") == "default"), None)
+        output_dev = next((d for d in outputs if d.get("deviceId") == "default"), None)
+    else:
+        keywords: dict[str, list[str]] = {
+            "bluetooth": ["bluetooth"],
+            "speaker": ["speakerphone", "speaker"],
+            "handset": ["earpiece", "handset"],
+        }
+        if target not in keywords:
+            return f"Error: unknown target '{target}'. Use bluetooth, speaker, handset, or default."
+        kws = keywords[target]
+
+        def match_device(devices: list[dict]) -> dict | None:
+            for kw in kws:
+                for d in devices:
+                    if kw in d.get("label", "").lower():
+                        return d
+            return None
+
+        input_dev = match_device(inputs)
+        output_dev = match_device(outputs)
+
+    results = []
+    if input_dev:
+        r = await _post("/ring0/query-client", {
+            "clientId": resolved, "method": "set_audio_input",
+            "params": {"label": input_dev["label"]},
+        })
+        if r.get("error"):
+            results.append(f"Input error: {r['error']}")
+        else:
+            results.append(f"Input → {input_dev['label']}")
+    else:
+        labels = [d.get("label", "?") for d in inputs]
+        results.append(f"No {target} input found (available: {labels})")
+
+    if output_dev:
+        r = await _post("/ring0/query-client", {
+            "clientId": resolved, "method": "set_audio_output",
+            "params": {"deviceId": output_dev["deviceId"]},
+        })
+        if r.get("error"):
+            results.append(f"Output error: {r['error']}")
+        else:
+            results.append(f"Output → {output_dev['label']}")
+    else:
+        labels = [d.get("label", "?") for d in outputs]
+        results.append(f"No {target} output found (available: {labels})")
+
+    return "; ".join(results)
+
+
+@mcp.tool()
 async def update_client_metadata(
     client_id: str,
     name: str = "",
@@ -702,6 +811,103 @@ async def show_on_second_screen(
             results.append(f"Error sending to {screen['clientId'][:8]}: {result['error']}")
         else:
             results.append(f"Sent to {screen['clientId'][:8]}")
+
+    return "\n".join(results)
+
+
+# ── Extension mapping for push_file_to_second_screen ─────────────────────────
+_EXT_TO_CONTENT_TYPE: dict[str, str] = {
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".gif": "image",
+    ".webp": "image",
+    ".svg": "image",
+    ".pdf": "pdf",
+    ".html": "html",
+}
+
+_EXT_TO_MIME: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+}
+
+
+@mcp.tool()
+async def push_file_to_second_screen(
+    path: str,
+    content_type: str = "",
+    title: str = "",
+) -> str:
+    """Push a file from disk to all connected second screens without reading it into context.
+
+    Use this instead of show_on_second_screen when the content already exists as a file.
+    The server reads the file directly — the file contents never enter your context window.
+
+    Args:
+        path: Absolute path to the file on disk.
+        content_type: Override auto-detection. One of "markdown", "image", "file",
+                      "pdf", "html". Default: inferred from file extension.
+        title: Display title shown on the second screen. Default: the filename.
+    """
+    file_path = Path(path).expanduser()
+    if not file_path.is_file():
+        return f"File not found: {path}"
+
+    ext = file_path.suffix.lower()
+
+    # Auto-detect content type from extension
+    if not content_type:
+        content_type = _EXT_TO_CONTENT_TYPE.get(ext, "file")
+
+    if not title:
+        title = file_path.name
+
+    # Read file contents
+    try:
+        if content_type == "image":
+            import base64
+            raw = file_path.read_bytes()
+            mime = _EXT_TO_MIME.get(ext, "application/octet-stream")
+            display_content = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+        elif content_type == "pdf":
+            import base64
+            raw = file_path.read_bytes()
+            display_content = f"data:application/pdf;base64,{base64.b64encode(raw).decode()}"
+        else:
+            display_content = file_path.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"Error reading {path}: {e}"
+
+    # Get all online, enabled second screens
+    screens = await _get("/second-screen/list")
+    online_screens = [s for s in screens if s.get("online") and s.get("enabled", True)]
+
+    if not online_screens:
+        return "No second screens are online and enabled."
+
+    results = []
+    for screen in online_screens:
+        params: dict[str, str] = {"type": content_type, "content": display_content}
+        if content_type == "file" or content_type == "markdown":
+            params["filename"] = title
+        body = {
+            "clientId": screen["clientId"],
+            "method": "show_content",
+            "params": params,
+        }
+        result = await _post("/ring0/query-client", body)
+        if result.get("error"):
+            results.append(f"Error sending to {screen['clientId'][:8]}: {result['error']}")
+        else:
+            results.append(f"Sent {title} ({content_type}) to {screen['clientId'][:8]}")
 
     return "\n".join(results)
 
@@ -1125,6 +1331,241 @@ async def get_ring0_model() -> str:
         return f"Current model: {model}"
 
     return "Model not specified — using the default Claude model."
+
+
+# ── Scheduled Tasks & Queue ──────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def create_task(
+    name: str,
+    prompt: str,
+    schedule: str = "daily",
+    priority: str = "normal",
+    schedule_hour: int = 9,
+    schedule_minute: int = 0,
+    schedule_day: int = 0,
+    project_dir: str = "",
+    model: str = "",
+    run_if_missed: bool = True,
+) -> str:
+    """Create a scheduled background task.
+
+    Args:
+        name: Short human-readable name for the task (e.g. "Check PR reviews")
+        prompt: The instruction that will be sent to the execution session
+        schedule: "hourly", "daily", "weekly", or "once"
+        priority: "normal", "high", or "urgent". Urgent tasks interrupt the user immediately on completion
+        schedule_hour: Hour of day (0-23) for daily/weekly tasks. Default: 9
+        schedule_minute: Minute within the hour (0-59). Default: 0
+        schedule_day: Day of week for weekly tasks (0=Monday, 6=Sunday). Default: 0
+        project_dir: Working directory for the execution session. If set, the session runs there and picks up the project's CLAUDE.md
+        model: Model override for this task (e.g. "claude-haiku-4-5-20251001"). Empty = server default
+        run_if_missed: If true, execute immediately on server startup if a scheduled run was missed. Default: true
+    """
+    body = {
+        "name": name,
+        "prompt": prompt,
+        "schedule": schedule,
+        "priority": priority,
+        "schedule_hour": schedule_hour,
+        "schedule_minute": schedule_minute,
+        "schedule_day": schedule_day,
+        "project_dir": project_dir,
+        "model": model,
+        "run_if_missed": run_if_missed,
+    }
+    result = await _post("/ring0/tasks", body)
+    if "error" in result:
+        return f"Error: {result['error']}"
+    task_id = result.get("id", "?")
+    next_run = result.get("next_run_at", 0)
+    from datetime import datetime
+    next_str = datetime.fromtimestamp(next_run).strftime("%Y-%m-%d %H:%M") if next_run else "unknown"
+    return f"Created task '{name}' ({task_id}). Schedule: {schedule}. Next run: {next_str}."
+
+
+@mcp.tool()
+async def list_tasks() -> str:
+    """List all scheduled tasks with their status and next run time."""
+    tasks = await _get("/ring0/tasks")
+    if isinstance(tasks, dict) and "error" in tasks:
+        return f"Error: {tasks['error']}"
+    if not tasks:
+        return "No scheduled tasks."
+
+    from datetime import datetime
+    lines = []
+    for t in tasks:
+        status = "enabled" if t.get("enabled") else "disabled"
+        next_run = t.get("next_run_at", 0)
+        next_str = datetime.fromtimestamp(next_run).strftime("%Y-%m-%d %H:%M") if next_run else "—"
+        last_run = t.get("last_run_at", 0)
+        last_str = datetime.fromtimestamp(last_run).strftime("%Y-%m-%d %H:%M") if last_run else "never"
+        lines.append(
+            f"• {t['name']} ({t['id']}) — {t['schedule']}, {t['priority']} priority, "
+            f"{status}. Next: {next_str}. Last: {last_str}."
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def update_task(
+    task_id: str,
+    enabled: bool | None = None,
+    schedule: str = "",
+    priority: str = "",
+    prompt: str = "",
+    name: str = "",
+    schedule_hour: int = -1,
+    schedule_minute: int = -1,
+    schedule_day: int = -1,
+    project_dir: str | None = None,
+    model: str | None = None,
+) -> str:
+    """Update a scheduled task's properties.
+
+    Args:
+        task_id: The task ID to update
+        enabled: Enable or disable the task
+        schedule: New schedule ("hourly", "daily", "weekly", "once")
+        priority: New priority ("normal", "high", "urgent")
+        prompt: New task prompt/instruction
+        name: New task name
+        schedule_hour: New hour (0-23) for daily/weekly
+        schedule_minute: New minute (0-59)
+        schedule_day: New day of week (0=Mon..6=Sun) for weekly
+        project_dir: New working directory
+        model: New model override
+    """
+    body: dict[str, Any] = {}
+    if enabled is not None:
+        body["enabled"] = enabled
+    if schedule:
+        body["schedule"] = schedule
+    if priority:
+        body["priority"] = priority
+    if prompt:
+        body["prompt"] = prompt
+    if name:
+        body["name"] = name
+    if schedule_hour >= 0:
+        body["schedule_hour"] = schedule_hour
+    if schedule_minute >= 0:
+        body["schedule_minute"] = schedule_minute
+    if schedule_day >= 0:
+        body["schedule_day"] = schedule_day
+    if project_dir is not None:
+        body["project_dir"] = project_dir
+    if model is not None:
+        body["model"] = model
+
+    if not body:
+        return "No updates specified."
+
+    result = await _put(f"/ring0/tasks/{task_id}", body)
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return f"Updated task {task_id}."
+
+
+@mcp.tool()
+async def delete_task(task_id: str) -> str:
+    """Delete a scheduled task permanently.
+
+    Args:
+        task_id: The task ID to delete
+    """
+    result = await _delete(f"/ring0/tasks/{task_id}")
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return f"Deleted task {task_id}."
+
+
+@mcp.tool()
+async def run_task(task_id: str) -> str:
+    """Execute a scheduled task immediately, regardless of its schedule.
+
+    The task runs in the background. Results will appear in the review queue
+    when complete (usually within a few minutes).
+
+    Args:
+        task_id: The task ID to execute now
+    """
+    result = await _post(f"/ring0/tasks/{task_id}/run")
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return f"Task execution started. Results will appear in the review queue when complete."
+
+
+@mcp.tool()
+async def list_queue(status: str = "pending") -> str:
+    """List results in the review queue.
+
+    Args:
+        status: Filter — "pending" (unreviewed), "reviewed", or "all". Default: "pending"
+    """
+    results = await _get(f"/ring0/queue?status={status}")
+    if isinstance(results, dict) and "error" in results:
+        return f"Error: {results['error']}"
+    if not results:
+        return f"No {status} results in the queue."
+
+    from datetime import datetime
+    lines = []
+    for r in results:
+        created = datetime.fromtimestamp(r.get("created_at", 0)).strftime("%Y-%m-%d %H:%M")
+        rollup = f" ({r['run_count']} runs)" if r.get("run_count", 1) > 1 else ""
+        status_icon = "✓" if r.get("status") == "completed" else "✗"
+        # First line of output as a brief summary
+        output = r.get("output", "")
+        summary = output.split("\n")[0][:120] if output else "(no output)"
+        lines.append(
+            f"• [{r['priority']}] {r['task_name']} ({r['id']}) — {status_icon} {r['status']}{rollup}, "
+            f"{created}. {summary}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def get_queue_item(result_id: str) -> str:
+    """Get full details of a queue item, including the complete output from the task execution.
+
+    Args:
+        result_id: The result ID to retrieve
+    """
+    result = await _get(f"/ring0/queue/{result_id}")
+    if isinstance(result, dict) and "error" in result:
+        return f"Error: {result['error']}"
+
+    from datetime import datetime
+    created = datetime.fromtimestamp(result.get("created_at", 0)).strftime("%Y-%m-%d %H:%M")
+    output = result.get("output", "(no output)")
+    rollup = f"\nThis result accumulated from {result['run_count']} runs." if result.get("run_count", 1) > 1 else ""
+    cost = result.get("execution_cost_usd", 0)
+    cost_str = f"${cost:.4f}" if cost else "—"
+
+    return (
+        f"Task: {result['task_name']} ({result['task_id']})\n"
+        f"Status: {result['status']} | Priority: {result['priority']} | Cost: {cost_str}\n"
+        f"Completed: {created}{rollup}\n"
+        f"\n--- Output ---\n\n{output}"
+    )
+
+
+@mcp.tool()
+async def review_queue_item(result_id: str, action: str) -> str:
+    """Mark a queue item as reviewed with a disposition.
+
+    Args:
+        result_id: The result ID to review
+        action: Disposition — "done" (handled), "defer" (come back later),
+                "delegate" (hand off to someone/something), or "followup" (needs follow-up action)
+    """
+    result = await _post(f"/ring0/queue/{result_id}/review", {"action": action})
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return f"Marked as '{action}'."
 
 
 if __name__ == "__main__":

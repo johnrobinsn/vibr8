@@ -1,4 +1,4 @@
-.PHONY: dev dev-api dev-frontend build test test-py test-frontend install
+.PHONY: dev dev-api dev-frontend build test test-py test-frontend install docker-hub-build docker-hub-run
 
 # Run both Python backend and Vite frontend
 dev:
@@ -46,3 +46,10 @@ test-frontend:
 install:
 	uv sync
 	cd web && bun install
+
+# Docker hub image
+docker-hub-build:
+	bin/vibr8-hub build
+
+docker-hub-run:
+	bin/vibr8-hub run --defaults --gpu

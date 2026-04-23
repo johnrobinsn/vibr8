@@ -1,0 +1,703 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── vibr8-hub: Docker lifecycle manager for vibr8 hub server ─────────────────
+#
+# Usage: vibr8-hub <command> [flags]
+#
+# Commands:
+#   build             Build hub Docker images
+#   run               Create and start the hub container
+#   stop              Stop the hub container
+#   start             Start a stopped container
+#   restart           Restart the container
+#   logs              Tail logs (-f to follow)
+#   status            Show hub status
+#   update            Rebuild image and recreate container (preserves data)
+#   backup            Backup persistent data to tarball
+#   restore           Restore from backup tarball
+#   warmup            Pre-download ML models
+#   shell             Open bash in running container
+#   destroy           Remove container (--keep-data to preserve volumes)
+
+CONTAINER_NAME="vibr8-hub"
+IMAGE_NAME="vibr8-hub"
+NODE_IMAGE_NAME="vibr8-node"
+DEFAULT_PORT="3456"
+DEFAULT_DATA_DIR="$HOME/.vibr8-hub"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+_die()  { echo "Error: $*" >&2; exit 1; }
+_info() { echo "==> $*"; }
+_warn() { echo "Warning: $*" >&2; }
+
+_container_exists() {
+    docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1
+}
+
+_container_running() {
+    [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" = "true" ]
+}
+
+_require_docker() {
+    command -v docker >/dev/null 2>&1 || _die "Docker is not installed"
+    docker info >/dev/null 2>&1 || _die "Cannot connect to Docker. Is the daemon running?"
+}
+
+_detect_gpu() {
+    command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1
+}
+
+_read_config() {
+    local config="$1/config.env"
+    [ -f "$config" ] || return 1
+    # shellcheck disable=SC1090
+    source "$config"
+}
+
+# ── Build ────────────────────────────────────────────────────────────────────
+
+cmd_build() {
+    local no_remote_desktop=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-remote-desktop) no_remote_desktop=true; shift ;;
+            *) _die "Unknown flag: $1" ;;
+        esac
+    done
+
+    _require_docker
+
+    # Stage MCP tools into a temporary build context
+    local build_ctx
+    build_ctx="$(mktemp -d)"
+    trap "rm -rf '$build_ctx'" EXIT
+
+    # Copy repo into build context
+    _info "Staging build context ..."
+    rsync -a --exclude='.git' --exclude='node_modules' --exclude='web/node_modules' \
+        --exclude='__pycache__' --exclude='.venv' --exclude='*.pyc' \
+        "$REPO_ROOT/" "$build_ctx/"
+
+    # Stage MCP tools if available
+    mkdir -p "$build_ctx/tools"
+    local agentmail_dir="${AGENTMAIL_DIR:-/mntc/code/agentmail}"
+    local checkm8_dir="${CHECKM8_DIR:-/mntc/code/checkm8}"
+
+    if [ -d "$agentmail_dir" ]; then
+        _info "Staging agentmail from $agentmail_dir"
+        cp -r "$agentmail_dir" "$build_ctx/tools/agentmail"
+    else
+        mkdir -p "$build_ctx/tools/agentmail"
+    fi
+
+    if [ -d "$checkm8_dir" ]; then
+        _info "Staging checkm8 from $checkm8_dir"
+        cp -r "$checkm8_dir" "$build_ctx/tools/checkm8"
+    else
+        mkdir -p "$build_ctx/tools/checkm8"
+    fi
+
+    if $no_remote_desktop; then
+        _build_lite "$build_ctx"
+    else
+        _build_full "$build_ctx"
+    fi
+
+    _info "Build complete."
+}
+
+_build_full() {
+    local ctx="$1"
+
+    # Layer 1: base-deps (shared with nodes)
+    if ! docker image inspect "$NODE_IMAGE_NAME:base-deps" >/dev/null 2>&1; then
+        _info "Building $NODE_IMAGE_NAME:base-deps ..."
+        docker build -f "$ctx/Dockerfile.node-base-deps" -t "$NODE_IMAGE_NAME:base-deps" "$ctx"
+    else
+        _info "$NODE_IMAGE_NAME:base-deps exists, skipping (use --force to rebuild)."
+    fi
+
+    # Layer 2: gui-deps (shared with nodes)
+    if ! docker image inspect "$NODE_IMAGE_NAME:gui-deps" >/dev/null 2>&1; then
+        _info "Building $NODE_IMAGE_NAME:gui-deps ..."
+        docker build -f "$ctx/Dockerfile.node-gui-deps" -t "$NODE_IMAGE_NAME:gui-deps" "$ctx"
+    else
+        _info "$NODE_IMAGE_NAME:gui-deps exists, skipping."
+    fi
+
+    # Layer 3: hub-deps
+    _info "Building $IMAGE_NAME:deps ..."
+    docker build -f "$ctx/Dockerfile.hub-deps" -t "$IMAGE_NAME:deps" "$ctx"
+
+    # Layer 4: hub (code layer — always rebuild)
+    _info "Building $IMAGE_NAME:latest ..."
+    docker build -f "$ctx/Dockerfile.hub" -t "$IMAGE_NAME:latest" "$ctx"
+}
+
+_build_lite() {
+    local ctx="$1"
+
+    # Layer 1: base-deps (shared)
+    if ! docker image inspect "$NODE_IMAGE_NAME:base-deps" >/dev/null 2>&1; then
+        _info "Building $NODE_IMAGE_NAME:base-deps ..."
+        docker build -f "$ctx/Dockerfile.node-base-deps" -t "$NODE_IMAGE_NAME:base-deps" "$ctx"
+    else
+        _info "$NODE_IMAGE_NAME:base-deps exists, skipping."
+    fi
+
+    # Layer 2: hub-lite-deps
+    _info "Building $IMAGE_NAME:lite-deps ..."
+    docker build -f "$ctx/Dockerfile.hub-lite-deps" -t "$IMAGE_NAME:lite-deps" "$ctx"
+
+    # Layer 3: hub-lite (code layer — always rebuild)
+    _info "Building $IMAGE_NAME:lite ..."
+    docker build -f "$ctx/Dockerfile.hub-lite" -t "$IMAGE_NAME:lite" "$ctx"
+}
+
+# ── Run ──────────────────────────────────────────────────────────────────────
+
+cmd_run() {
+    local port="$DEFAULT_PORT"
+    local data_dir="$DEFAULT_DATA_DIR"
+    local code_dir=""
+    local gpu_mode="auto"
+    local gpu_device=""
+    local display="1920x1080"
+    local no_remote_desktop=false
+    local external_ssl=false
+    local defaults_mode=false
+    local admin_user="" admin_password=""
+    local openai_key="" anthropic_key=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)              port="$2"; shift 2 ;;
+            --data-dir)          data_dir="$2"; shift 2 ;;
+            --code-dir)          code_dir="$2"; shift 2 ;;
+            --gpu)               gpu_mode="on"; shift ;;
+            --no-gpu)            gpu_mode="off"; shift ;;
+            --gpu-device)        gpu_device="$2"; gpu_mode="on"; shift 2 ;;
+            --display)           display="$2"; shift 2 ;;
+            --no-remote-desktop) no_remote_desktop=true; shift ;;
+            --external-ssl)            external_ssl=true; shift ;;
+            --defaults)          defaults_mode=true; shift ;;
+            --admin-user)        admin_user="$2"; shift 2 ;;
+            --admin-password)    admin_password="$2"; shift 2 ;;
+            --openai-key)        openai_key="$2"; shift 2 ;;
+            --anthropic-key)     anthropic_key="$2"; shift 2 ;;
+            *) _die "Unknown flag: $1" ;;
+        esac
+    done
+
+    _require_docker
+
+    if _container_exists; then
+        _die "Hub container already exists. Use 'vibr8-hub start' to start it, or 'vibr8-hub destroy' to remove it."
+    fi
+
+    # Auto-detect GPU
+    if [ "$gpu_mode" = "auto" ]; then
+        if _detect_gpu; then
+            gpu_mode="on"
+            _info "NVIDIA GPU detected — enabling GPU passthrough."
+        else
+            gpu_mode="off"
+        fi
+    fi
+
+    # Select image
+    local image_tag="latest"
+    if $no_remote_desktop; then
+        image_tag="lite"
+    fi
+
+    # Check image exists, build if not
+    if ! docker image inspect "$IMAGE_NAME:$image_tag" >/dev/null 2>&1; then
+        _info "Image $IMAGE_NAME:$image_tag not found. Building ..."
+        if $no_remote_desktop; then
+            cmd_build --no-remote-desktop
+        else
+            cmd_build
+        fi
+    fi
+
+    # Create data directories
+    mkdir -p "$data_dir"/{vibr8,claude,certs,cache/huggingface,cache/torch,voice}
+
+    # Write config for update/recreate
+    cat > "$data_dir/config.env" <<EOF
+PORT=$port
+DATA_DIR=$data_dir
+CODE_DIR=${code_dir:-}
+GPU_MODE=$gpu_mode
+GPU_DEVICE=$gpu_device
+DISPLAY_RES=$display
+NO_REMOTE_DESKTOP=$no_remote_desktop
+EXTERNAL_SSL=$external_ssl
+IMAGE_TAG=$image_tag
+EOF
+
+    # Build docker create args
+    local args=(
+        --name "$CONTAINER_NAME"
+        --restart unless-stopped
+        --add-host=host.docker.internal:host-gateway
+        -p "${port}:3456"
+        -v "$data_dir/vibr8:/home/vibr8/.vibr8"
+        -v "$data_dir/claude:/home/vibr8/.claude"
+        -v "$data_dir/certs:/app/certs"
+        -v "$data_dir/cache/huggingface:/home/vibr8/.cache/huggingface"
+        -v "$data_dir/cache/torch:/home/vibr8/.cache/torch"
+        -v "$data_dir/voice:/data/voice"
+    )
+
+    # Mount code directory
+    if [ -n "$code_dir" ]; then
+        code_dir="$(cd "$code_dir" 2>/dev/null && pwd)" || _die "Code directory '$code_dir' does not exist"
+        args+=(-v "$code_dir:/code")
+    fi
+
+    # GPU passthrough
+    if [ "$gpu_mode" = "on" ]; then
+        if [ -n "$gpu_device" ]; then
+            args+=(--gpus "\"device=${gpu_device}\"")
+        else
+            args+=(--gpus all)
+        fi
+    fi
+
+    # Virtual display
+    if ! $no_remote_desktop; then
+        args+=(-e "VIRTUAL_DISPLAY=$display")
+    fi
+
+    # SSL
+    if $external_ssl; then
+        args+=(-e "VIBR8_NO_SSL=1")
+    fi
+
+    # Admin credentials
+    if $defaults_mode; then
+        args+=(-e "VIBR8_DEFAULTS=1")
+    fi
+    if [ -n "$admin_user" ]; then
+        args+=(-e "VIBR8_ADMIN_USER=$admin_user")
+    fi
+    if [ -n "$admin_password" ]; then
+        args+=(-e "VIBR8_ADMIN_PASSWORD=$admin_password")
+    fi
+
+    # API keys
+    if [ -n "$openai_key" ]; then
+        args+=(-e "OPENAI_API_KEY=$openai_key")
+    elif [ -n "${OPENAI_API_KEY:-}" ]; then
+        args+=(-e "OPENAI_API_KEY=$OPENAI_API_KEY")
+    fi
+    if [ -n "$anthropic_key" ]; then
+        args+=(-e "ANTHROPIC_API_KEY=$anthropic_key")
+    elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        args+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+    fi
+
+    # Seed Claude CLI auth from host
+    for f in .credentials.json credentials.json; do
+        if [ -f "$HOME/.claude/$f" ]; then
+            args+=(-v "$HOME/.claude/$f:/home/vibr8/.claude/$f:ro")
+        fi
+    done
+
+    # Create and start
+    _info "Creating hub container ..."
+    docker create "${args[@]}" "$IMAGE_NAME:$image_tag" >/dev/null
+
+    _info "Starting hub ..."
+    docker start "$CONTAINER_NAME"
+
+    # Wait for first-run setup to complete and capture credentials from logs
+    local creds_shown=false
+    for _i in $(seq 1 30); do
+        local logs
+        logs="$(docker logs "$CONTAINER_NAME" 2>&1)"
+        if echo "$logs" | grep -q "Admin credentials"; then
+            echo ""
+            echo "$logs" | sed -n '/Admin credentials/,/vibr8-hub logs)/p'
+            creds_shown=true
+            break
+        fi
+        if echo "$logs" | grep -q "Server running on"; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    echo ""
+    _info "vibr8 hub is starting!"
+    local scheme="https"
+    if $external_ssl; then scheme="http"; fi
+    echo "  URL:       ${scheme}://localhost:${port}"
+    echo "  Data dir:  $data_dir"
+    echo "  Image:     $IMAGE_NAME:$image_tag"
+    if ! $no_remote_desktop; then
+        echo "  Display:   $display"
+    fi
+    if [ "$gpu_mode" = "on" ]; then
+        if [ -n "$gpu_device" ]; then
+            echo "  GPU:       NVIDIA (device=$gpu_device)"
+        else
+            echo "  GPU:       NVIDIA (all GPUs)"
+        fi
+    fi
+    if ! $creds_shown; then
+        echo ""
+        echo "View logs with:  vibr8-hub logs -f"
+        echo "Open shell with: vibr8-hub shell"
+    fi
+}
+
+# ── Start / Stop / Restart ───────────────────────────────────────────────────
+
+cmd_start() {
+    _container_exists || _die "Hub container not found. Run 'vibr8-hub run' first."
+    if _container_running; then
+        _info "Hub is already running."
+        return
+    fi
+    _info "Starting hub ..."
+    docker start "$CONTAINER_NAME"
+    _info "Started. Use 'vibr8-hub logs -f' to follow."
+}
+
+cmd_stop() {
+    _container_exists || _die "Hub container not found."
+    if ! _container_running; then
+        _info "Hub is not running."
+        return
+    fi
+    _info "Stopping hub ..."
+    docker stop "$CONTAINER_NAME"
+    _info "Stopped."
+}
+
+cmd_restart() {
+    _container_exists || _die "Hub container not found."
+    _info "Restarting hub ..."
+    docker restart "$CONTAINER_NAME"
+    _info "Restarted."
+}
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+
+cmd_logs() {
+    _container_exists || _die "Hub container not found."
+    local follow=""
+    [[ "${1:-}" == "-f" || "${1:-}" == "--follow" ]] && follow="-f"
+    docker logs "$CONTAINER_NAME" --tail 200 $follow
+}
+
+# ── Status ───────────────────────────────────────────────────────────────────
+
+cmd_status() {
+    if ! _container_exists; then
+        echo "Hub: not created"
+        echo "  Run 'vibr8-hub run' to create and start."
+        return
+    fi
+
+    local state uptime=""
+    state="$(docker container inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null)"
+    if [ "$state" = "running" ]; then
+        uptime="$(docker container inspect -f '{{.State.StartedAt}}' "$CONTAINER_NAME" 2>/dev/null)"
+    fi
+
+    local image
+    image="$(docker container inspect -f '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null)"
+
+    local port
+    port="$(docker container inspect -f '{{(index (index .NetworkSettings.Ports "3456/tcp") 0).HostPort}}' "$CONTAINER_NAME" 2>/dev/null || echo "unknown")"
+
+    echo "Hub: $CONTAINER_NAME"
+    echo "  Status:  $state"
+    [ -n "$uptime" ] && echo "  Started: $uptime"
+    echo "  Image:   $image"
+    echo "  Port:    $port"
+    # Check if running with external SSL (no built-in certs)
+    local scheme="https"
+    if docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | grep -q "VIBR8_NO_SSL=1"; then
+        scheme="http"
+    fi
+    echo "  URL:     ${scheme}://localhost:${port}"
+}
+
+# ── Update ───────────────────────────────────────────────────────────────────
+
+cmd_update() {
+    _require_docker
+
+    local data_dir="$DEFAULT_DATA_DIR"
+    local no_remote_desktop=false
+
+    # Try to read config from existing data dir
+    if [ -f "$data_dir/config.env" ]; then
+        # shellcheck disable=SC1090
+        source "$data_dir/config.env"
+        no_remote_desktop="${NO_REMOTE_DESKTOP:-false}"
+    fi
+
+    # Rebuild code layer
+    if [ "$no_remote_desktop" = "true" ]; then
+        cmd_build --no-remote-desktop
+    else
+        cmd_build
+    fi
+
+    # Recreate container if it exists
+    if _container_exists; then
+        local was_running=false
+        if _container_running; then
+            was_running=true
+            _info "Stopping hub ..."
+            docker stop "$CONTAINER_NAME" >/dev/null
+        fi
+
+        _info "Removing old container ..."
+        docker rm "$CONTAINER_NAME" >/dev/null
+
+        # Recreate from saved config
+        if [ -f "$data_dir/config.env" ]; then
+            _info "Recreating container from saved config ..."
+            # Re-run with saved config (data volumes are preserved)
+            # shellcheck disable=SC1090
+            source "$data_dir/config.env"
+            local run_args=()
+            run_args+=(--port "${PORT:-3456}")
+            run_args+=(--data-dir "$data_dir")
+            [ -n "${CODE_DIR:-}" ] && run_args+=(--code-dir "$CODE_DIR")
+            [ "${GPU_MODE:-off}" = "on" ] && run_args+=(--gpu)
+            [ -n "${GPU_DEVICE:-}" ] && run_args+=(--gpu-device "$GPU_DEVICE")
+            [ -n "${DISPLAY_RES:-}" ] && run_args+=(--display "$DISPLAY_RES")
+            [ "${NO_REMOTE_DESKTOP:-false}" = "true" ] && run_args+=(--no-remote-desktop)
+            [ "${EXTERNAL_SSL:-false}" = "true" ] && run_args+=(--external-ssl)
+
+            cmd_run "${run_args[@]}"
+        else
+            _warn "No saved config found. Run 'vibr8-hub run' to recreate."
+        fi
+    else
+        _info "No container to update. Run 'vibr8-hub run' to create."
+    fi
+}
+
+# ── Backup / Restore ────────────────────────────────────────────────────────
+
+cmd_backup() {
+    local data_dir="$DEFAULT_DATA_DIR"
+    local include_voice=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --include-voice) include_voice=true; shift ;;
+            --data-dir)      data_dir="$2"; shift 2 ;;
+            *) _die "Unknown flag: $1" ;;
+        esac
+    done
+
+    [ -d "$data_dir" ] || _die "Data directory not found: $data_dir"
+
+    local timestamp
+    timestamp="$(date +%Y%m%d-%H%M)"
+    local backup_file="vibr8-hub-backup-${timestamp}.tar.gz"
+
+    local tar_args=("vibr8" "claude" "certs")
+    if $include_voice; then
+        tar_args+=("voice")
+    fi
+
+    _info "Backing up to $backup_file ..."
+    tar -czf "$backup_file" -C "$data_dir" "${tar_args[@]}"
+
+    local size
+    size="$(du -sh "$backup_file" | cut -f1)"
+    _info "Backup complete: $backup_file ($size)"
+    if ! $include_voice; then
+        echo "  Note: Voice logs excluded. Use --include-voice to include them."
+    fi
+}
+
+cmd_restore() {
+    local backup_file="${1:?Usage: vibr8-hub restore <backup.tar.gz> [--data-dir PATH]}"
+    shift
+    local data_dir="$DEFAULT_DATA_DIR"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --data-dir) data_dir="$2"; shift 2 ;;
+            *) _die "Unknown flag: $1" ;;
+        esac
+    done
+
+    [ -f "$backup_file" ] || _die "Backup file not found: $backup_file"
+
+    if _container_running; then
+        _info "Stopping hub before restore ..."
+        docker stop "$CONTAINER_NAME" >/dev/null
+    fi
+
+    mkdir -p "$data_dir"
+    _info "Restoring from $backup_file to $data_dir ..."
+    tar -xzf "$backup_file" -C "$data_dir"
+
+    _info "Restore complete."
+    if _container_exists; then
+        echo "  Start with: vibr8-hub start"
+    else
+        echo "  Run with:   vibr8-hub run"
+    fi
+}
+
+# ── Warmup ───────────────────────────────────────────────────────────────────
+
+cmd_warmup() {
+    _container_exists || _die "Hub container not found. Run 'vibr8-hub run' first."
+
+    if ! _container_running; then
+        _info "Starting hub for warmup ..."
+        docker start "$CONTAINER_NAME"
+    fi
+
+    _info "Pre-downloading ML models ..."
+    docker exec "$CONTAINER_NAME" /app/bin/hub-entrypoint.sh warmup
+    _info "Warmup complete. Models cached in data volume."
+}
+
+# ── Shell ────────────────────────────────────────────────────────────────────
+
+cmd_shell() {
+    _container_running || _die "Hub is not running."
+    docker exec -it "$CONTAINER_NAME" /bin/bash
+}
+
+# ── Destroy ──────────────────────────────────────────────────────────────────
+
+cmd_destroy() {
+    local keep_data=false
+    local data_dir="$DEFAULT_DATA_DIR"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --keep-data) keep_data=true; shift ;;
+            --data-dir)  data_dir="$2"; shift 2 ;;
+            *) _die "Unknown flag: $1" ;;
+        esac
+    done
+
+    if _container_running; then
+        _info "Stopping hub ..."
+        docker stop "$CONTAINER_NAME" >/dev/null
+    fi
+
+    if _container_exists; then
+        _info "Removing container ..."
+        docker rm "$CONTAINER_NAME" >/dev/null
+    fi
+
+    if $keep_data; then
+        _info "Container removed. Data kept at $data_dir"
+    else
+        if [ -d "$data_dir" ]; then
+            _info "Removing data at $data_dir ..."
+            rm -rf "$data_dir"
+        fi
+        _info "Hub destroyed."
+    fi
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+_usage() {
+    cat <<'EOF'
+Usage: vibr8-hub <command> [flags]
+
+Commands:
+  build             Build hub Docker images
+  run               Create and start the hub container
+  stop              Stop the hub container
+  start             Start a stopped container
+  restart           Restart the container
+  logs              Tail logs (-f to follow)
+  status            Show hub status
+  update            Rebuild image and recreate container (preserves data)
+  backup            Backup persistent data to tarball
+  restore           Restore from backup tarball
+  warmup            Pre-download ML models
+  shell             Open bash in running container
+  destroy           Remove container (--keep-data to preserve volumes)
+
+Flags for 'build':
+  --no-remote-desktop       Build lite image without virtual desktop
+
+Flags for 'run':
+  --port PORT               Host port (default: 3456)
+  --gpu / --no-gpu          NVIDIA GPU passthrough (default: auto-detect)
+  --gpu-device ID           Specific GPU index
+  --display WxH             Virtual display resolution (default: 1920x1080)
+  --no-remote-desktop       Use lite image without virtual desktop
+  --external-ssl            Skip built-in SSL (use when behind a reverse proxy)
+  --admin-user USER         Admin username
+  --admin-password PASS     Admin password
+  --defaults                Accept all defaults (auto-generate admin creds)
+  --data-dir PATH           Host path for persistent data (default: ~/.vibr8-hub)
+  --code-dir PATH           Host code directory to mount at /code
+  --openai-key KEY          OpenAI API key (for TTS)
+  --anthropic-key KEY       Anthropic API key (for Claude CLI)
+
+Flags for 'backup':
+  --include-voice           Include voice logs (can be large)
+
+Examples:
+  vibr8-hub run --defaults --gpu                          # One-liner easy button
+  vibr8-hub run --defaults --gpu --openai-key sk-...      # Headless with keys
+  vibr8-hub run --admin-user john --admin-password s3cret  # Explicit creds
+  vibr8-hub run --defaults --no-remote-desktop             # Lite mode (no desktop)
+  vibr8-hub build                                          # Build full image
+  vibr8-hub build --no-remote-desktop                      # Build lite image
+  vibr8-hub update                                         # Rebuild + recreate
+  vibr8-hub logs -f                                        # Follow logs
+  vibr8-hub backup                                         # Backup data
+  vibr8-hub backup --include-voice                         # Backup with voice logs
+  vibr8-hub restore vibr8-hub-backup-20260416-1200.tar.gz  # Restore
+  vibr8-hub warmup                                         # Pre-download models
+  vibr8-hub shell                                          # Open bash
+  vibr8-hub destroy                                        # Remove everything
+  vibr8-hub destroy --keep-data                            # Remove container only
+EOF
+}
+
+main() {
+    local cmd="${1:-}"
+    [ -n "$cmd" ] || { _usage; exit 1; }
+    shift
+
+    case "$cmd" in
+        build)   cmd_build "$@" ;;
+        run)     cmd_run "$@" ;;
+        start)   cmd_start "$@" ;;
+        stop)    cmd_stop "$@" ;;
+        restart) cmd_restart "$@" ;;
+        logs)    cmd_logs "$@" ;;
+        status)  cmd_status "$@" ;;
+        update)  cmd_update "$@" ;;
+        backup)  cmd_backup "$@" ;;
+        restore) cmd_restore "$@" ;;
+        warmup)  cmd_warmup "$@" ;;
+        shell)   cmd_shell "$@" ;;
+        destroy) cmd_destroy "$@" ;;
+        help|-h|--help) _usage ;;
+        *)       _die "Unknown command: $cmd. Run 'vibr8-hub help' for usage." ;;
+    esac
+}
+
+main "$@"

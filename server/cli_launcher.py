@@ -91,6 +91,7 @@ class LaunchOptions:
     nodeId: Optional[str] = None
     agentType: Optional[str] = None
     agentConfig: Optional[Dict[str, Any]] = None
+    isBackgroundTask: bool = False
 
 
 @dataclass
@@ -108,6 +109,7 @@ class _RelaunchOptions:
     worktreeInfo: Optional[WorktreeInfo] = None
     resumeSessionId: Optional[str] = None
     mcpConfig: Optional[str] = None
+    isBackgroundTask: bool = False
 
 
 # ─── CliLauncher ─────────────────────────────────────────────────────────────
@@ -265,6 +267,7 @@ class CliLauncher:
                 worktreeInfo=options.worktreeInfo,
                 mcpConfig=options.mcpConfig,
                 resumeSessionId=options.resumeSessionId,
+                isBackgroundTask=options.isBackgroundTask,
             )
             asyncio.ensure_future(self._spawn_cli(session_id, info, relaunch_opts))
 
@@ -353,7 +356,9 @@ class CliLauncher:
             if resolved:
                 binary = resolved
 
-        sdk_url = f"ws://localhost:{self._port}/ws/cli/{session_id}"
+        cert_dir = Path(__file__).parent.parent / "certs"
+        scheme = "wss" if (cert_dir / "cert.pem").exists() and (cert_dir / "key.pem").exists() else "ws"
+        sdk_url = f"{scheme}://localhost:{self._port}/ws/cli/{session_id}"
 
         args: List[str] = [
             "--sdk-url", sdk_url,
@@ -392,8 +397,18 @@ class CliLauncher:
         args.extend(["-p", ""])
 
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        if scheme == "wss":
+            env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
         if options.env:
             env.update(options.env)
+
+        preexec_fn = None
+        if options.isBackgroundTask:
+            node_opts = env.get("NODE_OPTIONS", "")
+            env["NODE_OPTIONS"] = (node_opts + " --max-old-space-size=2048").strip()
+
+            def preexec_fn() -> None:
+                os.nice(10)
 
         # Ensure cwd exists (user may have specified a new project directory)
         if info.cwd:
@@ -411,6 +426,7 @@ class CliLauncher:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            preexec_fn=preexec_fn,
         )
 
         info.pid = proc.pid

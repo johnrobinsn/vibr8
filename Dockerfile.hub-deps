@@ -1,0 +1,20 @@
+# Hub deps layer — ML stack + hub-specific system deps on top of gui-deps.
+# Contains NO app code — only slow-changing dependencies.
+# Build: docker build -f Dockerfile.hub-deps -t vibr8-hub:deps .
+# Requires: vibr8-node:gui-deps (Dockerfile.node-gui-deps)
+
+FROM vibr8-node:gui-deps
+
+USER root
+
+# Hub system deps (openssl for cert generation)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Hub Python deps (ML stack + full server deps)
+COPY requirements-hub.txt /tmp/requirements-hub.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-hub.txt && \
+    rm /tmp/requirements-hub.txt
+
+USER vibr8

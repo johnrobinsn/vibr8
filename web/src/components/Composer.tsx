@@ -7,10 +7,11 @@ import { ShieldIcon } from "./ShieldIcon.js";
 
 let idCounter = 0;
 
-interface ImageAttachment {
+interface FileAttachment {
   name: string;
   base64: string;
   mediaType: string;
+  isImage: boolean;
 }
 
 function readFileAsBase64(file: File): Promise<{ base64: string; mediaType: string }> {
@@ -33,11 +34,15 @@ interface CommandItem {
 
 export function Composer({ sessionId }: { sessionId: string }) {
   const [text, setText] = useState("");
-  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashMenuIndex, setSlashMenuIndex] = useState(0);
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
+  const attachMenuRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const cliConnected = useStore((s) => s.cliConnected);
   const sessionData = useStore((s) => s.sessions.get(sessionId));
@@ -116,36 +121,63 @@ export function Composer({ sessionId }: { sessionId: string }) {
     }
   }, [slashMenuIndex, slashMenuOpen]);
 
+  useEffect(() => {
+    if (!attachMenuOpen) return;
+    function handleClick(e: MouseEvent) {
+      if (attachMenuRef.current && !attachMenuRef.current.contains(e.target as Node)) {
+        setAttachMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [attachMenuOpen]);
+
   const selectCommand = useCallback((cmd: CommandItem) => {
     setText(`/${cmd.name} `);
     setSlashMenuOpen(false);
     textareaRef.current?.focus();
   }, []);
 
-  function handleSend() {
+  async function handleSend() {
     const msg = text.trim();
-    if (!msg || !isConnected) return;
+    if ((!msg && attachments.length === 0) || !isConnected) return;
+
+    const images = attachments.filter((a) => a.isImage);
+    const files = attachments.filter((a) => !a.isImage);
+
+    let content = msg;
+    if (files.length > 0) {
+      const paths: string[] = [];
+      for (const file of files) {
+        const blob = await fetch(`data:${file.mediaType};base64,${file.base64}`).then((r) => r.blob());
+        const f = new File([blob], file.name, { type: file.mediaType });
+        const { path } = await api.uploadToSession(sessionId, f);
+        paths.push(path);
+      }
+      const fileList = paths.map((p) => `[attached file: ${p}]`).join("\n");
+      content = msg ? `${fileList}\n${msg}` : fileList;
+    }
+    if (!content && images.length === 0) return;
 
     sendToSession(sessionId, {
       type: "user_message",
-      content: msg,
+      content,
       session_id: sessionId,
       images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64 })) : undefined,
     });
 
-    // Optimistic: show thinking/stop immediately instead of waiting for backend status
     useStore.getState().setSessionStatus(sessionId, "running");
 
     useStore.getState().appendMessage(sessionId, {
       id: `user-${Date.now()}-${++idCounter}`,
       role: "user",
-      content: msg,
+      content,
       images: images.length > 0 ? images.map((img) => ({ media_type: img.mediaType, data: img.base64 })) : undefined,
       timestamp: Date.now(),
     });
 
     setText("");
-    setImages([]);
+    setAttachments([]);
     setSlashMenuOpen(false);
 
     if (textareaRef.current) {
@@ -209,34 +241,33 @@ export function Composer({ sessionId }: { sessionId: string }) {
   async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files;
     if (!files) return;
-    const newImages: ImageAttachment[] = [];
+    const newAttachments: FileAttachment[] = [];
     for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) continue;
       const { base64, mediaType } = await readFileAsBase64(file);
-      newImages.push({ name: file.name, base64, mediaType });
+      newAttachments.push({ name: file.name, base64, mediaType, isImage: file.type.startsWith("image/") });
     }
-    setImages((prev) => [...prev, ...newImages]);
+    setAttachments((prev) => [...prev, ...newAttachments]);
     e.target.value = "";
   }
 
-  function removeImage(index: number) {
-    setImages((prev) => prev.filter((_, i) => i !== index));
+  function removeAttachment(index: number) {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
   }
 
   async function handlePaste(e: React.ClipboardEvent) {
     const items = e.clipboardData?.items;
     if (!items) return;
-    const newImages: ImageAttachment[] = [];
+    const newAttachments: FileAttachment[] = [];
     for (const item of Array.from(items)) {
       if (!item.type.startsWith("image/")) continue;
       const file = item.getAsFile();
       if (!file) continue;
       const { base64, mediaType } = await readFileAsBase64(file);
-      newImages.push({ name: `pasted-${Date.now()}.${file.type.split("/")[1]}`, base64, mediaType });
+      newAttachments.push({ name: `pasted-${Date.now()}.${file.type.split("/")[1]}`, base64, mediaType, isImage: true });
     }
-    if (newImages.length > 0) {
+    if (newAttachments.length > 0) {
       e.preventDefault();
-      setImages((prev) => [...prev, ...newImages]);
+      setAttachments((prev) => [...prev, ...newAttachments]);
     }
   }
 
@@ -256,23 +287,32 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
   const sessionStatus = useStore((s) => s.sessionStatus);
   const isRunning = sessionStatus.get(sessionId) === "running";
-  const canSend = text.trim().length > 0 && isConnected;
+  const canSend = (text.trim().length > 0 || attachments.length > 0) && isConnected;
 
   return (
     <div className="shrink-0 border-t border-cc-border bg-cc-card px-2 sm:px-4 py-2 sm:py-3">
       <div className="max-w-3xl mx-auto">
-        {/* Image thumbnails */}
-        {images.length > 0 && (
+        {/* Attachment previews */}
+        {attachments.length > 0 && (
           <div className="flex items-center gap-2 mb-2 flex-wrap">
-            {images.map((img, i) => (
+            {attachments.map((att, i) => (
               <div key={i} className="relative group">
-                <img
-                  src={`data:${img.mediaType};base64,${img.base64}`}
-                  alt={img.name}
-                  className="w-12 h-12 rounded-lg object-cover border border-cc-border"
-                />
+                {att.isImage ? (
+                  <img
+                    src={`data:${att.mediaType};base64,${att.base64}`}
+                    alt={att.name}
+                    className="w-12 h-12 rounded-lg object-cover border border-cc-border"
+                  />
+                ) : (
+                  <div className="w-12 h-12 rounded-lg border border-cc-border bg-cc-bg flex flex-col items-center justify-center" title={att.name}>
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" className="w-5 h-5 text-cc-muted">
+                      <path d="M4 1h5l4 4v10H4V1z" /><path d="M9 1v4h4" />
+                    </svg>
+                    <span className="text-[8px] text-cc-muted truncate w-10 text-center mt-0.5">{att.name.split(".").pop()}</span>
+                  </div>
+                )}
                 <button
-                  onClick={() => removeImage(i)}
+                  onClick={() => removeAttachment(i)}
                   className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-cc-error text-white flex items-center justify-center text-[10px] opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
                 >
                   <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5">
@@ -284,15 +324,10 @@ export function Composer({ sessionId }: { sessionId: string }) {
           </div>
         )}
 
-        {/* Hidden file input */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          onChange={handleFileSelect}
-          className="hidden"
-        />
+        {/* Hidden file inputs */}
+        <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleFileSelect} className="hidden" />
+        <input ref={photoInputRef} type="file" accept="image/*" multiple onChange={handleFileSelect} className="hidden" />
+        <input ref={fileInputRef} type="file" multiple onChange={handleFileSelect} className="hidden" />
 
         {/* Unified input card */}
         <div className={`relative bg-cc-input-bg border rounded-[14px] overflow-visible transition-colors ${
@@ -424,24 +459,59 @@ export function Composer({ sessionId }: { sessionId: string }) {
               <span>{isPlan ? "plan mode" : "accept edits"}</span>
             </button>
 
-            {/* Right: image + send/stop */}
+            {/* Right: attach + send/stop */}
             <div className="flex items-center gap-1">
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={!isConnected}
-                className={`flex items-center justify-center w-8 h-8 rounded-lg transition-colors ${
-                  isConnected
-                    ? "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
-                    : "text-cc-muted opacity-30 cursor-not-allowed"
-                }`}
-                title="Upload image"
-              >
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
-                  <rect x="2" y="2" width="12" height="12" rx="2" />
-                  <circle cx="5.5" cy="5.5" r="1" fill="currentColor" stroke="none" />
-                  <path d="M2 11l3-3 2 2 3-4 4 5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setAttachMenuOpen((v) => !v)}
+                  disabled={!isConnected}
+                  className={`flex items-center justify-center w-8 h-8 rounded-lg transition-colors ${
+                    isConnected
+                      ? "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+                      : "text-cc-muted opacity-30 cursor-not-allowed"
+                  }`}
+                  title="Attach file"
+                >
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4">
+                    <path d="M13.5 7.5l-5.8 5.8a3.2 3.2 0 0 1-4.5-4.5l5.8-5.8a2 2 0 0 1 2.8 2.8L6 11.6a.8.8 0 0 1-1.1-1.1L10.4 5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+                {attachMenuOpen && (
+                  <div ref={attachMenuRef} className="absolute bottom-full right-0 mb-1 bg-cc-card border border-cc-border rounded-lg shadow-lg py-1 min-w-[160px] z-50">
+                    <button
+                      className="flex items-center gap-2 w-full px-3 py-2 text-sm text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+                      onClick={() => { setAttachMenuOpen(false); cameraInputRef.current?.click(); }}
+                    >
+                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" className="w-4 h-4 text-cc-muted">
+                        <rect x="1.5" y="4" width="13" height="9" rx="1.5" />
+                        <circle cx="8" cy="8.5" r="2.5" />
+                        <path d="M5.5 4L6.5 2h3l1 2" />
+                      </svg>
+                      Take a photo
+                    </button>
+                    <button
+                      className="flex items-center gap-2 w-full px-3 py-2 text-sm text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+                      onClick={() => { setAttachMenuOpen(false); photoInputRef.current?.click(); }}
+                    >
+                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" className="w-4 h-4 text-cc-muted">
+                        <rect x="2" y="2" width="12" height="12" rx="2" />
+                        <circle cx="5.5" cy="5.5" r="1" fill="currentColor" stroke="none" />
+                        <path d="M2 11l3-3 2 2 3-4 4 5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      Choose photo
+                    </button>
+                    <button
+                      className="flex items-center gap-2 w-full px-3 py-2 text-sm text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
+                      onClick={() => { setAttachMenuOpen(false); fileInputRef.current?.click(); }}
+                    >
+                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" className="w-4 h-4 text-cc-muted">
+                        <path d="M4 1h5l4 4v10H4V1z" /><path d="M9 1v4h4" />
+                      </svg>
+                      Choose file
+                    </button>
+                  </div>
+                )}
+              </div>
 
               {isRunning ? (
                 <button

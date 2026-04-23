@@ -100,6 +100,25 @@ Docker images are provided for various configurations:
 - **Voice switching**: Say "vibr8 node {name}" to switch the active node
 - **Node config**: Stored at `~/.vibr8-node/config.json` on the node
 
+## Docker Hub Deployment
+
+Run the full vibr8 hub (server, Ring0, voice, virtual desktop, computer-use) in a single Docker container.
+
+```bash
+# One-liner — auto-generates admin credentials, auto-detects GPU
+bin/vibr8-hub run --defaults --gpu
+
+# With explicit credentials and API keys
+bin/vibr8-hub run --admin-user john --admin-password s3cret --openai-key sk-...
+
+# Lite mode (no virtual desktop, ~2GB smaller image)
+bin/vibr8-hub run --defaults --no-remote-desktop
+```
+
+The hub image includes the full virtual display stack (Xvfb, XFCE4, Chrome, VSCode) so it can act as its own local node with computer-use. Data persists in `~/.vibr8-hub/` across restarts and updates.
+
+Run `bin/vibr8-hub help` for the full CLI reference (build, run, stop, start, restart, logs, status, update, backup, restore, warmup, shell, destroy).
+
 ## Computer-Use Agent
 
 The computer-use agent uses a vision-language model (UI-TARS 7B) to control desktop GUIs autonomously. It takes screenshots, runs inference, parses actions, and executes them in a loop.
