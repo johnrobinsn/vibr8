@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { VoiceProfiles } from "./VoiceProfiles.js";
+import { VoiceFingerprints } from "./VoiceFingerprints.js";
 import { VoiceLogs } from "./VoiceLogs.js";
 import { ApiKeys } from "./ApiKeys.js";
 import { Devices } from "./DeviceTokens.js";
 import { AndroidDevices } from "./AndroidDevices.js";
 
-type Tab = "voice-profiles" | "voice-logs" | "api-keys" | "devices" | "android";
+type Tab = "voice-profiles" | "fingerprints" | "voice-logs" | "api-keys" | "devices" | "android";
 
 export function SettingsPage() {
   // Support deep-linking to a tab via hash fragment: #settings/api-keys
@@ -14,7 +15,7 @@ export function SettingsPage() {
     const match = hash.match(/^#\/settings\/(.+)$/);
     if (match) {
       const t = match[1] as Tab;
-      if (["voice-profiles", "voice-logs", "api-keys", "devices", "android"].includes(t)) return t;
+      if (["voice-profiles", "fingerprints", "voice-logs", "api-keys", "devices", "android"].includes(t)) return t;
     }
     return "voice-profiles";
   };
@@ -41,6 +42,7 @@ export function SettingsPage() {
         <div className="flex gap-1">
           {([
             { id: "voice-profiles" as Tab, label: "Voice Profiles" },
+            { id: "fingerprints" as Tab, label: "Speaker ID" },
             { id: "voice-logs" as Tab, label: "Voice Logs" },
             { id: "api-keys" as Tab, label: "API Keys" },
             { id: "devices" as Tab, label: "Devices" },
@@ -64,6 +66,7 @@ export function SettingsPage() {
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
         {tab === "voice-profiles" && <VoiceProfiles />}
+        {tab === "fingerprints" && <VoiceFingerprints />}
         {tab === "voice-logs" && <VoiceLogs />}
         {tab === "api-keys" && <ApiKeys />}
         {tab === "devices" && <Devices />}

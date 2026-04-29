@@ -223,12 +223,10 @@ export function Sidebar() {
     s.setCurrentSession(null);
     s.clearSessionState();
     s.setActiveNode(nodeId);
-    try {
-      await api.activateNode(nodeId);
-    } catch {
-      // revert on failure
-      s.setActiveNode(activeNodeId);
-    }
+    // Notify hub of active node change (for voice routing)
+    api.activateNode(nodeId).catch((err) => {
+      console.warn("[sidebar] Failed to activate node:", err);
+    });
   }
 
   // Focus edit input when entering edit mode

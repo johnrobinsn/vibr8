@@ -109,8 +109,17 @@ class STT:
         self._segment_time_begin: float = 0.0
         self._segment_time_end: float = 0.0
         self._idle_silence_time: float = 0.0  # seconds of silence in IDLE state
+        self._speaker_gate: dict | None = None  # {embedding: np.ndarray, threshold: float}
 
         self._state_machine = self._create_state_machine()
+
+    # ── Speaker gate ────────────────────────────────────────────────────
+
+    def set_speaker_gate(self, embedding: np.ndarray, threshold: float) -> None:
+        self._speaker_gate = {"embedding": embedding, "threshold": threshold}
+
+    def clear_speaker_gate(self) -> None:
+        self._speaker_gate = None
 
     # ── Shared model management ──────────────────────────────────────────
 
@@ -341,6 +350,22 @@ class STT:
                     combined = np.concatenate(s, axis=0)
                     float_buf = combined.astype(np.float32) / np.iinfo(np.int16).max
 
+                    speaker_gate = stt._speaker_gate
+                    if speaker_gate is not None:
+                        try:
+                            from server.speaker_model import embed, cosine_sim
+                            emb = embed(float_buf)
+                            sim = cosine_sim(emb, speaker_gate["embedding"])
+                            logger.info("[stt] Speaker gate: sim=%.3f threshold=%.3f %s",
+                                        sim, speaker_gate["threshold"],
+                                        "PASS" if sim >= speaker_gate["threshold"] else "REJECT")
+                            if sim < speaker_gate["threshold"]:
+                                s.clear()
+                                stt._notify_listeners("voice_not_detected", None)
+                                return
+                        except Exception:
+                            logger.warning("[stt] Speaker gate error — failing open", exc_info=True)
+
                     text = STT._transcribe(float_buf)
 
                     if params.verbose:
@@ -528,6 +553,9 @@ class STT:
                         transition.action(*args)
                     except Exception:
                         logger.exception("[stt] Error in state machine action")
+                if self.state == STT.State.IDLE and self.prompt_segments:
+                    logger.info("[stt] Recovering orphaned prompt_segments — re-entering PROMPT_WAIT")
+                    self.state = STT.State.PROMPT_WAIT
 
         return _StateMachine()
 

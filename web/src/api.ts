@@ -246,6 +246,18 @@ export interface VoiceProfile {
   updatedAt?: number;
 }
 
+export interface SpeakerFingerprint {
+  id: string;
+  name: string;
+  user: string;
+  createdAt: number;
+}
+
+export interface ActiveFingerprint {
+  fingerprintId: string | null;
+  threshold: number;
+}
+
 export interface VoiceSegment {
   id: string;
   sessionId: string;
@@ -458,6 +470,14 @@ export const api = {
   activateVoiceProfile: (id: string) => post<VoiceProfile>(`/voice/profiles/${encodeURIComponent(id)}/activate`),
   deactivateVoiceProfiles: () => post("/voice/profiles/deactivate"),
   getActiveVoiceProfile: () => get<VoiceProfile>("/voice/profiles/active"),
+
+  // Speaker Fingerprints
+  listFingerprints: () => get<SpeakerFingerprint[]>("/voice/fingerprints"),
+  createFingerprint: (data: { name: string; embedding: number[] }) => post<SpeakerFingerprint>("/voice/fingerprints", data),
+  deleteFingerprint: (id: string) => del(`/voice/fingerprints/${encodeURIComponent(id)}`),
+  getActiveFingerprint: () => get<ActiveFingerprint>("/voice/fingerprints/active"),
+  setActiveFingerprint: (data: { fingerprintId: string | null; threshold?: number }) => put<ActiveFingerprint>("/voice/fingerprints/active", data),
+  refreshSpeakerGate: () => post("/voice/fingerprints/refresh"),
 
   // Voice Recordings
   listVoiceRecordings: () => get<VoiceRecording[]>("/voice/recordings"),

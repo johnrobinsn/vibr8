@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 from server import env_manager, git_utils, session_names
-from server import voice_profiles, voice_logger
+from server import speaker_fingerprints, voice_profiles, voice_logger
 from server.usage_limits import get_usage_limits
 from server.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
 from server.worktree_tracker import WorktreeTracker, WorktreeMapping
@@ -105,8 +105,12 @@ def _format_session_output(messages: list[dict], permissions: list[dict]) -> str
             rid = perm.get("request_id", "?")
             tool = perm.get("tool_name", "?")
             desc = perm.get("description", "")
-            inp = json.dumps(perm.get("input", {}))[:300]
-            lines.append(f"  [{rid}] {tool}: {desc or inp}")
+            inp = json.dumps(perm.get("input", {}), indent=2)
+            if desc:
+                lines.append(f"  [{rid}] {tool}: {desc}")
+                lines.append(f"    Input: {inp}")
+            else:
+                lines.append(f"  [{rid}] {tool}: {inp}")
 
     return "\n".join(lines) if lines else "No readable messages."
 
@@ -1897,6 +1901,93 @@ def create_routes(
                 "isActive": True,
             })
         return web.json_response(profile)
+
+    # ── Speaker Fingerprints ─────────────────────────────────────────────
+
+    @routes.get("/api/voice/fingerprints")
+    async def fingerprints_list(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        fps = speaker_fingerprints.list_fingerprints(username)
+        return web.json_response(fps)
+
+    @routes.post("/api/voice/fingerprints")
+    async def fingerprints_create(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        body = await request.json()
+        name = body.get("name", "Untitled")
+        embedding = body.get("embedding")
+        if not embedding or not isinstance(embedding, list):
+            return web.json_response({"error": "embedding required"}, status=400)
+        fp = speaker_fingerprints.create_fingerprint(username, name, embedding)
+        return web.json_response({"id": fp["id"], "name": fp["name"], "user": fp["user"], "createdAt": fp["createdAt"]}, status=201)
+
+    @routes.delete("/api/voice/fingerprints/{id}")
+    async def fingerprints_delete(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        fp_id = request.match_info["id"]
+        deleted = speaker_fingerprints.delete_fingerprint(username, fp_id)
+        if not deleted:
+            return web.json_response({"error": "Fingerprint not found"}, status=404)
+        if webrtc_manager:
+            webrtc_manager.refresh_speaker_gates(username)
+        return web.json_response({"ok": True})
+
+    @routes.get("/api/voice/fingerprints/active")
+    async def fingerprints_active_get(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        active = speaker_fingerprints.get_active(username)
+        if not active:
+            return web.json_response({"fingerprintId": None, "threshold": 0.45})
+        return web.json_response(active)
+
+    @routes.put("/api/voice/fingerprints/active")
+    async def fingerprints_active_set(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        body = await request.json()
+        fp_id = body.get("fingerprintId")
+        threshold = float(body.get("threshold", 0.45))
+        if fp_id is None:
+            speaker_fingerprints.clear_active(username)
+            if webrtc_manager:
+                webrtc_manager.refresh_speaker_gates(username)
+            return web.json_response({"fingerprintId": None, "threshold": threshold})
+        config = speaker_fingerprints.set_active(username, fp_id, threshold)
+        if not config:
+            return web.json_response({"error": "Fingerprint not found"}, status=404)
+        if webrtc_manager:
+            webrtc_manager.refresh_speaker_gates(username)
+        return web.json_response(config)
+
+    @routes.post("/api/voice/fingerprints/refresh")
+    async def fingerprints_refresh(request: web.Request) -> web.Response:
+        """Re-apply speaker gate for the current user's active connections."""
+        username = _get_username(request)
+        if webrtc_manager:
+            webrtc_manager.refresh_speaker_gates(username)
+        return web.json_response({"ok": True})
+
+    @routes.post("/api/voice/fingerprints/test")
+    async def fingerprints_test(request: web.Request) -> web.Response:
+        """Accept audio (float32 mono 16kHz), return similarity scores vs all fingerprints."""
+        import numpy as np
+        username = _get_username(request)
+        body = await request.json()
+        audio = body.get("audio")
+        if not audio or not isinstance(audio, list):
+            return web.json_response({"error": "audio required (list of float32 samples)"}, status=400)
+        wav = np.array(audio, dtype=np.float32)
+        loop = asyncio.get_event_loop()
+        from server.speaker_model import embed, cosine_sim
+        emb = await loop.run_in_executor(None, embed, wav)
+        fps = speaker_fingerprints.list_fingerprints(username)
+        scores = []
+        for fp_meta in fps:
+            fp = speaker_fingerprints.get_fingerprint(username, fp_meta["id"])
+            if fp and "embedding" in fp:
+                ref = np.array(fp["embedding"], dtype=np.float32)
+                sim = cosine_sim(emb, ref)
+                scores.append({"id": fp["id"], "name": fp["name"], "similarity": round(sim, 4)})
+        return web.json_response({"scores": scores})
 
     # ── Voice Logs ───────────────────────────────────────────────────────
 

@@ -180,6 +180,28 @@ async def handle_playground_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def handle_enrollment_ws(request: web.Request) -> web.WebSocketResponse:
+    """Handle WebSocket connections for speaker fingerprint enrollment."""
+    ws = web.WebSocketResponse(heartbeat=20)
+    await ws.prepare(request)
+    client_id = request.match_info["client_id"]
+
+    webrtc_mgr: WebRTCManager = request.app["webrtc_manager"]
+    webrtc_mgr.register_enrollment_ws(client_id, ws)
+
+    logger.info("[enrollment] Client %s connected", client_id)
+
+    try:
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.ERROR:
+                break
+    finally:
+        webrtc_mgr.unregister_enrollment_ws(client_id)
+        logger.info("[enrollment] Client %s disconnected", client_id)
+
+    return ws
+
+
 async def handle_native_ws(request: web.Request) -> web.WebSocketResponse:
     """Handle native WebSocket from Android foreground service.
 
@@ -639,6 +661,7 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/terminal/{session_id}", handle_terminal_ws)
     if HAS_WEBRTC:
         app.router.add_get("/ws/playground/{client_id}", handle_playground_ws)
+        app.router.add_get("/ws/enrollment/{client_id}", handle_enrollment_ws)
     app.router.add_get("/ws/node/{node_id}", handle_node_ws)
 
     # REST API
@@ -691,8 +714,21 @@ def create_app() -> web.Application:
             except Exception:
                 logger.exception("[server] Failed to preload STT models")
 
+        async def _preload_tts() -> None:
+            try:
+                import os
+                engine = os.getenv("VIBR8_TTS_ENGINE", "openai").lower()
+                if engine == "kokoro":
+                    from server.tts_kokoro import _ensure_pipeline
+                    logger.info("[server] Preloading Kokoro TTS model (background thread)...")
+                    await asyncio.to_thread(_ensure_pipeline)
+                    logger.info("[server] Kokoro TTS model ready")
+            except Exception:
+                logger.exception("[server] Failed to preload Kokoro TTS model")
+
         if HAS_WEBRTC:
             spawn(_preload_stt())
+        spawn(_preload_tts())
 
         # Suppress noisy aioice STUN retry errors on closed transports.
         loop = asyncio.get_event_loop()

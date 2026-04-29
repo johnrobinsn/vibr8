@@ -206,6 +206,9 @@ class WebRTCManager:
         self._input_injectors: Dict[str, InputInjector] = {}
         self._playground_ws: Dict[str, object] = {}  # client_id → WS
         self._playground_clients: set[str] = set()  # client_ids that are playground
+        self._enrollment_ws: Dict[str, object] = {}  # client_id → enrollment WS
+        self._enrollment_listeners: Dict[str, object] = {}  # client_id → listener fn
+        self._client_usernames: Dict[str, str] = {}  # client_id → username
         # Shared screen capture: one per display, ref-counted across viewers
         self._shared_captures: Dict[str, ScreenCapture] = {}  # display → capture
         self._shared_capture_refs: Dict[str, set[str]] = {}  # display → {client_ids}
@@ -333,6 +336,23 @@ class WebRTCManager:
                 self._ws_bridge.broadcast_tts_muted("", muted, client_id=client_id)
             )
 
+    def refresh_speaker_gates(self, username: str) -> None:
+        """Reload speaker gate from disk for all clients belonging to *username*."""
+        from server.speaker_fingerprints import get_active_gate
+        gate = get_active_gate(username)
+        for cid, uname in self._client_usernames.items():
+            if uname != username:
+                continue
+            stt = self._stt_instances.get(cid)
+            if not stt:
+                continue
+            if gate:
+                stt.set_speaker_gate(gate["embedding"], gate["threshold"])
+                logger.info("[webrtc] client %s: speaker gate updated (threshold=%.3f)", cid, gate["threshold"])
+            else:
+                stt.clear_speaker_gate()
+                logger.info("[webrtc] client %s: speaker gate cleared", cid)
+
     def get_voice_mode(self, client_id: str) -> VoiceMode | None:
         """Return the active voice mode for *client_id*, or None."""
         return self._voice_modes.get(client_id)
@@ -451,6 +471,17 @@ class WebRTCManager:
                 stt.add_listener(self._make_stt_listener(client_id))
 
             self._stt_instances[client_id] = stt
+            self._client_usernames[client_id] = username
+
+            # Apply speaker gate if one is active for this user
+            from server.speaker_fingerprints import get_active_gate
+            gate = get_active_gate(username)
+            if gate:
+                stt.set_speaker_gate(gate["embedding"], gate["threshold"])
+                logger.info("[webrtc] client %s: speaker gate applied on connect (user=%s, threshold=%.3f, emb_norm=%.4f)",
+                            client_id, username, gate["threshold"], float(np.linalg.norm(gate["embedding"])))
+            else:
+                logger.info("[webrtc] client %s: no active speaker gate (user=%s)", client_id, username)
 
             # Create voice logger for audio persistence
             vl = VoiceLogger(username, session_id or client_id)
@@ -592,6 +623,13 @@ class WebRTCManager:
         """
 
         async def _on_stt_event(stt, event_type: str, data) -> None:
+            # Suppress transcript routing while enrollment is active —
+            # the enrollment listener handles its own events separately
+            if client_id in self._enrollment_ws and event_type in (
+                "final_transcript", "interim_transcript",
+            ):
+                return
+
             # Resolve the target session dynamically
             def _resolve_session() -> str | None:
                 if self._ws_bridge:
@@ -604,7 +642,13 @@ class WebRTCManager:
                     return
                 target_sid = None
                 if self._ring0_manager and self._ring0_manager.is_enabled:
-                    target_sid = self._ring0_manager.session_id
+                    if self._node_registry:
+                        active_nid = self._node_registry.active_node_id
+                        if active_nid != "local":
+                            from server.ws_bridge import WsBridge
+                            target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
+                    if not target_sid:
+                        target_sid = self._ring0_manager.session_id
                 if not target_sid:
                     target_sid = _resolve_session()
                 if target_sid:
@@ -639,13 +683,18 @@ class WebRTCManager:
                         if self._node_registry:
                             active_nid = self._node_registry.active_node_id
                             node = self._node_registry.get_node(active_nid)
-                            if node and node.tunnel and node.status == "online":
+                            if node and node.id != "local":
+                                if node.tunnel and node.status == "online":
+                                    logger.info("[stt] Routing to remote node %r (id=%s)", node.name, node.id[:8])
                                     await node.tunnel.send_fire_and_forget({
                                         "type": "ring0_input",
                                         "text": text,
                                         "sourceClientId": client_id,
                                     })
                                     return
+                                else:
+                                    logger.warning("[stt] Active node %r not routable: tunnel=%s status=%s — falling through to local",
+                                                   node.name, bool(node.tunnel), node.status)
                         # Local Ring0
                         r0sid = self._ring0_manager.session_id
                         if not r0sid and self._launcher and self._ws_bridge:
@@ -817,7 +866,14 @@ class WebRTCManager:
                     return
                 target_sid = None
                 if self._ring0_manager and self._ring0_manager.is_enabled:
-                    target_sid = self._ring0_manager.session_id
+                    # Route preview to remote node's Ring0 if active
+                    if self._node_registry:
+                        active_nid = self._node_registry.active_node_id
+                        if active_nid != "local":
+                            from server.ws_bridge import WsBridge
+                            target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
+                    if not target_sid:
+                        target_sid = self._ring0_manager.session_id
                 if not target_sid:
                     target_sid = _resolve_session()
                 if target_sid:
@@ -888,6 +944,94 @@ class WebRTCManager:
         """Unregister a playground WebSocket."""
         self._playground_ws.pop(client_id, None)
 
+    # ── Enrollment listener ──────────────────────────────────────────────
+
+    def _make_enrollment_listener(self, client_id: str):
+        """STT listener that extracts ECAPA embeddings and sends them to the enrollment WS."""
+
+        async def _on_enrollment_event(stt, event_type: str, data) -> None:
+            ws = self._enrollment_ws.get(client_id)
+            if not ws:
+                return
+
+            import json as _json
+
+            if event_type == "voice_level":
+                try:
+                    await ws.send_str(_json.dumps({
+                        "type": "voice_level",
+                        "rmsDb": data["rmsDb"],
+                    }))
+                except Exception:
+                    pass
+            elif event_type == "voice_was_detected":
+                try:
+                    await ws.send_str(_json.dumps({"type": "voice_activity", "active": True}))
+                except Exception:
+                    pass
+            elif event_type == "voice_not_detected":
+                try:
+                    await ws.send_str(_json.dumps({"type": "voice_activity", "active": False}))
+                except Exception:
+                    pass
+            elif event_type == "segment_confirmed":
+                transcript = data.get("transcript", "").strip()
+                audio = data.get("audio")
+                if audio is None:
+                    return
+                import numpy as np
+                from server.speaker_model import embed, cosine_sim
+                loop = asyncio.get_event_loop()
+                float_buf = audio.astype(np.float32) / np.iinfo(np.int16).max
+                emb = await loop.run_in_executor(None, embed, float_buf)
+                emb_list = emb.tolist()
+
+                username = self._client_usernames.get(client_id, "default")
+                from server import speaker_fingerprints
+                fps = speaker_fingerprints.list_fingerprints(username)
+                scores = []
+                for fp_meta in fps:
+                    fp = speaker_fingerprints.get_fingerprint(username, fp_meta["id"])
+                    if fp and "embedding" in fp:
+                        ref = np.array(fp["embedding"], dtype=np.float32)
+                        sim = cosine_sim(emb, ref)
+                        scores.append({"id": fp["id"], "name": fp["name"], "similarity": round(sim, 4)})
+
+                try:
+                    await ws.send_str(_json.dumps({
+                        "type": "enrollment_segment",
+                        "transcript": transcript,
+                        "embedding": emb_list,
+                        "scores": scores,
+                        "timeBegin": data.get("timeBegin", 0),
+                        "timeEnd": data.get("timeEnd", 0),
+                    }))
+                except Exception:
+                    pass
+
+        return _on_enrollment_event
+
+    def register_enrollment_ws(self, client_id: str, ws) -> None:
+        """Register an enrollment WebSocket and add enrollment listener to STT."""
+        self._enrollment_ws[client_id] = ws
+        stt = self._stt_instances.get(client_id)
+        if stt:
+            listener = self._make_enrollment_listener(client_id)
+            self._enrollment_listeners[client_id] = listener
+            stt.add_listener(listener)
+
+    def unregister_enrollment_ws(self, client_id: str) -> None:
+        """Unregister enrollment WebSocket and remove enrollment listener."""
+        self._enrollment_ws.pop(client_id, None)
+        listener = self._enrollment_listeners.pop(client_id, None)
+        if listener:
+            stt = self._stt_instances.get(client_id)
+            if stt:
+                try:
+                    stt.remove_listener(listener)
+                except ValueError:
+                    pass
+
     def update_stt_params(self, client_id: str, params: STTParams) -> None:
         """Update STT params for a live client (e.g. from playground slider)."""
         stt = self._stt_instances.get(client_id)
@@ -908,8 +1052,8 @@ class WebRTCManager:
         if not track or self.is_tts_muted(client_id):
             return
         try:
-            from server.tts import TTS_OpenAI
-            tts = TTS_OpenAI(opus_frame_handler=track.push_opus_frame)
+            from server.tts import create_tts
+            tts = create_tts(opus_frame_handler=track.push_opus_frame)
             await tts.say(phrase)
         except Exception:
             logger.exception("[guard] TTS failed for client %s phrase=%r", client_id, phrase)
@@ -1077,6 +1221,9 @@ class WebRTCManager:
         self._guard_enabled.pop(client_id, None)
         self._tts_muted.pop(client_id, None)
         self._playground_clients.discard(client_id)
+        self._enrollment_ws.pop(client_id, None)
+        self._enrollment_listeners.pop(client_id, None)
+        self._client_usernames.pop(client_id, None)
 
         # Clean up playground WS reference
         self._playground_ws.pop(client_id, None)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import struct
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol, runtime_checkable
 
 from aiohttp import ClientSession
 from dotenv import load_dotenv
@@ -21,6 +21,12 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 _openai_api_key = os.getenv("OPENAI_API_KEY", "")
+
+
+@runtime_checkable
+class TTSEngine(Protocol):
+    def cancel(self) -> None: ...
+    async def say(self, text: str) -> None: ...
 
 
 class _OggProcessor:
@@ -132,9 +138,9 @@ class TTS_OpenAI:
         data = {
             "model": "tts-1-hd",
             "input": text,
-            "voice": "echo",
+            "voice": os.getenv("VIBR8_TTS_VOICE", "echo"),
             "response_format": "opus",
-            "speed": 1.0,
+            "speed": float(os.getenv("VIBR8_TTS_SPEED", "1.0")),
         }
 
         async with ClientSession() as session:
@@ -150,3 +156,15 @@ class TTS_OpenAI:
                         logger.info("[tts] TTS cancelled (barge-in)")
                         return
                     processor.add_buffer(chunk)
+
+
+def create_tts(opus_frame_handler: Callable[[bytes], None] | None = None) -> TTSEngine:
+    """Create a TTS engine based on the VIBR8_TTS_ENGINE environment variable."""
+    engine = os.getenv("VIBR8_TTS_ENGINE", "openai").lower()
+    if engine == "kokoro":
+        try:
+            from server.tts_kokoro import TTS_Kokoro
+            return TTS_Kokoro(opus_frame_handler=opus_frame_handler)
+        except ImportError:
+            logger.error("[tts] Kokoro requested but 'kokoro' package not installed. Falling back to OpenAI.")
+    return TTS_OpenAI(opus_frame_handler=opus_frame_handler)

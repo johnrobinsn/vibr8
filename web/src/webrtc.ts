@@ -98,6 +98,8 @@ export async function startWebRTC(opts?: { desktop?: boolean }): Promise<void> {
       // Restore persisted guard state (defaults to true for fresh sessions)
       const guard = store.guardEnabled;
       api.setGuardByClient(clientId, guard).catch(() => {});
+      // Re-apply speaker gate in case it wasn't set during offer handling
+      api.refreshSpeakerGate().catch(() => {});
     } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
       stopWebRTC();
     }
@@ -997,4 +999,51 @@ export async function stopPlaygroundWebRTC(): Promise<void> {
 
 export function isPlaygroundActive(): boolean {
   return playgroundSession !== null;
+}
+
+// ── Enrollment WebSocket (sideband on existing WebRTC audio) ────────
+
+let enrollmentWs: WebSocket | null = null;
+let enrollmentCallback: ((data: unknown) => void) | null = null;
+
+export function startEnrollmentWs(onMessage: (data: unknown) => void): void {
+  stopEnrollmentWs();
+  const clientId = useStore.getState().clientId;
+  const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${wsProto}//${window.location.host}/ws/enrollment/${clientId}`;
+  const ws = new WebSocket(wsUrl);
+  enrollmentCallback = onMessage;
+
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      enrollmentCallback?.(data);
+    } catch {
+      // ignore
+    }
+  };
+
+  ws.onclose = () => {
+    if (enrollmentWs === ws) {
+      enrollmentWs = null;
+      enrollmentCallback = null;
+    }
+  };
+
+  enrollmentWs = ws;
+}
+
+export function stopEnrollmentWs(): void {
+  if (enrollmentWs) {
+    const ws = enrollmentWs;
+    enrollmentWs = null;
+    enrollmentCallback = null;
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close();
+    }
+  }
+}
+
+export function isEnrollmentActive(): boolean {
+  return enrollmentWs !== null && enrollmentWs.readyState === WebSocket.OPEN;
 }

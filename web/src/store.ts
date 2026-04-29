@@ -126,6 +126,10 @@ interface AppState {
   playgroundRmsDb: number;
   playgroundVadActive: boolean;
 
+  // Speaker fingerprint state
+  activeFingerprintId: string | null;
+  speakerGateThreshold: number;
+
   // Actions
   setClientRole: (role: "primary" | "secondscreen") => void;
   setSecondScreenContent: (content: { type: string; content: string; filename?: string; nodeId?: string; _pushId?: number } | null) => void;
@@ -235,6 +239,10 @@ interface AppState {
   setPlaygroundLevel: (rmsDb: number) => void;
   setPlaygroundVadActive: (active: boolean) => void;
 
+  // Speaker fingerprint actions
+  setActiveFingerprintId: (id: string | null) => void;
+  setSpeakerGateThreshold: (threshold: number) => void;
+
   reset: () => void;
 }
 
@@ -324,6 +332,8 @@ export const useStore = create<AppState>((set) => ({
   playgroundSegments: [],
   playgroundRmsDb: -60,
   playgroundVadActive: false,
+  activeFingerprintId: null,
+  speakerGateThreshold: 0.45,
 
   setClientRole: (role) => set({ clientRole: role }),
   setSecondScreenContent: (content) => {
@@ -806,6 +816,9 @@ export const useStore = create<AppState>((set) => ({
   setPlaygroundLevel: (rmsDb) => set({ playgroundRmsDb: rmsDb }),
   setPlaygroundVadActive: (active) => set({ playgroundVadActive: active }),
 
+  setActiveFingerprintId: (id) => set({ activeFingerprintId: id }),
+  setSpeakerGateThreshold: (threshold) => set({ speakerGateThreshold: threshold }),
+
   reset: () =>
     set({
       sessions: new Map(),
@@ -854,6 +867,8 @@ export const useStore = create<AppState>((set) => ({
       playgroundSegments: [],
       playgroundRmsDb: -60,
       playgroundVadActive: false,
+      activeFingerprintId: null,
+      speakerGateThreshold: 0.45,
     }),
 }));
 

@@ -18,10 +18,12 @@ voice = [
     "torch>=2.0",
     "torchaudio>=2.0",
     "transformers>=4.46,<5.0",  # 5.x breaks speculative decoding (HF #31987, #34626)
+    "speechbrain>=1.0",
     "scipy>=1.10",
     "onnxruntime>=1.15",
     "huggingface-hub>=0.20",
     "aiortc>=1.9",
+    "kokoro>=0.9,<1.0",
 ]
 desktop = [
     "aiortc>=1.9",
