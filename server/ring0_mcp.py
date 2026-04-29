@@ -326,8 +326,12 @@ async def get_session_output(session_id: str) -> str:
             rid = perm.get("request_id", "?")
             tool = perm.get("tool_name", "?")
             desc = perm.get("description", "")
-            inp = json.dumps(perm.get("input", {}))[:300]
-            lines.append(f"  [{rid}] {tool}: {desc or inp}")
+            inp = json.dumps(perm.get("input", {}), indent=2)
+            if desc:
+                lines.append(f"  [{rid}] {tool}: {desc}")
+                lines.append(f"    Input: {inp}")
+            else:
+                lines.append(f"  [{rid}] {tool}: {inp}")
 
     return "\n".join(lines) if lines else "No readable messages."
 

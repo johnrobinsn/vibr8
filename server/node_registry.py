@@ -99,6 +99,7 @@ class RegisteredNode:
             "hostname": self.capabilities.get("hostname", ""),
             "sessionCount": len(self.session_ids),
             "ring0Enabled": self.ring0_enabled,
+            "defaultBackend": self.capabilities.get("defaultBackend", "claude"),
         }
 
     @staticmethod
@@ -176,9 +177,14 @@ class NodeRegistry:
         # Check if a node with this name already exists
         existing = self.get_node_by_name(name)
         if existing:
-            # Re-registration: validate API key, update capabilities
+            # Re-registration: validate against stored key first, then standalone key pool
             if not self.validate_api_key(existing.id, api_key):
-                raise PermissionError("Invalid API key for existing node")
+                if not self.validate_standalone_key(api_key):
+                    raise PermissionError("Invalid API key for existing node")
+                # Valid standalone key — update stored hash
+                existing.api_key_hash = bcrypt.hashpw(
+                    api_key.encode(), bcrypt.gensalt()
+                ).decode()
             if capabilities:
                 existing.capabilities = capabilities
             self._save()

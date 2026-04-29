@@ -253,9 +253,17 @@ immediately via voice. Keep it to one sentence. Don't wait for the user to ask.
 class Ring0Manager:
     """Manages the Ring0 meta-agent session."""
 
-    def __init__(self, port: int, auth_manager: Optional[AuthManager] = None) -> None:
+    def __init__(
+        self,
+        port: int,
+        auth_manager: Optional[AuthManager] = None,
+        config_path: Optional[Path] = None,
+        work_dir: Optional[Path] = None,
+    ) -> None:
         self._port = port
         self._auth_manager = auth_manager
+        self._config_path = config_path or RING0_CONFIG_PATH
+        self._work_dir = work_dir or RING0_WORK_DIR
         self._service_token: Optional[str] = None
         self._enabled: bool = False
         self._events_muted: bool = False
@@ -322,16 +330,24 @@ class Ring0Manager:
         self._save_state()
         logger.info("[ring0] Saved CLI session ID %s", cli_session_id)
 
-    async def ensure_session(self, launcher: CliLauncher, ws_bridge: WsBridge) -> str:
+    async def ensure_session(
+        self,
+        launcher: CliLauncher,
+        ws_bridge: WsBridge,
+        backend_type: str = "claude",
+    ) -> str:
         """Ensure the Ring0 session is running. Always uses the fixed session ID.
 
         On restart, reuses the persisted session and resumes the CLI conversation.
         Returns the session_id.
         """
         session_id = self._session_id
-        work_dir = RING0_WORK_DIR
+        work_dir = self._work_dir
         work_dir.mkdir(parents=True, exist_ok=True)
         mcp_config_path = self._write_config_files(work_dir)
+
+        if backend_type == "codex":
+            self._ensure_codex_mcp(work_dir)
 
         session_names.set_name(session_id, "Ring0", unique=False)
 
@@ -346,7 +362,9 @@ class Ring0Manager:
             # Session exists but is exited — update config and relaunch
             info.cwd = str(work_dir)
             info.mcpConfig = str(mcp_config_path)
-            info.model = self._model
+            info.model = self._model if backend_type != "codex" else None
+            if backend_type == "codex":
+                info.cliSessionId = None
             await launcher.relaunch(session_id)
             logger.info("[ring0] Relaunched session %s", session_id)
             return session_id
@@ -355,17 +373,18 @@ class Ring0Manager:
         from server.cli_launcher import LaunchOptions
         options = LaunchOptions(
             sessionId=session_id,
-            model=self._model,
+            model=self._model if backend_type != "codex" else None,
             permissionMode="bypassPermissions",
             cwd=str(work_dir),
-            mcpConfig=str(mcp_config_path),
-            resumeSessionId=self._cli_session_id,
+            mcpConfig=str(mcp_config_path) if backend_type != "codex" else None,
+            resumeSessionId=self._cli_session_id if backend_type != "codex" else None,
+            backendType=backend_type,
         )
 
         launcher.launch(options)
         self._save_state()
 
-        logger.info("[ring0] Created session %s in %s", session_id, work_dir)
+        logger.info("[ring0] Created session %s in %s (backend=%s)", session_id, work_dir, backend_type)
         return session_id
 
     async def switch_model(self, model: str, launcher: CliLauncher, ws_bridge: WsBridge) -> str:
@@ -384,10 +403,46 @@ class Ring0Manager:
         logger.info("[ring0] Model switch complete — session %s running %s", session_id, model)
         return session_id
 
+    def _ensure_codex_mcp(self, work_dir: Path) -> None:
+        """Ensure the vibr8 MCP server is registered in Codex's global config."""
+        import subprocess
+
+        server_dir = Path(__file__).parent.parent.resolve()
+        mcp_script = str(server_dir / "server" / "ring0_mcp.py")
+        uv_bin = shutil.which("uv") or "uv"
+        codex_bin = shutil.which("codex") or "codex"
+
+        env_args: list[str] = [
+            "--env", f"VIBR8_PORT={self._port}",
+            "--env", f"VIBR8_SCHEME={'https' if (server_dir / 'certs' / 'cert.pem').exists() else 'http'}",
+        ]
+        token = self._get_service_token()
+        if token:
+            env_args.extend(["--env", f"VIBR8_TOKEN={token}"])
+        if self._model:
+            env_args.extend(["--env", f"RING0_MODEL={self._model}"])
+
+        # Remove existing entry first (idempotent), then add fresh
+        subprocess.run(
+            [codex_bin, "mcp", "remove", "vibr8"],
+            capture_output=True, timeout=10,
+        )
+        cmd = [
+            codex_bin, "mcp", "add", *env_args, "vibr8", "--",
+            uv_bin, "run", "--project", str(server_dir), "--no-sync", "python", mcp_script,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            logger.info("[ring0] Registered vibr8 MCP server in Codex config")
+        else:
+            logger.error("[ring0] Failed to register Codex MCP: %s", result.stderr)
+
     def _write_config_files(self, work_dir: Path) -> Path:
-        """Write CLAUDE.md and MCP config to the Ring0 working directory."""
+        """Write CLAUDE.md/AGENTS.md and MCP config to the Ring0 working directory."""
         claude_md = work_dir / "CLAUDE.md"
         claude_md.write_text(RING0_SYSTEM_PROMPT)
+        agents_md = work_dir / "AGENTS.md"
+        agents_md.write_text(RING0_SYSTEM_PROMPT)
 
         server_dir = Path(__file__).parent.parent.resolve()
         mcp_script = str(server_dir / "server" / "ring0_mcp.py")
@@ -414,18 +469,18 @@ class Ring0Manager:
     # ── Persistence ───────────────────────────────────────────────────────
 
     def _load_state(self) -> None:
-        if RING0_CONFIG_PATH.exists():
+        if self._config_path.exists():
             try:
-                data = json.loads(RING0_CONFIG_PATH.read_text())
+                data = json.loads(self._config_path.read_text())
                 self._enabled = data.get("enabled", False)
                 self._events_muted = data.get("eventsMuted", False)
                 self._cli_session_id = data.get("cliSessionId")
                 self._model = data.get("model")
             except Exception:
-                logger.warning("[ring0] Failed to load state from %s", RING0_CONFIG_PATH)
+                logger.warning("[ring0] Failed to load state from %s", self._config_path)
 
     def _save_state(self) -> None:
-        RING0_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._config_path.parent.mkdir(parents=True, exist_ok=True)
         data: dict[str, Any] = {
             "enabled": self._enabled,
             "eventsMuted": self._events_muted,
@@ -434,6 +489,6 @@ class Ring0Manager:
         }
         if self._model:
             data["model"] = self._model
-        tmp = RING0_CONFIG_PATH.with_suffix(".tmp")
+        tmp = self._config_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data))
-        tmp.replace(RING0_CONFIG_PATH)
+        tmp.replace(self._config_path)

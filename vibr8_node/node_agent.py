@@ -6,8 +6,11 @@ import asyncio
 import json
 import logging
 import platform
+import re
 import secrets
+import ssl
 import time
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -34,6 +37,7 @@ class NodeAgent:
         port: int = 3457,
         work_dir: str = "",
         ring0_config: dict | None = None,
+        default_backend: str = "claude",
     ) -> None:
         self.hub_url = hub_url.rstrip("/")
         self.api_key = api_key
@@ -41,7 +45,14 @@ class NodeAgent:
         self.port = port
         self.work_dir = work_dir
         self.ring0_config = ring0_config or {}
+        self.default_backend = default_backend
         self.node_id: str = ""
+        self._ssl_ctx: ssl.SSLContext | bool | None = None
+        if "localhost" in hub_url or "127.0.0.1" in hub_url:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            self._ssl_ctx = ctx
 
         # Local managers (initialized in run())
         self._launcher: CliLauncher | None = None
@@ -56,11 +67,18 @@ class NodeAgent:
 
     async def run(self) -> None:
         """Main entry point — register, start local server, connect tunnel."""
-        # Initialize local managers
-        self._store = SessionStore()
+        # Use an isolated session directory per node to avoid sharing state with the hub
+        safe_name = re.sub(r"[^\w-]", "_", self.name.lower())
+        node_dir = Path.home() / ".vibr8-node" / safe_name
+        session_dir = str(node_dir / "sessions")
+        self._store = SessionStore(directory=session_dir)
         self._bridge = WsBridge()
         self._launcher = CliLauncher(self.port)
-        self._ring0 = Ring0Manager(self.port)
+        self._ring0 = Ring0Manager(
+            self.port,
+            config_path=node_dir / "ring0.json",
+            work_dir=node_dir / "ring0",
+        )
 
         self._bridge.set_store(self._store)
         self._launcher.set_store(self._store)
@@ -81,6 +99,11 @@ class NodeAgent:
 
         self._bridge.on_cli_relaunch_needed_callback(on_cli_relaunch_needed)
 
+        def on_codex_adapter(session_id: str, adapter: object) -> None:
+            self._bridge.attach_codex_adapter(session_id, adapter)
+
+        self._launcher.on_codex_adapter_created(on_codex_adapter)
+
         # Set broadcast hook so CLI output goes to the hub tunnel
         self._bridge._broadcast_hook = self._forward_to_hub
 
@@ -93,8 +116,8 @@ class NodeAgent:
 
         # Auto-launch Ring0 session if enabled
         if self._ring0 and self._ring0.is_enabled:
-            logger.info("Ring0 enabled — auto-launching session")
-            await self._ring0.ensure_session(self._launcher, self._bridge)
+            logger.info("Ring0 enabled — auto-launching session (backend=%s)", self.default_backend)
+            await self._ring0.ensure_session(self._launcher, self._bridge, backend_type=self.default_backend)
 
         # Register with hub
         registered = await self._register()
@@ -120,11 +143,13 @@ class NodeAgent:
             "arch": platform.machine(),
             "ring0Enabled": self._ring0.is_enabled if self._ring0 else False,
             "sessionCount": len(self._launcher.list_sessions()) if self._launcher else 0,
+            "defaultBackend": self.default_backend,
             "version": "0.1.0",
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            conn = aiohttp.TCPConnector(ssl=self._ssl_ctx) if self._ssl_ctx else None
+            async with aiohttp.ClientSession(connector=conn) as session:
                 async with session.post(url, json={
                     "name": self.name,
                     "apiKey": self.api_key,
@@ -172,8 +197,9 @@ class NodeAgent:
         ws_url = f"{self.hub_url}/ws/node/{self.node_id}?apiKey={self.api_key}"
         logger.info("Connecting tunnel to %s", self.hub_url)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.ws_connect(ws_url, heartbeat=45) as ws:
+        conn = aiohttp.TCPConnector(ssl=self._ssl_ctx) if self._ssl_ctx else None
+        async with aiohttp.ClientSession(connector=conn) as session:
+            async with session.ws_connect(ws_url, heartbeat=45, ssl=self._ssl_ctx) as ws:
                 self._ws = ws
                 logger.info("Tunnel connected")
 
@@ -202,6 +228,7 @@ class NodeAgent:
                     "type": "heartbeat",
                     "sessionCount": len(self._launcher.list_sessions()) if self._launcher else 0,
                     "ring0Enabled": self._ring0.is_enabled if self._ring0 else False,
+                    "defaultBackend": self.default_backend,
                 }
                 await ws.send_str(json.dumps(msg) + "\n")
             except Exception:
@@ -321,7 +348,7 @@ class NodeAgent:
             model=options.get("model"),
             permissionMode=options.get("permissionMode"),
             cwd=options.get("cwd") or self.work_dir or None,
-            backendType=options.get("backend", "claude"),
+            backendType=options.get("backend", self.default_backend),
         )
         info = self._launcher.launch(opts)
         result = info.to_dict() if hasattr(info, "to_dict") else info.__dict__
@@ -473,7 +500,7 @@ class NodeAgent:
             return {"error": "Empty text"}
         r0sid = self._ring0.session_id
         if not r0sid and self._launcher and self._bridge:
-            r0sid = await self._ring0.ensure_session(self._launcher, self._bridge)
+            r0sid = await self._ring0.ensure_session(self._launcher, self._bridge, backend_type=self.default_backend)
         if not r0sid:
             return {"error": "Ring0 session not available"}
         source_client_id = msg.get("sourceClientId", "")

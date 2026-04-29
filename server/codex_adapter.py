@@ -231,7 +231,7 @@ class CodexAdapter:
         self._session_meta_cb: Optional[
             Callable[[Dict[str, Optional[str]]], None]
         ] = None
-        self._disconnect_cb: Optional[Callable[[], None]] = None
+        self._disconnect_cb: Optional[Callable[[], Any]] = None
         self._init_error_cb: Optional[Callable[[str], None]] = None
 
         # State
@@ -281,7 +281,9 @@ class CodexAdapter:
         await self._proc.wait()
         self._connected = False
         if self._disconnect_cb is not None:
-            self._disconnect_cb()
+            result = self._disconnect_cb()
+            if asyncio.iscoroutine(result):
+                await result
 
     # ---- Public API ----------------------------------------------------------
 
@@ -596,12 +598,17 @@ class CodexAdapter:
                 self._handle_token_usage_updated(params)
             elif method in ("account/updated", "account/login/completed"):
                 pass
+            elif method in ("error", "warning"):
+                logger.warning(
+                    "[codex-adapter] %s: %s", method, params
+                )
             else:
                 if not method.startswith("account/") and not method.startswith(
                     "codex/event/"
                 ):
                     logger.info(
-                        "[codex-adapter] Unhandled notification: %s", method
+                        "[codex-adapter] Unhandled notification: %s params=%s",
+                        method, params,
                     )
         except Exception as exc:
             logger.error(
@@ -625,9 +632,10 @@ class CodexAdapter:
                 self._handle_file_change_approval(rpc_id, params)
             elif method == "item/mcpToolCall/requestApproval":
                 self._handle_mcp_tool_call_approval(rpc_id, params)
+            elif method == "mcpServer/elicitation/request":
+                self._handle_mcp_elicitation(rpc_id, params)
             else:
                 logger.info("[codex-adapter] Unhandled request: %s", method)
-                # Auto-accept unknown requests
                 asyncio.create_task(
                     self._transport.respond(rpc_id, {"decision": "accept"})
                 )
@@ -734,6 +742,19 @@ class CodexAdapter:
         }
 
         self._emit({"type": "permission_request", "request": perm})
+
+    def _handle_mcp_elicitation(
+        self,
+        json_rpc_id: int,
+        params: Dict[str, Any],
+    ) -> None:
+        logger.info(
+            "[codex-adapter] Auto-approving MCP elicitation: message=%s",
+            str(params.get("message", ""))[:100],
+        )
+        asyncio.create_task(
+            self._transport.respond(json_rpc_id, {"action": "accept"})
+        )
 
     # ---- Item event handlers -------------------------------------------------
 
@@ -1143,7 +1164,9 @@ class CodexAdapter:
 
     def _emit(self, msg: dict) -> None:
         if self._browser_message_cb is not None:
-            self._browser_message_cb(msg)
+            result = self._browser_message_cb(msg)
+            if asyncio.iscoroutine(result):
+                asyncio.ensure_future(result)
 
     def _emit_tool_use(
         self,

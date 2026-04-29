@@ -528,12 +528,13 @@ class CliLauncher:
         # Import at runtime to avoid circular imports.
         from server.codex_adapter import CodexAdapter
 
-        adapter = CodexAdapter(proc, session_id, {
-            "model": options.model,
-            "cwd": info.cwd,
-            "approvalMode": options.permissionMode,
-            "threadId": info.cliSessionId,
-        })
+        from server.codex_adapter import CodexAdapterOptions
+        adapter = CodexAdapter(proc, session_id, CodexAdapterOptions(
+            model=options.model,
+            cwd=info.cwd,
+            approval_mode=options.permissionMode,
+            thread_id=None,  # Codex threads don't survive process restarts
+        ))
 
         # Handle init errors -- mark session as exited so UI shows failure
         def _on_init_error(error: str) -> None:

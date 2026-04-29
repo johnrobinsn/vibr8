@@ -34,6 +34,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, help="Config file path")
     parser.add_argument("--port", type=int, help="Local port for CLI/Ring0 (default: 3457)")
     parser.add_argument("--work-dir", help="Working directory for sessions")
+    parser.add_argument("--default-backend", help="Default backend for new sessions (claude, codex)")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -58,6 +59,8 @@ def main() -> None:
 
     from vibr8_node.node_agent import NodeAgent
 
+    default_backend = args.default_backend or config.get("default_backend", "claude")
+
     agent = NodeAgent(
         hub_url=hub_url,
         api_key=api_key,
@@ -65,6 +68,7 @@ def main() -> None:
         port=port,
         work_dir=work_dir,
         ring0_config=config.get("ring0", {}),
+        default_backend=default_backend,
     )
 
     try:

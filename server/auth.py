@@ -13,6 +13,7 @@ import hmac
 import json
 import logging
 import random
+import re
 import secrets
 import time
 from pathlib import Path
@@ -35,7 +36,7 @@ PAIRING_RATE_WINDOW = 60  # seconds
 PAIRING_FAIL_THRESHOLD = 5  # failed lookups before cooldown
 PAIRING_FAIL_COOLDOWN = 1.0  # seconds
 
-# Routes that don't require auth
+# Routes that don't require auth — prefix match
 PUBLIC_PREFIXES = (
     "/ws/cli/",
     "/ws/node/",
@@ -54,6 +55,27 @@ PUBLIC_PREFIXES = (
     "/favicon",
     "/apple-touch-icon",
 )
+
+# Exact-match public routes (node listing & active node — needed by UI)
+PUBLIC_EXACT_PATHS = frozenset({
+    "/api/nodes",
+    "/api/nodes/active",
+})
+
+# Parameterized public routes (node activation — controls voice routing)
+_PUBLIC_PATH_PATTERNS = (
+    re.compile(r"^/api/nodes/[^/]+/activate$"),
+)
+
+
+def _is_public_path(path: str) -> bool:
+    if any(path.startswith(p) for p in PUBLIC_PREFIXES):
+        return True
+    if path in PUBLIC_EXACT_PATHS:
+        return True
+    if any(p.match(path) for p in _PUBLIC_PATH_PATTERNS):
+        return True
+    return False
 
 
 def _load_or_create_secret() -> str:
@@ -400,7 +422,7 @@ async def auth_middleware(
     path = request.path
 
     # Public routes — still extract user from credentials if available (non-blocking)
-    if any(path.startswith(p) for p in PUBLIC_PREFIXES):
+    if _is_public_path(path):
         username = _extract_auth_user(request, auth_mgr)
         if username:
             request["auth_user"] = username

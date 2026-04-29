@@ -94,7 +94,7 @@ class WsBridge:
         # Hook for vibr8-node: intercepts _broadcast_to_browsers for remote forwarding
         self._broadcast_hook: Callable[..., Awaitable[None]] | None = None
         self._computer_use_agents: dict[str, Any] = {}  # session_id → ComputerUseAgent
-        self._active_tts: dict[str, Any] = {}  # session_id → TTS_OpenAI instance
+        self._active_tts: dict[str, Any] = {}  # session_id → TTSEngine instance
         self._thinking_timers: dict[str, asyncio.TimerHandle] = {}
         self._on_cli_session_id: Callable[[str, str], None] | None = None
         self._on_cli_relaunch_needed: Callable[[str], None] | None = None
@@ -498,6 +498,9 @@ class WsBridge:
                 pending_messages=list(p.pendingMessages) if p.pendingMessages else [],
             )
             session.state["backend_type"] = session.backend_type
+            # Pen state is ephemeral runtime state — reset to ring0 on restart
+            # so it matches the Session default and the (unset) pen timer.
+            session.state["controlledBy"] = "ring0"
             # Restore MRU timestamp
             if p.lastPromptedAt:
                 session.last_prompted_at = p.lastPromptedAt
@@ -1364,8 +1367,8 @@ class WsBridge:
             if self._webrtc_manager:
                 self._webrtc_manager.set_thinking_any(False)
             logger.info("[ws-bridge] TTS starting for session %s: %d chars", session_id, len(text))
-            from server.tts import TTS_OpenAI
-            tts = TTS_OpenAI(opus_frame_handler=on_frame)
+            from server.tts import create_tts
+            tts = create_tts(opus_frame_handler=on_frame)
             # Cancel any prior TTS still running for this session.
             prev = self._active_tts.pop(session_id, None)
             if prev:
@@ -1992,8 +1995,9 @@ class WsBridge:
         # Don't notify Ring0 about its own session
         if session.id == ring0.session_id:
             return
-        # Don't notify Ring0 when user has taken the pen (pen system)
-        if session.controlled_by == "user":
+        # Don't notify Ring0 when user has taken the pen — except for
+        # permission events, which need Ring0 even when the user is active
+        if session.controlled_by == "user" and "waiting_for_permission" not in transition:
             return
         # Don't notify hub Ring0 about remote node sessions (they handle their own)
         if self._is_remote_session(session.id):
@@ -2173,6 +2177,19 @@ class WsBridge:
             logger.warning("[ws-bridge] Cannot forward to remote node %s — tunnel unavailable", node_id[:8])
             return
 
+        # Codex adapter — translate NDJSON wire format to browser format
+        if session.backend_type == "codex":
+            browser_msg = self._ndjson_to_browser_msg(ndjson)
+            if browser_msg:
+                if session.codex_adapter:
+                    session.codex_adapter.send_browser_message(browser_msg)
+                else:
+                    logger.info("[ws-bridge] Codex adapter not attached for session %s, queuing", session.id)
+                    session.pending_messages.append(json.dumps(browser_msg))
+                    if self._on_cli_relaunch_needed:
+                        self._on_cli_relaunch_needed(session.id)
+            return
+
         if not session.cli_socket:
             logger.info(f"[ws-bridge] CLI not yet connected for session {session.id}, queuing message")
             session.pending_messages.append(ndjson)
@@ -2182,6 +2199,47 @@ class WsBridge:
             return
         import asyncio
         asyncio.ensure_future(session.cli_socket.send_str(ndjson + "\n"))
+
+    @staticmethod
+    def _ndjson_to_browser_msg(ndjson: str) -> dict[str, Any] | None:
+        """Convert a Claude Code NDJSON wire message to Codex browser format."""
+        try:
+            wire = json.loads(ndjson)
+        except Exception:
+            return None
+        wire_type = wire.get("type")
+        if wire_type == "user":
+            content = wire.get("message", {}).get("content", "")
+            browser_msg: dict[str, Any] = {"type": "user_message"}
+            if isinstance(content, list):
+                images = []
+                text = ""
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "image":
+                            src = block.get("source", {})
+                            images.append({"media_type": src.get("media_type", ""), "data": src.get("data", "")})
+                        elif block.get("type") == "text":
+                            text = block.get("text", "")
+                browser_msg["content"] = text
+                if images:
+                    browser_msg["images"] = images
+            else:
+                browser_msg["content"] = content
+            return browser_msg
+        if wire_type == "control_response":
+            resp = wire.get("response", {})
+            inner = resp.get("response", {})
+            return {
+                "type": "permission_response",
+                "request_id": resp.get("request_id", ""),
+                "behavior": "allow" if inner.get("behavior") == "allow" else "deny",
+            }
+        if wire_type == "control_request":
+            subtype = wire.get("request", {}).get("subtype")
+            if subtype == "interrupt":
+                return {"type": "interrupt"}
+        return None
 
     async def broadcast_name_update(self, session_id: str, name: str, user_renamed: bool = False) -> None:
         session = self._sessions.get(session_id)
