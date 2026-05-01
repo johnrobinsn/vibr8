@@ -159,12 +159,18 @@ class TTS_OpenAI:
 
 
 def create_tts(opus_frame_handler: Callable[[bytes], None] | None = None) -> TTSEngine:
-    """Create a TTS engine based on the VIBR8_TTS_ENGINE environment variable."""
-    engine = os.getenv("VIBR8_TTS_ENGINE", "openai").lower()
-    if engine == "kokoro":
-        try:
-            from server.tts_kokoro import TTS_Kokoro
-            return TTS_Kokoro(opus_frame_handler=opus_frame_handler)
-        except ImportError:
-            logger.error("[tts] Kokoro requested but 'kokoro' package not installed. Falling back to OpenAI.")
-    return TTS_OpenAI(opus_frame_handler=opus_frame_handler)
+    """Create a TTS engine based on the VIBR8_TTS_ENGINE environment variable.
+
+    Defaults to Kokoro (local, no API key needed). Set VIBR8_TTS_ENGINE=openai
+    for higher quality cloud TTS (requires OPENAI_API_KEY).
+    """
+    engine = os.getenv("VIBR8_TTS_ENGINE", "kokoro").lower()
+    if engine == "openai":
+        return TTS_OpenAI(opus_frame_handler=opus_frame_handler)
+    # Default: Kokoro (local)
+    try:
+        from server.tts_kokoro import TTS_Kokoro
+        return TTS_Kokoro(opus_frame_handler=opus_frame_handler)
+    except ImportError:
+        logger.warning("[tts] Kokoro not installed — falling back to OpenAI TTS.")
+        return TTS_OpenAI(opus_frame_handler=opus_frame_handler)
