@@ -19,12 +19,16 @@ const ENROLLMENT_PASSAGES = [
 
 export function VoiceFingerprints() {
   const [fingerprints, setFingerprints] = useState<SpeakerFingerprint[]>([]);
-  const [active, setActive] = useState<ActiveFingerprint>({ fingerprintId: null, threshold: 0.45 });
+  const [active, setActive] = useState<ActiveFingerprint>({ speakerName: null, threshold: 0.45 });
   const [loading, setLoading] = useState(true);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   // Enrollment state
   const [enrolling, setEnrolling] = useState(false);
+  const [enrollMode, setEnrollMode] = useState<"new" | "add-voiceprint">("new");
+  const [enrollTargetProfile, setEnrollTargetProfile] = useState<SpeakerFingerprint | null>(null);
   const [enrollName, setEnrollName] = useState("");
+  const [enrollLabel, setEnrollLabel] = useState("");
   const [enrollSegments, setEnrollSegments] = useState<EnrollmentSegment[]>([]);
   const [enrollVadActive, setEnrollVadActive] = useState(false);
   const [enrollRmsDb, setEnrollRmsDb] = useState(-60);
@@ -32,7 +36,9 @@ export function VoiceFingerprints() {
 
   // Test state
   const [testing, setTesting] = useState(false);
-  const [testScores, setTestScores] = useState<{ id: string; name: string; similarity: number }[]>([]);
+  const [testScores, setTestScores] = useState<{ id: string; name: string; similarity: number; bestVoiceprint?: string }[]>([]);
+  const [testHeard, setTestHeard] = useState(false);
+  const testSilenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const audioActive = useStore((s) => s.audioActive);
 
@@ -44,7 +50,7 @@ export function VoiceFingerprints() {
       ]);
       setFingerprints(fps);
       setActive(act);
-      useStore.getState().setActiveFingerprintId(act.fingerprintId);
+      useStore.getState().setActiveSpeakerName(act.speakerName);
       useStore.getState().setSpeakerGateThreshold(act.threshold);
     } catch {
       // ignore
@@ -54,20 +60,20 @@ export function VoiceFingerprints() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // Cleanup enrollment/test on unmount
   useEffect(() => {
-    return () => {
-      stopEnrollmentWs();
-    };
+    return () => { stopEnrollmentWs(); };
   }, []);
 
-  function startEnrollment() {
+  function startEnrollment(mode: "new" | "add-voiceprint", targetProfile?: SpeakerFingerprint) {
     if (!audioActive) {
-      alert("Voice must be active to enroll a fingerprint. Enable the microphone first.");
+      alert("Voice must be active to enroll. Enable the microphone first.");
       return;
     }
     setEnrolling(true);
-    setEnrollName("");
+    setEnrollMode(mode);
+    setEnrollTargetProfile(targetProfile ?? null);
+    setEnrollName(mode === "add-voiceprint" && targetProfile ? targetProfile.name : "");
+    setEnrollLabel("");
     setEnrollSegments([]);
     enrollSegmentsRef.current = [];
     setEnrollVadActive(false);
@@ -100,31 +106,29 @@ export function VoiceFingerprints() {
 
   async function saveEnrollment() {
     if (enrollSegments.length === 0) return;
-    const name = enrollName.trim() || "Unnamed";
 
-    // Average the embeddings into a centroid
     const dim = enrollSegments[0].embedding.length;
     const centroid = new Array(dim).fill(0);
     for (const seg of enrollSegments) {
-      for (let i = 0; i < dim; i++) {
-        centroid[i] += seg.embedding[i];
-      }
+      for (let i = 0; i < dim; i++) centroid[i] += seg.embedding[i];
     }
-    for (let i = 0; i < dim; i++) {
-      centroid[i] /= enrollSegments.length;
-    }
-    // L2 normalize
+    for (let i = 0; i < dim; i++) centroid[i] /= enrollSegments.length;
     const norm = Math.sqrt(centroid.reduce((sum: number, v: number) => sum + v * v, 0)) + 1e-12;
-    for (let i = 0; i < dim; i++) {
-      centroid[i] /= norm;
-    }
+    for (let i = 0; i < dim; i++) centroid[i] /= norm;
+
+    const label = enrollLabel.trim() || "Default";
 
     try {
-      await api.createFingerprint({ name, embedding: centroid });
+      if (enrollMode === "add-voiceprint" && enrollTargetProfile) {
+        await api.addEmbedding(enrollTargetProfile.id, { embedding: centroid, label });
+      } else {
+        const name = enrollName.trim() || "Unnamed";
+        await api.createFingerprint({ name, embedding: centroid, label });
+      }
       cancelEnrollment();
       loadData();
     } catch {
-      alert("Failed to save fingerprint");
+      alert("Failed to save");
     }
   }
 
@@ -137,12 +141,21 @@ export function VoiceFingerprints() {
     }
   }
 
-  async function setActiveFingerprint(fingerprintId: string | null, threshold?: number) {
+  async function removeEmbedding(profileId: string, embId: string) {
+    try {
+      await api.removeEmbedding(profileId, embId);
+      loadData();
+    } catch {
+      // ignore
+    }
+  }
+
+  async function setActiveSpeaker(speakerName: string | null, threshold?: number) {
     const thr = threshold ?? active.threshold;
     try {
-      const result = await api.setActiveFingerprint({ fingerprintId, threshold: thr });
+      const result = await api.setActiveFingerprint({ speakerName, threshold: thr });
       setActive(result);
-      useStore.getState().setActiveFingerprintId(result.fingerprintId);
+      useStore.getState().setActiveSpeakerName(result.speakerName);
       useStore.getState().setSpeakerGateThreshold(result.threshold);
     } catch {
       // ignore
@@ -153,7 +166,7 @@ export function VoiceFingerprints() {
     setActive((prev) => ({ ...prev, threshold }));
     useStore.getState().setSpeakerGateThreshold(threshold);
     try {
-      await api.setActiveFingerprint({ fingerprintId: active.fingerprintId, threshold });
+      await api.setActiveFingerprint({ speakerName: active.speakerName, threshold });
     } catch {
       // ignore
     }
@@ -165,18 +178,28 @@ export function VoiceFingerprints() {
       return;
     }
     setTesting(true);
-    setTestScores([]);
+    setTestHeard(false);
+    setTestScores(fingerprints.map((fp) => ({ id: fp.id, name: fp.name, similarity: 0 })));
 
     startEnrollmentWs((data: unknown) => {
       const msg = data as Record<string, unknown>;
       if (msg.type === "enrollment_segment") {
-        setTestScores(msg.scores as { id: string; name: string; similarity: number }[]);
+        setTestHeard(true);
+        const scores = (msg.scores as { id: string; name: string; similarity: number; bestVoiceprint?: string }[])
+          .slice()
+          .sort((a, b) => b.similarity - a.similarity);
+        setTestScores(scores);
+        if (testSilenceTimer.current) clearTimeout(testSilenceTimer.current);
+        testSilenceTimer.current = setTimeout(() => {
+          setTestScores((prev) => prev.map((s) => ({ ...s, similarity: 0 })));
+        }, 3000);
       }
     });
   }
 
   function stopTest() {
     stopEnrollmentWs();
+    if (testSilenceTimer.current) clearTimeout(testSilenceTimer.current);
     setTesting(false);
     setTestScores([]);
   }
@@ -187,25 +210,25 @@ export function VoiceFingerprints() {
 
   return (
     <div className="p-6 max-w-2xl space-y-6">
-      {/* Active Fingerprint Selector */}
+      {/* Active Speaker Gate */}
       <section>
         <h2 className="text-sm font-semibold text-cc-fg mb-2">Speaker Gate</h2>
         <p className="text-xs text-cc-muted mb-3">
-          When active, only audio matching the selected voice fingerprint is transcribed.
-          Background conversations are silently dropped.
+          When active, only audio matching the selected speaker profile is transcribed.
+          Each profile can have multiple voiceprints for cross-microphone robustness.
         </p>
         <select
-          value={active.fingerprintId ?? ""}
-          onChange={(e) => setActiveFingerprint(e.target.value || null)}
+          value={active.speakerName ?? ""}
+          onChange={(e) => setActiveSpeaker(e.target.value || null)}
           className="w-full px-3 py-2 rounded-lg bg-cc-input border border-cc-border text-cc-fg text-sm"
         >
           <option value="">None (no gating)</option>
           {fingerprints.map((fp) => (
-            <option key={fp.id} value={fp.id}>{fp.name}</option>
+            <option key={fp.id} value={fp.name}>{fp.name}</option>
           ))}
         </select>
 
-        {active.fingerprintId && (
+        {active.speakerName && (
           <div className="mt-3">
             <label className="flex items-center gap-2 text-xs text-cc-muted">
               <span>Threshold: {active.threshold.toFixed(2)}</span>
@@ -227,10 +250,10 @@ export function VoiceFingerprints() {
         )}
       </section>
 
-      {/* Fingerprint List */}
+      {/* Profile List */}
       <section>
         <div className="flex items-center justify-between mb-2">
-          <h2 className="text-sm font-semibold text-cc-fg">Fingerprints</h2>
+          <h2 className="text-sm font-semibold text-cc-fg">Speaker Profiles</h2>
           <div className="flex gap-2">
             {!testing && !enrolling && fingerprints.length > 0 && (
               <button
@@ -242,54 +265,104 @@ export function VoiceFingerprints() {
             )}
             {!enrolling && !testing && (
               <button
-                onClick={startEnrollment}
+                onClick={() => startEnrollment("new")}
                 className="px-3 py-1.5 text-xs rounded-lg bg-cc-primary text-white hover:opacity-90 cursor-pointer"
               >
-                New Fingerprint
+                New Profile
               </button>
             )}
           </div>
         </div>
 
         {fingerprints.length === 0 && !enrolling && (
-          <p className="text-xs text-cc-muted">No fingerprints yet. Create one to enable speaker gating.</p>
+          <p className="text-xs text-cc-muted">No profiles yet. Create one to enable speaker gating.</p>
         )}
 
-        {fingerprints.map((fp) => (
-          <div key={fp.id} className="flex items-center justify-between py-2 px-3 rounded-lg bg-cc-input border border-cc-border mb-1.5">
-            <div>
-              <span className="text-sm text-cc-fg">{fp.name}</span>
-              <span className="text-xs text-cc-muted ml-2">
-                {new Date(fp.createdAt * 1000).toLocaleDateString()}
-              </span>
-              {active.fingerprintId === fp.id && (
-                <span className="text-xs text-green-500 ml-2">active</span>
+        {fingerprints.map((fp) => {
+          const isExpanded = expandedId === fp.id;
+          const isActive = active.speakerName === fp.name;
+          return (
+            <div key={fp.id} className="mb-1.5">
+              <div
+                className="flex items-center justify-between py-2 px-3 rounded-lg bg-cc-input border border-cc-border cursor-pointer hover:bg-cc-hover"
+                onClick={() => setExpandedId(isExpanded ? null : fp.id)}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-cc-muted">{isExpanded ? "▼" : "▶"}</span>
+                  <span className="text-sm text-cc-fg">{fp.name}</span>
+                  <span className="text-xs text-cc-muted">
+                    {fp.embeddingCount} voiceprint{fp.embeddingCount !== 1 ? "s" : ""}
+                  </span>
+                  {isActive && (
+                    <span className="text-xs text-green-500">active</span>
+                  )}
+                </div>
+                <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                  {!enrolling && !testing && (
+                    <button
+                      onClick={() => startEnrollment("add-voiceprint", fp)}
+                      className="text-xs text-cc-primary hover:opacity-80 cursor-pointer"
+                    >
+                      + Voiceprint
+                    </button>
+                  )}
+                  <button
+                    onClick={() => deleteFingerprint(fp.id)}
+                    className="text-xs text-red-400 hover:text-red-300 cursor-pointer"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+
+              {isExpanded && (
+                <div className="ml-6 mt-1 space-y-1">
+                  {fp.embeddingLabels.map((label, i) => (
+                    <div key={fp.embeddingIds[i] || i} className="flex items-center justify-between py-1 px-2 text-xs text-cc-muted">
+                      <span>{label || "Default"}</span>
+                      {fp.embeddingCount > 1 && fp.embeddingIds[i] && (
+                        <button
+                          onClick={() => removeEmbedding(fp.id, fp.embeddingIds[i])}
+                          className="text-red-400 hover:text-red-300 cursor-pointer"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
-            <button
-              onClick={() => deleteFingerprint(fp.id)}
-              className="text-xs text-red-400 hover:text-red-300 cursor-pointer"
-            >
-              Delete
-            </button>
-          </div>
-        ))}
+          );
+        })}
       </section>
 
       {/* Enrollment Mode */}
       {enrolling && (
         <section className="p-4 rounded-lg border border-cc-border bg-cc-input">
-          <h3 className="text-sm font-semibold text-cc-fg mb-2">Enrollment</h3>
+          <h3 className="text-sm font-semibold text-cc-fg mb-2">
+            {enrollMode === "add-voiceprint" ? `Add Voiceprint to "${enrollTargetProfile?.name}"` : "New Speaker Profile"}
+          </h3>
           <p className="text-xs text-cc-muted mb-3">
             Read the passages below aloud at your normal speaking pace. Each confirmed segment
             captures a voice sample. All 5 passages give the best fingerprint quality.
           </p>
 
+          {enrollMode === "new" && (
+            <input
+              type="text"
+              placeholder="Speaker name (e.g., John)"
+              value={enrollName}
+              onChange={(e) => setEnrollName(e.target.value)}
+              className="w-full px-3 py-2 rounded-lg bg-cc-bg border border-cc-border text-cc-fg text-sm mb-3"
+            />
+          )}
+
           <input
             type="text"
-            placeholder="Fingerprint name"
-            value={enrollName}
-            onChange={(e) => setEnrollName(e.target.value)}
+            placeholder="Voiceprint label (e.g., Pixel Buds, Desktop Mic)"
+            value={enrollLabel}
+            onChange={(e) => setEnrollLabel(e.target.value)}
             className="w-full px-3 py-2 rounded-lg bg-cc-bg border border-cc-border text-cc-fg text-sm mb-3"
           />
 
@@ -337,7 +410,7 @@ export function VoiceFingerprints() {
             )}
           </div>
 
-          {/* Similarity scores against existing fingerprints */}
+          {/* Similarity scores against existing profiles */}
           {enrollSegments.length > 0 && enrollSegments[enrollSegments.length - 1].scores.length > 0 && (
             <div className="mb-3">
               <span className="text-xs text-cc-muted">Similarity to existing:</span>
@@ -381,29 +454,37 @@ export function VoiceFingerprints() {
         <section className="p-4 rounded-lg border border-cc-border bg-cc-input">
           <h3 className="text-sm font-semibold text-cc-fg mb-2">Testing</h3>
           <p className="text-xs text-cc-muted mb-3">
-            Speak to see real-time similarity scores against all fingerprints.
+            Speak to see which identity and voiceprint best matches your voice.
           </p>
 
-          {testScores.length === 0 ? (
+          {!testHeard && (
             <p className="text-xs text-cc-muted mb-3">Waiting for voice segment...</p>
-          ) : (
-            <div className="mb-3 space-y-1.5">
-              {testScores.map((s) => (
-                <div key={s.id} className="flex items-center gap-2">
-                  <span className="text-xs text-cc-fg w-24 truncate">{s.name}</span>
+          )}
+
+          <div className="mb-3 space-y-1.5">
+            {testScores.map((s, i) => {
+              const isBest = i === 0 && s.similarity > 0;
+              return (
+                <div key={s.id} className={`flex items-center gap-2 ${isBest ? "px-2 py-1.5 -mx-2 rounded-lg bg-green-500/10 border border-green-500/20" : ""}`}>
+                  <div className="w-28 min-w-0">
+                    <span className={`text-xs truncate block ${isBest ? "text-green-400 font-semibold" : "text-cc-fg"}`}>{s.name}</span>
+                    {s.bestVoiceprint && s.similarity > 0 && (
+                      <span className={`text-[10px] truncate block ${isBest ? "text-green-400/70" : "text-cc-muted"}`}>{s.bestVoiceprint}</span>
+                    )}
+                  </div>
                   <div className="flex-1 h-2 bg-cc-border rounded-full overflow-hidden">
                     <div
-                      className={`h-full rounded-full transition-all ${s.similarity >= active.threshold ? "bg-green-500" : "bg-red-400"}`}
+                      className={`h-full rounded-full transition-all ${isBest ? "bg-green-500" : s.similarity > 0 ? "bg-cc-muted/40" : ""}`}
                       style={{ width: `${Math.max(0, Math.min(100, s.similarity * 100))}%` }}
                     />
                   </div>
-                  <span className={`text-xs font-mono ${s.similarity >= active.threshold ? "text-green-500" : "text-red-400"}`}>
-                    {s.similarity.toFixed(3)}
+                  <span className={`text-xs font-mono ${isBest ? "text-green-400" : "text-cc-muted"}`}>
+                    {s.similarity > 0 ? s.similarity.toFixed(3) : ""}
                   </span>
                 </div>
-              ))}
-            </div>
-          )}
+              );
+            })}
+          </div>
 
           <button
             onClick={stopTest}

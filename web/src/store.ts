@@ -127,7 +127,7 @@ interface AppState {
   playgroundVadActive: boolean;
 
   // Speaker fingerprint state
-  activeFingerprintId: string | null;
+  activeSpeakerName: string | null;
   speakerGateThreshold: number;
 
   // Actions
@@ -240,7 +240,7 @@ interface AppState {
   setPlaygroundVadActive: (active: boolean) => void;
 
   // Speaker fingerprint actions
-  setActiveFingerprintId: (id: string | null) => void;
+  setActiveSpeakerName: (id: string | null) => void;
   setSpeakerGateThreshold: (threshold: number) => void;
 
   reset: () => void;
@@ -332,7 +332,7 @@ export const useStore = create<AppState>((set) => ({
   playgroundSegments: [],
   playgroundRmsDb: -60,
   playgroundVadActive: false,
-  activeFingerprintId: null,
+  activeSpeakerName: null,
   speakerGateThreshold: 0.45,
 
   setClientRole: (role) => set({ clientRole: role }),
@@ -816,7 +816,7 @@ export const useStore = create<AppState>((set) => ({
   setPlaygroundLevel: (rmsDb) => set({ playgroundRmsDb: rmsDb }),
   setPlaygroundVadActive: (active) => set({ playgroundVadActive: active }),
 
-  setActiveFingerprintId: (id) => set({ activeFingerprintId: id }),
+  setActiveSpeakerName: (id) => set({ activeSpeakerName: id }),
   setSpeakerGateThreshold: (threshold) => set({ speakerGateThreshold: threshold }),
 
   reset: () =>
@@ -867,7 +867,7 @@ export const useStore = create<AppState>((set) => ({
       playgroundSegments: [],
       playgroundRmsDb: -60,
       playgroundVadActive: false,
-      activeFingerprintId: null,
+      activeSpeakerName: null,
       speakerGateThreshold: 0.45,
     }),
 }));

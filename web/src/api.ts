@@ -129,7 +129,7 @@ export interface CreateSessionOpts {
   branch?: string;
   createBranch?: boolean;
   useWorktree?: boolean;
-  backend?: "claude" | "codex" | "terminal" | "computer-use";
+  backend?: "claude" | "codex" | "opencode" | "terminal" | "computer-use";
   nodeId?: string;
   agentType?: string;
   agentConfig?: Record<string, unknown>;
@@ -251,10 +251,13 @@ export interface SpeakerFingerprint {
   name: string;
   user: string;
   createdAt: number;
+  embeddingCount: number;
+  embeddingLabels: string[];
+  embeddingIds: string[];
 }
 
 export interface ActiveFingerprint {
-  fingerprintId: string | null;
+  speakerName: string | null;
   threshold: number;
 }
 
@@ -473,10 +476,12 @@ export const api = {
 
   // Speaker Fingerprints
   listFingerprints: () => get<SpeakerFingerprint[]>("/voice/fingerprints"),
-  createFingerprint: (data: { name: string; embedding: number[] }) => post<SpeakerFingerprint>("/voice/fingerprints", data),
+  createFingerprint: (data: { name: string; embedding: number[]; label?: string; audio?: string }) => post<SpeakerFingerprint>("/voice/fingerprints", data),
   deleteFingerprint: (id: string) => del(`/voice/fingerprints/${encodeURIComponent(id)}`),
   getActiveFingerprint: () => get<ActiveFingerprint>("/voice/fingerprints/active"),
-  setActiveFingerprint: (data: { fingerprintId: string | null; threshold?: number }) => put<ActiveFingerprint>("/voice/fingerprints/active", data),
+  setActiveFingerprint: (data: { speakerName: string | null; threshold?: number }) => put<ActiveFingerprint>("/voice/fingerprints/active", data),
+  addEmbedding: (profileId: string, data: { embedding: number[]; label?: string; audio?: string }) => post<SpeakerFingerprint>(`/voice/fingerprints/${encodeURIComponent(profileId)}/embeddings`, data),
+  removeEmbedding: (profileId: string, embId: string) => del(`/voice/fingerprints/${encodeURIComponent(profileId)}/embeddings/${encodeURIComponent(embId)}`),
   refreshSpeakerGate: () => post("/voice/fingerprints/refresh"),
 
   // Voice Recordings

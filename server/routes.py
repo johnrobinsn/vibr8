@@ -367,8 +367,8 @@ def create_routes(
         android_node = android_registry.get_node(target_node) if android_registry and target_node else None
 
         if android_node:
-            if backend in ("claude", "codex"):
-                # Android node can't run Claude/Codex — create on host with associatedNodeId
+            if backend in ("claude", "codex", "opencode"):
+                # Android node can't run Claude/Codex/OpenCode — create on host with associatedNodeId
                 body.pop("nodeId", None)
                 body["associatedNodeId"] = target_node
             # computer-use sessions for Android nodes also run on host (with nodeId passed through)
@@ -390,7 +390,7 @@ def create_routes(
                 return web.json_response(result)
 
         try:
-            if backend not in ("claude", "codex", "terminal", "computer-use"):
+            if backend not in ("claude", "codex", "opencode", "terminal", "computer-use"):
                 return web.json_response({"error": f"Invalid backend: {backend}"}, status=400)
 
             if backend == "terminal":
@@ -762,6 +762,7 @@ def create_routes(
         backends = []
         backends.append({"id": "claude", "name": "Claude Code", "available": shutil.which("claude") is not None})
         backends.append({"id": "codex", "name": "Codex", "available": shutil.which("codex") is not None})
+        backends.append({"id": "opencode", "name": "OpenCode", "available": shutil.which("opencode") is not None})
         backends.append({"id": "computer-use", "name": "Computer Use", "available": True})
         backends.append({"id": "terminal", "name": "Terminal", "available": True})
         return web.json_response(backends)
@@ -783,6 +784,19 @@ def create_routes(
                 return web.json_response(result)
             except Exception:
                 return web.json_response({"error": "Failed to parse Codex models cache"}, status=500)
+        if backend_id == "opencode":
+            return web.json_response([
+                {"value": "google/gemini-2.5-pro", "label": "Gemini 2.5 Pro", "description": "Google's most capable model"},
+                {"value": "google/gemini-2.5-flash", "label": "Gemini 2.5 Flash", "description": "Fast and efficient"},
+                {"value": "anthropic/claude-sonnet-4-20250514", "label": "Claude Sonnet 4", "description": "Anthropic Claude via OpenCode"},
+                {"value": "anthropic/claude-opus-4-20250514", "label": "Claude Opus 4", "description": "Anthropic's most capable model"},
+                {"value": "openai/gpt-4o", "label": "GPT-4o", "description": "OpenAI's flagship model"},
+                {"value": "openai/o3", "label": "o3", "description": "OpenAI reasoning model"},
+                {"value": "xai/grok-3", "label": "Grok 3", "description": "xAI's latest model"},
+                {"value": "groq/llama-3.3-70b", "label": "Llama 3.3 70B (Groq)", "description": "Ultra-fast via Groq"},
+                {"value": "mistral/mistral-large-latest", "label": "Mistral Large", "description": "Mistral's flagship"},
+                {"value": "openrouter/deepseek/deepseek-r1", "label": "DeepSeek R1", "description": "Via OpenRouter"},
+            ])
         return web.json_response({"error": "Use frontend defaults for this backend"}, status=404)
 
     # ── Filesystem browsing ──────────────────────────────────────────────
@@ -1600,7 +1614,7 @@ def create_routes(
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
         backend = body.get("backend", "claude")
-        if backend not in ("claude", "codex", "computer-use"):
+        if backend not in ("claude", "codex", "opencode", "computer-use"):
             return web.json_response({"error": f"Invalid backend: {backend}"}, status=400)
         cwd = body.get("cwd")
         if not cwd and backend != "computer-use":
@@ -1916,10 +1930,23 @@ def create_routes(
         body = await request.json()
         name = body.get("name", "Untitled")
         embedding = body.get("embedding")
+        label = body.get("label", "Default")
         if not embedding or not isinstance(embedding, list):
             return web.json_response({"error": "embedding required"}, status=400)
-        fp = speaker_fingerprints.create_fingerprint(username, name, embedding)
-        return web.json_response({"id": fp["id"], "name": fp["name"], "user": fp["user"], "createdAt": fp["createdAt"]}, status=201)
+        import base64
+        audio = None
+        audio_b64 = body.get("audio")
+        if audio_b64:
+            import numpy as np
+            audio = np.frombuffer(base64.b64decode(audio_b64), dtype=np.int16)
+        fp = speaker_fingerprints.create_fingerprint(username, name, embedding, label=label, audio=audio)
+        embs = fp.get("embeddings", [])
+        return web.json_response({
+            "id": fp["id"], "name": fp["name"], "user": fp.get("user", username),
+            "createdAt": fp.get("createdAt", 0),
+            "embeddingCount": len(embs),
+            "embeddingLabels": [e.get("label", "") for e in embs],
+        }, status=201)
 
     @routes.delete("/api/voice/fingerprints/{id}")
     async def fingerprints_delete(request: web.Request) -> web.Response:
@@ -1937,23 +1964,23 @@ def create_routes(
         username = _get_username(request)
         active = speaker_fingerprints.get_active(username)
         if not active:
-            return web.json_response({"fingerprintId": None, "threshold": 0.45})
+            return web.json_response({"speakerName": None, "threshold": 0.45})
         return web.json_response(active)
 
     @routes.put("/api/voice/fingerprints/active")
     async def fingerprints_active_set(request: web.Request) -> web.Response:
         username = _get_username(request)
         body = await request.json()
-        fp_id = body.get("fingerprintId")
         threshold = float(body.get("threshold", 0.45))
-        if fp_id is None:
+        speaker_name = body.get("speakerName")
+        if speaker_name is None:
             speaker_fingerprints.clear_active(username)
             if webrtc_manager:
                 webrtc_manager.refresh_speaker_gates(username)
-            return web.json_response({"fingerprintId": None, "threshold": threshold})
-        config = speaker_fingerprints.set_active(username, fp_id, threshold)
+            return web.json_response({"speakerName": None, "threshold": threshold})
+        config = speaker_fingerprints.set_active(username, speaker_name, threshold)
         if not config:
-            return web.json_response({"error": "Fingerprint not found"}, status=404)
+            return web.json_response({"error": "Speaker profile not found"}, status=404)
         if webrtc_manager:
             webrtc_manager.refresh_speaker_gates(username)
         return web.json_response(config)
@@ -1983,11 +2010,63 @@ def create_routes(
         scores = []
         for fp_meta in fps:
             fp = speaker_fingerprints.get_fingerprint(username, fp_meta["id"])
-            if fp and "embedding" in fp:
-                ref = np.array(fp["embedding"], dtype=np.float32)
-                sim = cosine_sim(emb, ref)
-                scores.append({"id": fp["id"], "name": fp["name"], "similarity": round(sim, 4)})
+            if fp and fp.get("embeddings"):
+                best_sim = -1.0
+                best_label = ""
+                for e in fp["embeddings"]:
+                    if "embedding" not in e:
+                        continue
+                    sim = cosine_sim(emb, np.array(e["embedding"], dtype=np.float32))
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_label = e.get("label", "")
+                scores.append({"id": fp["id"], "name": fp["name"], "similarity": round(best_sim, 4), "bestVoiceprint": best_label})
         return web.json_response({"scores": scores})
+
+    @routes.post("/api/voice/fingerprints/{id}/embeddings")
+    async def fingerprints_add_embedding(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        profile_id = request.match_info["id"]
+        body = await request.json()
+        embedding = body.get("embedding")
+        label = body.get("label", "Default")
+        if not embedding or not isinstance(embedding, list):
+            return web.json_response({"error": "embedding required"}, status=400)
+        import base64
+        audio = None
+        audio_b64 = body.get("audio")
+        if audio_b64:
+            import numpy as np
+            audio = np.frombuffer(base64.b64decode(audio_b64), dtype=np.int16)
+        try:
+            fp = speaker_fingerprints.add_embedding(username, profile_id, embedding, label=label, audio=audio)
+        except ValueError:
+            return web.json_response({"error": "Profile not found"}, status=404)
+        embs = fp.get("embeddings", [])
+        if webrtc_manager:
+            webrtc_manager.refresh_speaker_gates(username)
+        return web.json_response({
+            "id": fp["id"], "name": fp["name"],
+            "embeddingCount": len(embs),
+            "embeddingLabels": [e.get("label", "") for e in embs],
+        })
+
+    @routes.delete("/api/voice/fingerprints/{id}/embeddings/{emb_id}")
+    async def fingerprints_remove_embedding(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        profile_id = request.match_info["id"]
+        emb_id = request.match_info["emb_id"]
+        result = speaker_fingerprints.remove_embedding(username, profile_id, emb_id)
+        if webrtc_manager:
+            webrtc_manager.refresh_speaker_gates(username)
+        if result is None:
+            return web.json_response({"ok": True, "deleted": True})
+        embs = result.get("embeddings", [])
+        return web.json_response({
+            "ok": True, "deleted": False,
+            "embeddingCount": len(embs),
+            "embeddingLabels": [e.get("label", "") for e in embs],
+        })
 
     # ── Voice Logs ───────────────────────────────────────────────────────
 

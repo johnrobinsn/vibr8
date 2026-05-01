@@ -109,14 +109,14 @@ class STT:
         self._segment_time_begin: float = 0.0
         self._segment_time_end: float = 0.0
         self._idle_silence_time: float = 0.0  # seconds of silence in IDLE state
-        self._speaker_gate: dict | None = None  # {embedding: np.ndarray, threshold: float}
+        self._speaker_gate: dict | None = None  # {embeddings: [np.ndarray, ...], threshold: float}
 
         self._state_machine = self._create_state_machine()
 
     # ── Speaker gate ────────────────────────────────────────────────────
 
-    def set_speaker_gate(self, embedding: np.ndarray, threshold: float) -> None:
-        self._speaker_gate = {"embedding": embedding, "threshold": threshold}
+    def set_speaker_gate(self, embeddings: list[np.ndarray], threshold: float) -> None:
+        self._speaker_gate = {"embeddings": embeddings, "threshold": threshold}
 
     def clear_speaker_gate(self) -> None:
         self._speaker_gate = None
@@ -355,11 +355,11 @@ class STT:
                         try:
                             from server.speaker_model import embed, cosine_sim
                             emb = embed(float_buf)
-                            sim = cosine_sim(emb, speaker_gate["embedding"])
-                            logger.info("[stt] Speaker gate: sim=%.3f threshold=%.3f %s",
-                                        sim, speaker_gate["threshold"],
-                                        "PASS" if sim >= speaker_gate["threshold"] else "REJECT")
-                            if sim < speaker_gate["threshold"]:
+                            best_sim = max(cosine_sim(emb, ref) for ref in speaker_gate["embeddings"])
+                            logger.info("[stt] Speaker gate: best_sim=%.3f threshold=%.3f %s",
+                                        best_sim, speaker_gate["threshold"],
+                                        "PASS" if best_sim >= speaker_gate["threshold"] else "REJECT")
+                            if best_sim < speaker_gate["threshold"]:
                                 s.clear()
                                 stt._notify_listeners("voice_not_detected", None)
                                 return
@@ -472,12 +472,20 @@ class STT:
                     self.eou_counter = 0
 
                 def prompt_wait_resume(s: list, b: np.ndarray) -> None:
-                    """Speaker resumed during prompt wait — start a new segment."""
+                    """Speaker resumed during prompt wait — start a new segment.
+
+                    Does NOT reset prompt_wait_counter. If this turns out to be
+                    a VAD false positive (noise segment discarded → recovery
+                    re-enters PROMPT_WAIT), the counter picks up where it was.
+                    If it's real speech, process_segment resets the counter when
+                    the new segment is confirmed.
+                    """
+                    logger.info("[stt] prompt_wait_resume: counter=%d segments=%d",
+                                self.prompt_wait_counter, len(self.prompt_segments))
                     s.append(b)
                     stt._segment_time_begin = stt._capture_time
                     stt._notify_listeners("voice_was_detected", None)
                     self.eou_counter = 0
-                    self.prompt_wait_counter = 0
 
                 def prompt_wait_silence(s: list, b: np.ndarray) -> None:
                     """Silence during prompt wait — check if timeout expired."""

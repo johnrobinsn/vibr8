@@ -347,8 +347,8 @@ class WebRTCManager:
             if not stt:
                 continue
             if gate:
-                stt.set_speaker_gate(gate["embedding"], gate["threshold"])
-                logger.info("[webrtc] client %s: speaker gate updated (threshold=%.3f)", cid, gate["threshold"])
+                stt.set_speaker_gate(gate["embeddings"], gate["threshold"])
+                logger.info("[webrtc] client %s: speaker gate updated (threshold=%.3f, %d embeddings)", cid, gate["threshold"], len(gate["embeddings"]))
             else:
                 stt.clear_speaker_gate()
                 logger.info("[webrtc] client %s: speaker gate cleared", cid)
@@ -477,9 +477,9 @@ class WebRTCManager:
             from server.speaker_fingerprints import get_active_gate
             gate = get_active_gate(username)
             if gate:
-                stt.set_speaker_gate(gate["embedding"], gate["threshold"])
-                logger.info("[webrtc] client %s: speaker gate applied on connect (user=%s, threshold=%.3f, emb_norm=%.4f)",
-                            client_id, username, gate["threshold"], float(np.linalg.norm(gate["embedding"])))
+                stt.set_speaker_gate(gate["embeddings"], gate["threshold"])
+                logger.info("[webrtc] client %s: speaker gate applied on connect (user=%s, threshold=%.3f, %d embeddings)",
+                            client_id, username, gate["threshold"], len(gate["embeddings"]))
             else:
                 logger.info("[webrtc] client %s: no active speaker gate (user=%s)", client_id, username)
 
@@ -992,10 +992,17 @@ class WebRTCManager:
                 scores = []
                 for fp_meta in fps:
                     fp = speaker_fingerprints.get_fingerprint(username, fp_meta["id"])
-                    if fp and "embedding" in fp:
-                        ref = np.array(fp["embedding"], dtype=np.float32)
-                        sim = cosine_sim(emb, ref)
-                        scores.append({"id": fp["id"], "name": fp["name"], "similarity": round(sim, 4)})
+                    if fp and fp.get("embeddings"):
+                        best_sim = -1.0
+                        best_label = ""
+                        for e in fp["embeddings"]:
+                            if "embedding" not in e:
+                                continue
+                            sim = cosine_sim(emb, np.array(e["embedding"], dtype=np.float32))
+                            if sim > best_sim:
+                                best_sim = sim
+                                best_label = e.get("label", "")
+                        scores.append({"id": fp["id"], "name": fp["name"], "similarity": round(best_sim, 4), "bestVoiceprint": best_label})
 
                 try:
                     await ws.send_str(_json.dumps({

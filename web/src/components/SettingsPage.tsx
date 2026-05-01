@@ -17,7 +17,7 @@ export function SettingsPage() {
       const t = match[1] as Tab;
       if (["voice-profiles", "fingerprints", "voice-logs", "api-keys", "devices", "android"].includes(t)) return t;
     }
-    return "voice-profiles";
+    return "fingerprints";
   };
   const [tab, setTab] = useState<Tab>(initialTab);
 
@@ -41,8 +41,8 @@ export function SettingsPage() {
       <div className="border-b border-cc-border px-6">
         <div className="flex gap-1">
           {([
-            { id: "voice-profiles" as Tab, label: "Voice Profiles" },
             { id: "fingerprints" as Tab, label: "Speaker ID" },
+            { id: "voice-profiles" as Tab, label: "Voice Profiles" },
             { id: "voice-logs" as Tab, label: "Voice Logs" },
             { id: "api-keys" as Tab, label: "API Keys" },
             { id: "devices" as Tab, label: "Devices" },
