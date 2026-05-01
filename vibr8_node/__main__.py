@@ -34,7 +34,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, help="Config file path")
     parser.add_argument("--port", type=int, help="Local port for CLI/Ring0 (default: 3457)")
     parser.add_argument("--work-dir", help="Working directory for sessions")
-    parser.add_argument("--default-backend", help="Default backend for new sessions (claude, codex)")
+    parser.add_argument("--default-backend", help="Default backend for new sessions (claude, codex, opencode)")
     args = parser.parse_args()
 
     config = load_config(args.config)

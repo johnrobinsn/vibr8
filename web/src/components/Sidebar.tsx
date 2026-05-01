@@ -532,6 +532,9 @@ export function Sidebar() {
                 {s.backendType === "codex" && (
                   <span className="text-[9px] px-1 py-0.5 rounded bg-purple-500/15 text-purple-600 dark:text-purple-400 shrink-0">codex</span>
                 )}
+                {s.backendType === "opencode" && (
+                  <span className="text-[9px] px-1 py-0.5 rounded bg-teal-500/15 text-teal-600 dark:text-teal-400 shrink-0">opencode</span>
+                )}
                 {s.backendType === "computer-use" && (
                   <span className="text-[9px] px-1 py-0.5 rounded bg-orange-500/15 text-orange-600 dark:text-orange-400 shrink-0">desktop</span>
                 )}

@@ -7,6 +7,7 @@ Originally ported from The Vibe Companion (cli-launcher.ts).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -81,6 +82,7 @@ class LaunchOptions:
     cwd: Optional[str] = None
     claudeBinary: Optional[str] = None
     codexBinary: Optional[str] = None
+    opencodeBinary: Optional[str] = None
     allowedTools: Optional[List[str]] = None
     env: Optional[Dict[str, str]] = None
     backendType: Optional[BackendType] = None
@@ -103,6 +105,7 @@ class _RelaunchOptions:
     cwd: Optional[str] = None
     claudeBinary: Optional[str] = None
     codexBinary: Optional[str] = None
+    opencodeBinary: Optional[str] = None
     allowedTools: Optional[List[str]] = None
     env: Optional[Dict[str, str]] = None
     backendType: Optional[BackendType] = None
@@ -124,8 +127,8 @@ class CliLauncher:
         self._processes: Dict[str, asyncio.subprocess.Process] = {}
         self._port = port
         self._store: Optional[SessionStore] = None
-        self._on_codex_adapter: Optional[
-            Callable[[str, CodexAdapter], None]
+        self._on_adapter: Optional[
+            Callable[[str, Any, str], None]  # (session_id, adapter, backend_type)
         ] = None
         self._on_computer_use_created: Optional[
             Callable[[str, SdkSessionInfo], None]
@@ -138,11 +141,11 @@ class CliLauncher:
 
     def on_codex_adapter_created(
         self,
-        cb: Callable[[str, CodexAdapter], None],
+        cb: Callable[[str, Any, str], None],
     ) -> None:
-        """Register a callback for when a CodexAdapter is created
+        """Register a callback for when an adapter (Codex/OpenCode) is created
         (WsBridge needs to attach it)."""
-        self._on_codex_adapter = cb
+        self._on_adapter = cb
 
     def on_computer_use_created(
         self,
@@ -252,7 +255,9 @@ class CliLauncher:
             self._persist_state()
             return info
 
-        if backend_type == "codex":
+        if backend_type == "opencode":
+            asyncio.ensure_future(self._spawn_opencode(session_id, info, options))
+        elif backend_type == "codex":
             asyncio.ensure_future(self._spawn_codex(session_id, info, options))
         else:
             relaunch_opts = _RelaunchOptions(
@@ -312,7 +317,17 @@ class CliLauncher:
             self._persist_state()
             return True
 
-        if info.backendType == "codex":
+        if info.backendType == "opencode":
+            await self._spawn_opencode(
+                session_id,
+                info,
+                LaunchOptions(
+                    model=info.model,
+                    permissionMode=info.permissionMode,
+                    cwd=info.cwd,
+                ),
+            )
+        elif info.backendType == "codex":
             await self._spawn_codex(
                 session_id,
                 info,
@@ -548,8 +563,8 @@ class CliLauncher:
         adapter.on_init_error(_on_init_error)
 
         # Notify the WsBridge to attach this adapter
-        if self._on_codex_adapter:
-            self._on_codex_adapter(session_id, adapter)
+        if self._on_adapter:
+            self._on_adapter(session_id, adapter, "codex")
 
         # Mark as connected immediately (no WS handshake needed for stdio)
         info.state = "connected"
@@ -570,6 +585,193 @@ class CliLauncher:
         """Wait for a Codex subprocess to exit and update state."""
         exit_code = await proc.wait()
         logger.info("Codex session %s exited (code=%s)", session_id, exit_code)
+
+        session = self._sessions.get(session_id)
+        if session:
+            session.state = "exited"
+            session.exitCode = exit_code
+
+        self._processes.pop(session_id, None)
+        self._monitor_tasks.pop(session_id, None)
+        self._persist_state()
+
+    # ── Spawn: OpenCode ──────────────────────────────────────────────────────
+
+    async def _spawn_opencode(
+        self,
+        session_id: str,
+        info: SdkSessionInfo,
+        options: LaunchOptions,
+    ) -> None:
+        """Spawn an OpenCode server subprocess for a session.
+
+        Unlike Claude Code (WebSocket) or Codex (stdio), OpenCode runs as an
+        HTTP server. We spawn ``opencode serve``, wait for it to become ready,
+        then create an OpenCodeAdapter that communicates via REST + SSE.
+        """
+        import secrets
+
+        binary = options.opencodeBinary or "opencode"
+        if not binary.startswith("/"):
+            resolved = shutil.which(binary)
+            if resolved:
+                binary = resolved
+
+        port = self._allocate_port()
+        password = secrets.token_urlsafe(24)
+
+        args: List[str] = ["serve", "--port", str(port), "--hostname", "127.0.0.1"]
+
+        env = {**os.environ}
+        env["OPENCODE_SERVER_PASSWORD"] = password
+        if options.env:
+            env.update(options.env)
+
+        # Write opencode.jsonc config with model + MCP if needed
+        cwd_path = Path(info.cwd) if info.cwd else Path.cwd()
+        cwd_path.mkdir(parents=True, exist_ok=True)
+        self._write_opencode_config(cwd_path, options.model)
+
+        logger.info(
+            "Spawning OpenCode session %s: %s %s (port %d)",
+            session_id, binary, " ".join(args), port,
+        )
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binary, *args,
+                cwd=str(cwd_path),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            logger.error(
+                "OpenCode binary not found: %s. Install with: npm install -g @anthropic/opencode",
+                binary,
+            )
+            info.state = "exited"
+            info.exitCode = 1
+            self._persist_state()
+            return
+
+        info.pid = proc.pid
+        self._processes[session_id] = proc
+
+        # Pipe stderr for debugging (stdout may have server output)
+        self._pipe_output(session_id, proc)
+
+        server_url = f"http://127.0.0.1:{port}"
+
+        # Wait for the server to become ready
+        ready = await self._wait_for_opencode_ready(server_url, password, proc)
+        if not ready:
+            logger.error("OpenCode server failed to start for session %s", session_id)
+            info.state = "exited"
+            info.exitCode = 1
+            self._persist_state()
+            return
+
+        # Create the adapter
+        from server.opencode_adapter import OpenCodeAdapter, OpenCodeAdapterOptions
+
+        adapter = OpenCodeAdapter(session_id, OpenCodeAdapterOptions(
+            model=options.model,
+            cwd=str(cwd_path),
+            server_url=server_url,
+            password=password,
+            approval_mode=options.permissionMode,
+        ))
+
+        def _on_init_error(error: str) -> None:
+            logger.error("OpenCode session %s init failed: %s", session_id, error)
+            session = self._sessions.get(session_id)
+            if session:
+                session.state = "exited"
+                session.exitCode = 1
+            self._persist_state()
+
+        adapter.on_init_error(_on_init_error)
+
+        if self._on_adapter:
+            self._on_adapter(session_id, adapter, "opencode")
+
+        info.state = "connected"
+
+        task = asyncio.create_task(
+            self._monitor_exit_opencode(session_id, proc),
+        )
+        self._monitor_tasks[session_id] = task
+
+        self._persist_state()
+
+    async def _wait_for_opencode_ready(
+        self,
+        server_url: str,
+        password: str,
+        proc: asyncio.subprocess.Process,
+        timeout: float = 30.0,
+    ) -> bool:
+        """Poll the OpenCode server until it responds to health checks."""
+        import aiohttp
+
+        auth = aiohttp.BasicAuth("opencode", password)
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            # Check if process died
+            if proc.returncode is not None:
+                return False
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{server_url}/health",
+                        auth=auth,
+                        timeout=aiohttp.ClientTimeout(total=2),
+                    ) as resp:
+                        if resp.status == 200:
+                            return True
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                pass
+
+            await asyncio.sleep(0.5)
+
+        return False
+
+    @staticmethod
+    def _write_opencode_config(
+        cwd: Path,
+        model: Optional[str] = None,
+    ) -> None:
+        """Write opencode.jsonc config file if it doesn't exist."""
+        config_path = cwd / "opencode.jsonc"
+        if config_path.exists():
+            return
+
+        config: Dict[str, Any] = {}
+        if model:
+            config["model"] = model
+
+        config_path.write_text(json.dumps(config, indent=2))
+
+    @staticmethod
+    def _allocate_port() -> int:
+        """Find an available port for the OpenCode server."""
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    async def _monitor_exit_opencode(
+        self,
+        session_id: str,
+        proc: asyncio.subprocess.Process,
+    ) -> None:
+        """Wait for an OpenCode subprocess to exit and update state."""
+        exit_code = await proc.wait()
+        logger.info("OpenCode session %s exited (code=%s)", session_id, exit_code)
 
         session = self._sessions.get(session_id)
         if session:

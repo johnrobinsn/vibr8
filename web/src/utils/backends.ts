@@ -64,6 +64,20 @@ export const CODEX_MODES: ModeOption[] = [
   { value: "plan", label: "Suggest" },
 ];
 
+export const OPENCODE_MODELS: ModelOption[] = [
+  { value: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro", icon: "◆" },
+  { value: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash", icon: "⚡" },
+  { value: "anthropic/claude-sonnet-4-20250514", label: "Claude Sonnet 4", icon: "◕" },
+  { value: "openai/gpt-4o", label: "GPT-4o", icon: "●" },
+  { value: "xai/grok-3", label: "Grok 3", icon: "✦" },
+  { value: "groq/llama-3.3-70b", label: "Llama 3.3 70B", icon: "⚡" },
+];
+
+export const OPENCODE_MODES: ModeOption[] = [
+  { value: "bypassPermissions", label: "Auto" },
+  { value: "plan", label: "Plan" },
+];
+
 export const COMPUTER_USE_MODELS: ModelOption[] = [
   { value: "ByteDance-Seed/UI-TARS-1.5-7B", label: "UI-TARS 1.5 7B", icon: "\u25CF" },
 ];
@@ -76,24 +90,28 @@ export const COMPUTER_USE_MODES: ModeOption[] = [
 
 export function getModelsForBackend(backend: BackendType): ModelOption[] {
   if (backend === "codex") return CODEX_MODELS;
+  if (backend === "opencode") return OPENCODE_MODELS;
   if (backend === "computer-use") return COMPUTER_USE_MODELS;
   return CLAUDE_MODELS;
 }
 
 export function getModesForBackend(backend: BackendType): ModeOption[] {
   if (backend === "codex") return CODEX_MODES;
+  if (backend === "opencode") return OPENCODE_MODES;
   if (backend === "computer-use") return COMPUTER_USE_MODES;
   return CLAUDE_MODES;
 }
 
 export function getDefaultModel(backend: BackendType): string {
   if (backend === "codex") return CODEX_MODELS[0].value;
+  if (backend === "opencode") return OPENCODE_MODELS[0].value;
   if (backend === "computer-use") return COMPUTER_USE_MODELS[0].value;
   return CLAUDE_MODELS[0].value;
 }
 
 export function getDefaultMode(backend: BackendType): string {
   if (backend === "codex") return CODEX_MODES[0].value;
+  if (backend === "opencode") return OPENCODE_MODES[0].value;
   if (backend === "computer-use") return COMPUTER_USE_MODES[0].value;
   return CLAUDE_MODES[0].value;
 }

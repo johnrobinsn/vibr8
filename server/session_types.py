@@ -403,7 +403,7 @@ BrowserIncomingMessage = Union[
 
 # ─── Session State ────────────────────────────────────────────────────────────
 
-BackendType = Literal["claude", "codex", "terminal", "computer-use"]
+BackendType = Literal["claude", "codex", "terminal", "computer-use", "opencode"]
 
 
 class _SessionStateOptional(TypedDict, total=False):

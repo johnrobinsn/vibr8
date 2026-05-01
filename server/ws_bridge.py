@@ -17,7 +17,7 @@ from aiohttp import web
 
 if TYPE_CHECKING:
     from server.session_store import SessionStore, PersistedSession
-    from server.codex_adapter import CodexAdapter
+    from server.adapter import CodexAdapter
     from server.webrtc import WebRTCManager
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ class Session:
     id: str
     backend_type: str = "claude"
     cli_socket: web.WebSocketResponse | None = None
-    codex_adapter: Any = None  # CodexAdapter
+    adapter: Any = None  # CodexAdapter
     browser_sockets: dict[web.WebSocketResponse, str] = field(default_factory=dict)  # ws → clientId
     state: dict[str, Any] = field(default_factory=dict)
     pending_permissions: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -673,8 +673,8 @@ class WsBridge:
         session = self._sessions.get(session_id)
         if not session:
             return False
-        if session.backend_type == "codex":
-            return session.codex_adapter is not None and session.codex_adapter.is_connected()
+        if session.backend_type in ("codex", "opencode"):
+            return session.adapter is not None and session.adapter.is_connected()
         if session.backend_type == "computer-use":
             return session_id in self._computer_use_agents
         return session.cli_socket is not None
@@ -692,9 +692,9 @@ class WsBridge:
         if session.cli_socket:
             await session.cli_socket.close()
             session.cli_socket = None
-        if session.codex_adapter:
-            await session.codex_adapter.disconnect()
-            session.codex_adapter = None
+        if session.adapter:
+            await session.adapter.disconnect()
+            session.adapter = None
         agent = self._computer_use_agents.pop(session_id, None)
         if agent:
             await agent.stop()
@@ -709,20 +709,20 @@ class WsBridge:
         if self._store:
             self._store.remove(session_id)
 
-    # ── Codex adapter attachment ─────────────────────────────────────────
+    # ── Adapter attachment (Codex / OpenCode) ─────────────────────────────
 
-    def attach_codex_adapter(self, session_id: str, adapter: Any) -> None:
-        session = self.get_or_create_session(session_id, "codex")
-        session.backend_type = "codex"
-        session.state["backend_type"] = "codex"
-        session.codex_adapter = adapter
+    def attach_adapter(self, session_id: str, adapter: Any, backend_type: str = "codex") -> None:
+        session = self.get_or_create_session(session_id, backend_type)
+        session.backend_type = backend_type
+        session.state["backend_type"] = backend_type
+        session.adapter = adapter
 
         async def on_browser_msg(msg: dict[str, Any]) -> None:
             if msg.get("type") == "session_init":
-                session.state = {**session.state, **msg.get("session", {}), "backend_type": "codex"}
+                session.state = {**session.state, **msg.get("session", {}), "backend_type": backend_type}
                 self._persist_session(session)
             elif msg.get("type") == "session_update":
-                session.state = {**session.state, **msg.get("session", {}), "backend_type": "codex"}
+                session.state = {**session.state, **msg.get("session", {}), "backend_type": backend_type}
                 self._persist_session(session)
             elif msg.get("type") == "status_change":
                 session.state["is_compacting"] = msg.get("status") == "compacting"
@@ -767,7 +767,7 @@ class WsBridge:
                 session.state["model"] = meta["model"]
             if meta.get("cwd"):
                 session.state["cwd"] = meta["cwd"]
-            session.state["backend_type"] = "codex"
+            session.state["backend_type"] = backend_type
             self._persist_session(session)
 
         adapter.on_session_meta(on_meta)
@@ -786,9 +786,9 @@ class WsBridge:
                 asyncio.ensure_future(self._notify_ring0_state_change(session, "waiting_for_permission→idle"))
             elif was_running:
                 asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
-            session.codex_adapter = None
+            session.adapter = None
             self._persist_session(session)
-            logger.info(f"[ws-bridge] Codex adapter disconnected for session {session_id}")
+            logger.info(f"[ws-bridge] Adapter disconnected for session {session_id}")
             await self._broadcast_to_browsers(session, {"type": "cli_disconnected"})
             await self._push_to_native_clients(session.id, "cli_disconnected")
 
@@ -796,7 +796,7 @@ class WsBridge:
 
         # Flush queued messages
         if session.pending_messages:
-            logger.info(f"[ws-bridge] Flushing {len(session.pending_messages)} queued message(s) to Codex adapter for session {session_id}")
+            logger.info(f"[ws-bridge] Flushing {len(session.pending_messages)} queued message(s) to adapter for session {session_id}")
             queued = session.pending_messages[:]
             session.pending_messages.clear()
             for raw in queued:
@@ -1038,8 +1038,8 @@ class WsBridge:
                         f"node_found={node is not None} tunnel={node.tunnel is not None if node else False} "
                         f"tunnel_connected={node.tunnel.connected if node and node.tunnel else False} → {backend_connected}")
         else:
-            if session.backend_type == "codex":
-                backend_connected = session.codex_adapter is not None and session.codex_adapter.is_connected()
+            if session.backend_type in ("codex", "opencode"):
+                backend_connected = session.adapter is not None and session.adapter.is_connected()
             elif session.backend_type == "computer-use":
                 backend_connected = session_id in self._computer_use_agents
             else:
@@ -1614,8 +1614,8 @@ class WsBridge:
                 agent.watch_stop()
             return
 
-        # For Codex sessions, delegate to the adapter
-        if session.backend_type == "codex":
+        # For adapter-based sessions (Codex / OpenCode), delegate to the adapter
+        if session.backend_type in ("codex", "opencode"):
             if msg.get("type") == "user_message":
                 import time
                 source_client_id = session.browser_sockets.get(ws, "") if ws else ""
@@ -1632,10 +1632,10 @@ class WsBridge:
                 session.pending_permissions.pop(msg.get("request_id", ""), None)
                 self._persist_session(session)
 
-            if session.codex_adapter:
-                session.codex_adapter.send_browser_message(msg)
+            if session.adapter:
+                session.adapter.send_browser_message(msg)
             else:
-                logger.info(f"[ws-bridge] Codex adapter not yet attached for session {session.id}, queuing {msg.get('type')}")
+                logger.info(f"[ws-bridge] Adapter not yet attached for session {session.id}, queuing {msg.get('type')}")
                 session.pending_messages.append(json.dumps(msg))
             return
 
@@ -2177,14 +2177,14 @@ class WsBridge:
             logger.warning("[ws-bridge] Cannot forward to remote node %s — tunnel unavailable", node_id[:8])
             return
 
-        # Codex adapter — translate NDJSON wire format to browser format
-        if session.backend_type == "codex":
+        # Adapter-based backends — translate NDJSON wire format to browser format
+        if session.backend_type in ("codex", "opencode"):
             browser_msg = self._ndjson_to_browser_msg(ndjson)
             if browser_msg:
-                if session.codex_adapter:
-                    session.codex_adapter.send_browser_message(browser_msg)
+                if session.adapter:
+                    session.adapter.send_browser_message(browser_msg)
                 else:
-                    logger.info("[ws-bridge] Codex adapter not attached for session %s, queuing", session.id)
+                    logger.info("[ws-bridge] Adapter not attached for session %s, queuing", session.id)
                     session.pending_messages.append(json.dumps(browser_msg))
                     if self._on_cli_relaunch_needed:
                         self._on_cli_relaunch_needed(session.id)
@@ -2438,7 +2438,7 @@ class WsBridge:
             ]
             session_states.append({
                 "sessionId": session.id,
-                "cliConnected": session.cli_socket is not None or session.codex_adapter is not None,
+                "cliConnected": session.cli_socket is not None or session.adapter is not None,
                 "agentStatus": self._derive_agent_status(session),
                 "pendingPermissions": perms,
             })

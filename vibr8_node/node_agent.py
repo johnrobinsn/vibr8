@@ -99,10 +99,10 @@ class NodeAgent:
 
         self._bridge.on_cli_relaunch_needed_callback(on_cli_relaunch_needed)
 
-        def on_codex_adapter(session_id: str, adapter: object) -> None:
-            self._bridge.attach_codex_adapter(session_id, adapter)
+        def on_adapter_created(session_id: str, adapter: object, backend_type: str = "codex") -> None:
+            self._bridge.attach_adapter(session_id, adapter, backend_type)
 
-        self._launcher.on_codex_adapter_created(on_codex_adapter)
+        self._launcher.on_codex_adapter_created(on_adapter_created)
 
         # Set broadcast hook so CLI output goes to the hub tunnel
         self._bridge._broadcast_hook = self._forward_to_hub

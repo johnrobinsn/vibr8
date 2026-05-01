@@ -452,11 +452,11 @@ def create_app() -> web.Application:
 
     ws_bridge.on_cli_session_id_received(on_cli_session_id)
 
-    # When a Codex adapter is created, attach it to the WsBridge
-    def on_codex_adapter(session_id: str, adapter: object) -> None:
-        ws_bridge.attach_codex_adapter(session_id, adapter)
+    # When an adapter (Codex/OpenCode) is created, attach it to the WsBridge
+    def on_adapter_created(session_id: str, adapter: object, backend_type: str = "codex") -> None:
+        ws_bridge.attach_adapter(session_id, adapter, backend_type)
 
-    launcher.on_codex_adapter_created(on_codex_adapter)
+    launcher.on_codex_adapter_created(on_adapter_created)
 
     # When a computer-use session is created, spin up the agent and register it
     try:
@@ -717,12 +717,14 @@ def create_app() -> web.Application:
         async def _preload_tts() -> None:
             try:
                 import os
-                engine = os.getenv("VIBR8_TTS_ENGINE", "openai").lower()
-                if engine == "kokoro":
+                engine = os.getenv("VIBR8_TTS_ENGINE", "kokoro").lower()
+                if engine != "openai":
                     from server.tts_kokoro import _ensure_pipeline
                     logger.info("[server] Preloading Kokoro TTS model (background thread)...")
                     await asyncio.to_thread(_ensure_pipeline)
                     logger.info("[server] Kokoro TTS model ready")
+            except ImportError:
+                logger.info("[server] Kokoro not installed — skipping TTS preload")
             except Exception:
                 logger.exception("[server] Failed to preload Kokoro TTS model")
 

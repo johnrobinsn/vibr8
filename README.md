@@ -13,10 +13,11 @@
 ## Features
 
 - **Multi-session management** — Launch, monitor, and switch between multiple Claude Code or Codex sessions
-- **Real-time voice** — Bidirectional WebRTC audio with push-to-talk, speech-to-text (Whisper + Silero VAD), and text-to-speech (OpenAI)
+- **Real-time voice** — Bidirectional WebRTC audio with push-to-talk, speech-to-text (Whisper + Silero VAD with speculative decoding), and text-to-speech (Kokoro local TTS by default, OpenAI cloud TTS optional)
+- **Speaker fingerprinting** — ECAPA-TDNN voice embeddings gate STT to a specific speaker, preventing unauthorized voice input
 - **Prompt accumulation** — Multi-segment utterances are combined before submission, so pauses mid-thought don't split your input
 - **Live streaming** — Watch agent output stream in real-time over WebSocket (NDJSON protocol)
-- **Remote nodes** — Run sessions on remote machines (Docker, EC2, macOS) connected via WebSocket tunnel
+- **Remote nodes** — Run sessions on remote machines (Docker, EC2, macOS) connected via WebSocket tunnel, with Claude Code or Codex backends
 - **Computer-use agent** — Vision-language model (UI-TARS) controls desktop GUIs autonomously — screenshots, clicks, typing, scrolling
 - **Ring0 meta-agent** — Voice-controlled supervisor that manages sessions, permissions, second screens, and client devices via MCP tools
 - **Second screen** — Push markdown, images, PDFs, HTML, or live session mirrors to paired display devices (TVs, tablets, etc.)
@@ -33,6 +34,7 @@
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
 - [Bun](https://bun.sh/) (JavaScript runtime / package manager)
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
+- Optional: [Codex CLI](https://github.com/openai/codex) for Codex backend sessions
 
 ## Quick Start
 
@@ -59,14 +61,46 @@ Open [http://localhost:5174](http://localhost:5174) in your browser.
 | `make test-py`       | Python tests (`pytest`)                        |
 | `make test-frontend` | Frontend tests (`vitest`)                      |
 
+## Text-to-Speech
+
+vibr8 supports two TTS engines, controlled by the `VIBR8_TTS_ENGINE` environment variable:
+
+| Engine | Default | Requirements | Notes |
+|--------|---------|-------------|-------|
+| **Kokoro** | Yes | Included in base dependencies | Local neural TTS — no API key, no network latency |
+| **OpenAI** | No | `OPENAI_API_KEY` | Cloud TTS via `tts-1-hd` — higher quality |
+
+Kokoro is the out-of-box default. Set `VIBR8_TTS_ENGINE=openai` for cloud TTS. If Kokoro is not installed, it falls back to OpenAI automatically.
+
+Additional TTS configuration:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VIBR8_TTS_VOICE` | `af_sarah` (Kokoro) / `echo` (OpenAI) | Voice name |
+| `VIBR8_TTS_SPEED` | `1.0` | Playback speed multiplier |
+
+## Speaker Fingerprinting
+
+Speaker fingerprinting uses ECAPA-TDNN embeddings (via SpeechBrain) to identify speakers by voice. When a fingerprint is active, the STT pipeline only accepts audio from that speaker — other voices are rejected before transcription.
+
+### Setup
+
+1. Go to **Settings > Speaker ID**
+2. Click **Start Enrollment** — speak a few sentences to capture your voice
+3. Save the fingerprint and set it as active
+4. Adjust the similarity threshold (default 0.45) if needed
+
+Speaker gates are applied per-user and activate automatically on WebRTC connect.
+
 ## Remote Nodes
 
-vibr8 supports remote nodes that can host Claude Code sessions and desktop environments. Nodes connect to the hub via outbound WebSocket — no SSH or local network access required.
+vibr8 supports remote nodes that can host Claude Code or Codex sessions and desktop environments. Nodes connect to the hub via outbound WebSocket — no SSH or local network access required.
 
 ### How It Works
 
 - Nodes register with the hub using API keys and maintain a persistent WebSocket connection
 - Sessions created with a `nodeId` are forwarded to the remote node, which spawns the CLI locally
+- Nodes can run either Claude Code or Codex as their default backend (`--default-backend codex`)
 - Computer-use sessions run VLM inference on the hub but target the remote node's desktop for screen capture and input injection
 - Each node can run its own Ring0 instance for voice-controlled session management
 
@@ -93,6 +127,17 @@ Docker images are provided for various configurations:
 | `Dockerfile.node` | Runtime node (no desktop) |
 | `Dockerfile.node-gpu` | GPU-enabled variant |
 | `Dockerfile.node-gui` | X11 GUI desktop support |
+
+### Running a Codex Node
+
+```bash
+# Run a node with Codex as the default backend
+uv run python -m vibr8_node \
+  --hub wss://your-hub:3456 \
+  --name my-codex-node \
+  --default-backend codex \
+  --api-key <node-api-key>
+```
 
 ### Node Management
 
@@ -222,7 +267,7 @@ Pair external displays (TVs, tablets, spare monitors) to show content pushed by 
 
 ## Voice Commands
 
-vibr8 supports voice input via WebRTC. Speech is transcribed by Whisper + Silero VAD and routed to the active session (or Ring0 if enabled).
+vibr8 supports voice input via WebRTC. Speech is transcribed by Whisper (with speculative decoding via distil-large-v3) + Silero VAD and routed to the active session (or Ring0 if enabled).
 
 ### Guard Word
 
@@ -330,14 +375,18 @@ vibr8 stores configuration in `~/.vibr8/`:
 | `ice-servers.json` | STUN/TURN server config for WebRTC (optional) |
 | `secret.key` | HMAC signing key for auth tokens |
 | `data/voice/logs/` | Voice recordings and segment logs |
+| `data/voice/fingerprints/` | Speaker fingerprint embeddings |
 
 ### Environment Variables
 
-| Variable          | Default | Description                                      |
-|-------------------|---------|--------------------------------------------------|
-| `PORT`            | `3456`  | Backend server port                              |
-| `NODE_ENV`        | —       | Set to `production` to serve built frontend      |
-| `OPENAI_API_KEY`  | —       | Required for text-to-speech                      |
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `3456` | Backend server port |
+| `NODE_ENV` | — | Set to `production` to serve built frontend |
+| `VIBR8_TTS_ENGINE` | `kokoro` | TTS engine: `kokoro` (local) or `openai` (cloud) |
+| `VIBR8_TTS_VOICE` | `af_sarah` | TTS voice name |
+| `VIBR8_TTS_SPEED` | `1.0` | TTS playback speed |
+| `OPENAI_API_KEY` | — | Required when using OpenAI TTS |
 
 For HTTPS (required for WebRTC on non-localhost), place `key.pem` and `cert.pem` in `certs/`.
 
@@ -350,8 +399,9 @@ Browser (React 19 + WebRTC)
     │                                  └──► Codex app-server (JSON-RPC)
     │
     ├── RTCPeerConnection ──► WebRTCManager
-    │                              ├── AsyncSTT (Whisper + Silero VAD)
-    │                              └── QueuedAudioTrack (OpenAI TTS)
+    │                              ├── AsyncSTT (Whisper + speculative decoding)
+    │                              ├── Speaker Gate (ECAPA-TDNN embeddings)
+    │                              └── QueuedAudioTrack (Kokoro / OpenAI TTS)
     │
     └── Second Screen ──► WebSocket (content push, session mirror)
 
@@ -372,7 +422,7 @@ Computer-Use Pipeline:
 
 ## Tech Stack
 
-**Backend:** Python 3.11+, aiohttp, aiortc, PyTorch, Whisper, Silero VAD, Transformers, BitsAndBytes
+**Backend:** Python 3.11+, aiohttp, aiortc, PyTorch, Whisper, Silero VAD, SpeechBrain, Kokoro, Transformers, BitsAndBytes
 
 **Frontend:** React 19, TypeScript, Vite, Tailwind CSS 4, Zustand, CodeMirror, xterm.js
 

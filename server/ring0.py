@@ -42,7 +42,7 @@ This is mandatory — never ask the user where something is if it might be in me
 
 ## Your MCP Tools
 
-- **create_session** — Create a new session (claude, codex, or computer-use backend)
+- **create_session** — Create a new session (claude, codex, opencode, or computer-use backend)
 - **list_sessions** — See all active sessions and their status
 - **send_message** — Send a message to a specific session
 - **interrupt_session** — Stop/cancel a running session (Ctrl+C equivalent)
@@ -348,6 +348,8 @@ class Ring0Manager:
 
         if backend_type == "codex":
             self._ensure_codex_mcp(work_dir)
+        elif backend_type == "opencode":
+            self._ensure_opencode_mcp(work_dir)
 
         session_names.set_name(session_id, "Ring0", unique=False)
 
@@ -362,8 +364,8 @@ class Ring0Manager:
             # Session exists but is exited — update config and relaunch
             info.cwd = str(work_dir)
             info.mcpConfig = str(mcp_config_path)
-            info.model = self._model if backend_type != "codex" else None
-            if backend_type == "codex":
+            info.model = self._model if backend_type not in ("codex", "opencode") else None
+            if backend_type in ("codex", "opencode"):
                 info.cliSessionId = None
             await launcher.relaunch(session_id)
             logger.info("[ring0] Relaunched session %s", session_id)
@@ -373,11 +375,11 @@ class Ring0Manager:
         from server.cli_launcher import LaunchOptions
         options = LaunchOptions(
             sessionId=session_id,
-            model=self._model if backend_type != "codex" else None,
+            model=self._model if backend_type not in ("codex", "opencode") else None,
             permissionMode="bypassPermissions",
             cwd=str(work_dir),
-            mcpConfig=str(mcp_config_path) if backend_type != "codex" else None,
-            resumeSessionId=self._cli_session_id if backend_type != "codex" else None,
+            mcpConfig=str(mcp_config_path) if backend_type not in ("codex", "opencode") else None,
+            resumeSessionId=self._cli_session_id if backend_type not in ("codex", "opencode") else None,
             backendType=backend_type,
         )
 
@@ -436,6 +438,47 @@ class Ring0Manager:
             logger.info("[ring0] Registered vibr8 MCP server in Codex config")
         else:
             logger.error("[ring0] Failed to register Codex MCP: %s", result.stderr)
+
+    def _ensure_opencode_mcp(self, work_dir: Path) -> None:
+        """Write opencode.jsonc in the work dir with vibr8 MCP server config."""
+        server_dir = Path(__file__).parent.parent.resolve()
+        mcp_script = str(server_dir / "server" / "ring0_mcp.py")
+        uv_bin = shutil.which("uv") or "uv"
+        scheme = "https" if (server_dir / "certs" / "cert.pem").exists() else "http"
+        token = self._get_service_token()
+
+        env: dict[str, str] = {
+            "VIBR8_PORT": str(self._port),
+            "VIBR8_SCHEME": scheme,
+        }
+        if token:
+            env["VIBR8_TOKEN"] = token
+        if self._model:
+            env["RING0_MODEL"] = self._model
+
+        config: dict[str, Any] = {}
+        config_path = work_dir / "opencode.jsonc"
+        if config_path.exists():
+            try:
+                import re
+                raw = config_path.read_text()
+                # Strip single-line comments for JSON parsing
+                stripped = re.sub(r'//.*$', '', raw, flags=re.MULTILINE)
+                config = json.loads(stripped)
+            except Exception:
+                config = {}
+
+        config.setdefault("mcp", {})["vibr8"] = {
+            "type": "local",
+            "command": [uv_bin, "run", "--project", str(server_dir), "--no-sync", "python", mcp_script],
+            "environment": env,
+        }
+
+        if self._model:
+            config["model"] = self._model
+
+        config_path.write_text(json.dumps(config, indent=2))
+        logger.info("[ring0] Wrote OpenCode MCP config to %s", config_path)
 
     def _write_config_files(self, work_dir: Path) -> Path:
         """Write CLAUDE.md/AGENTS.md and MCP config to the Ring0 working directory."""
