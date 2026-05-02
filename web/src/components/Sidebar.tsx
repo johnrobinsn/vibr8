@@ -5,6 +5,7 @@ import { connectSession, disconnectSession } from "../ws.js";
 import { startWebRTC, stopWebRTC, stopDesktopStream } from "../webrtc.js";
 import { destroyTerminal } from "./TerminalView.js";
 import { EnvManager } from "./EnvManager.js";
+import { SpeakerGateSelector } from "./SpeakerGateSelector.js";
 
 export function Sidebar() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
@@ -835,7 +836,9 @@ export function Sidebar() {
       </div>
 
       {/* Footer */}
-      <div className="p-3 border-t border-cc-border space-y-0.5">
+      <div className="border-t border-cc-border">
+        <SpeakerGateSelector />
+        <div className="p-3 space-y-0.5">
         <button
           onClick={() => { window.location.hash = "#/settings"; }}
           className="w-full flex items-center gap-2.5 px-3 py-2 rounded-[10px] text-sm text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
@@ -937,6 +940,7 @@ export function Sidebar() {
             <span>Sign out</span>
           </button>
         )}
+        </div>
       </div>
 
       {/* Environment manager modal */}

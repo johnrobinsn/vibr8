@@ -98,8 +98,6 @@ export async function startWebRTC(opts?: { desktop?: boolean }): Promise<void> {
       // Restore persisted guard state (defaults to true for fresh sessions)
       const guard = store.guardEnabled;
       api.setGuardByClient(clientId, guard).catch(() => {});
-      // Re-apply speaker gate in case it wasn't set during offer handling
-      api.refreshSpeakerGate().catch(() => {});
     } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
       stopWebRTC();
     }
@@ -125,9 +123,14 @@ export async function startWebRTC(opts?: { desktop?: boolean }): Promise<void> {
   }
 
   // Exchange SDP with the backend — clientId is the primary key
+  const gateStore = useStore.getState();
   const answer = await api.webrtcOffer(
     clientId,
     { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
+    {
+      ...(gateStore.activeSpeakerName ? { speakerGateName: gateStore.activeSpeakerName } : {}),
+      ...(gateStore.activeSpeakerName ? { speakerGateThreshold: gateStore.speakerGateThreshold } : {}),
+    },
   );
 
   // Set the remote answer

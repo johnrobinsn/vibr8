@@ -209,6 +209,7 @@ class WebRTCManager:
         self._enrollment_ws: Dict[str, object] = {}  # client_id → enrollment WS
         self._enrollment_listeners: Dict[str, object] = {}  # client_id → listener fn
         self._client_usernames: Dict[str, str] = {}  # client_id → username
+        self._client_speaker_gates: Dict[str, tuple[str, float]] = {}  # client_id → (speaker_name, threshold)
         # Shared screen capture: one per display, ref-counted across viewers
         self._shared_captures: Dict[str, ScreenCapture] = {}  # display → capture
         self._shared_capture_refs: Dict[str, set[str]] = {}  # display → {client_ids}
@@ -337,21 +338,50 @@ class WebRTCManager:
             )
 
     def refresh_speaker_gates(self, username: str) -> None:
-        """Reload speaker gate from disk for all clients belonging to *username*."""
-        from server.speaker_fingerprints import get_active_gate
-        gate = get_active_gate(username)
+        """Re-resolve per-client speaker gates after profile changes."""
+        from server.speaker_fingerprints import get_embeddings_for_speaker
         for cid, uname in self._client_usernames.items():
             if uname != username:
                 continue
+            gate = self._client_speaker_gates.get(cid)
+            if not gate:
+                continue
+            speaker_name, threshold = gate
             stt = self._stt_instances.get(cid)
             if not stt:
                 continue
-            if gate:
-                stt.set_speaker_gate(gate["embeddings"], gate["threshold"])
-                logger.info("[webrtc] client %s: speaker gate updated (threshold=%.3f, %d embeddings)", cid, gate["threshold"], len(gate["embeddings"]))
+            embeddings = get_embeddings_for_speaker(username, speaker_name)
+            if embeddings:
+                stt.set_speaker_gate(embeddings, threshold)
+                logger.info("[webrtc] client %s: speaker gate refreshed (threshold=%.3f, %d embeddings)", cid, threshold, len(embeddings))
             else:
                 stt.clear_speaker_gate()
-                logger.info("[webrtc] client %s: speaker gate cleared", cid)
+                self._client_speaker_gates.pop(cid, None)
+                logger.info("[webrtc] client %s: speaker gate cleared (profile '%s' no longer exists)", cid, speaker_name)
+
+    def set_speaker_gate_for_client(self, client_id: str, speaker_name: str | None,
+                                    threshold: float, username: str) -> bool:
+        """Set or clear speaker gate for a specific client. Returns True if applied."""
+        stt = self._stt_instances.get(client_id)
+        if not stt:
+            return False
+        if not speaker_name:
+            stt.clear_speaker_gate()
+            self._client_speaker_gates.pop(client_id, None)
+            logger.info("[webrtc] client %s: speaker gate cleared", client_id)
+            return True
+        from server.speaker_fingerprints import get_embeddings_for_speaker
+        embeddings = get_embeddings_for_speaker(username, speaker_name)
+        if not embeddings:
+            stt.clear_speaker_gate()
+            self._client_speaker_gates.pop(client_id, None)
+            logger.info("[webrtc] client %s: speaker '%s' not found, gate cleared", client_id, speaker_name)
+            return False
+        stt.set_speaker_gate(embeddings, threshold)
+        self._client_speaker_gates[client_id] = (speaker_name, threshold)
+        logger.info("[webrtc] client %s: speaker gate set (speaker='%s', threshold=%.3f, %d embeddings)",
+                    client_id, speaker_name, threshold, len(embeddings))
+        return True
 
     def get_voice_mode(self, client_id: str) -> VoiceMode | None:
         """Return the active voice mode for *client_id*, or None."""
@@ -399,6 +429,8 @@ class WebRTCManager:
         playground: bool = False, profile_id: str | None = None,
         username: str = "default", desktop: bool = False,
         desktop_role: str = "controller",
+        speaker_gate_name: str | None = None,
+        speaker_gate_threshold: float = 0.45,
     ) -> dict[str, str]:
         """Process an SDP offer and return an SDP answer.
 
@@ -473,15 +505,19 @@ class WebRTCManager:
             self._stt_instances[client_id] = stt
             self._client_usernames[client_id] = username
 
-            # Apply speaker gate if one is active for this user
-            from server.speaker_fingerprints import get_active_gate
-            gate = get_active_gate(username)
-            if gate:
-                stt.set_speaker_gate(gate["embeddings"], gate["threshold"])
-                logger.info("[webrtc] client %s: speaker gate applied on connect (user=%s, threshold=%.3f, %d embeddings)",
-                            client_id, username, gate["threshold"], len(gate["embeddings"]))
+            # Apply per-client speaker gate if provided in the offer
+            if speaker_gate_name:
+                from server.speaker_fingerprints import get_embeddings_for_speaker
+                embeddings = get_embeddings_for_speaker(username, speaker_gate_name)
+                if embeddings:
+                    stt.set_speaker_gate(embeddings, speaker_gate_threshold)
+                    self._client_speaker_gates[client_id] = (speaker_gate_name, speaker_gate_threshold)
+                    logger.info("[webrtc] client %s: speaker gate applied on connect (speaker='%s', threshold=%.3f, %d embeddings)",
+                                client_id, speaker_gate_name, speaker_gate_threshold, len(embeddings))
+                else:
+                    logger.info("[webrtc] client %s: speaker '%s' not found, no gate applied", client_id, speaker_gate_name)
             else:
-                logger.info("[webrtc] client %s: no active speaker gate (user=%s)", client_id, username)
+                logger.info("[webrtc] client %s: no speaker gate requested", client_id)
 
             # Create voice logger for audio persistence
             vl = VoiceLogger(username, session_id or client_id)
@@ -1231,6 +1267,7 @@ class WebRTCManager:
         self._enrollment_ws.pop(client_id, None)
         self._enrollment_listeners.pop(client_id, None)
         self._client_usernames.pop(client_id, None)
+        self._client_speaker_gates.pop(client_id, None)
 
         # Clean up playground WS reference
         self._playground_ws.pop(client_id, None)

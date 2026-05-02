@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { api, type SpeakerFingerprint, type ActiveFingerprint } from "../api.js";
+import { api, type SpeakerFingerprint } from "../api.js";
 import { useStore } from "../store.js";
 import { startEnrollmentWs, stopEnrollmentWs } from "../webrtc.js";
 
@@ -19,7 +19,6 @@ const ENROLLMENT_PASSAGES = [
 
 export function VoiceFingerprints() {
   const [fingerprints, setFingerprints] = useState<SpeakerFingerprint[]>([]);
-  const [active, setActive] = useState<ActiveFingerprint>({ speakerName: null, threshold: 0.45 });
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -44,14 +43,7 @@ export function VoiceFingerprints() {
 
   const loadData = useCallback(async () => {
     try {
-      const [fps, act] = await Promise.all([
-        api.listFingerprints(),
-        api.getActiveFingerprint(),
-      ]);
-      setFingerprints(fps);
-      setActive(act);
-      useStore.getState().setActiveSpeakerName(act.speakerName);
-      useStore.getState().setSpeakerGateThreshold(act.threshold);
+      setFingerprints(await api.listFingerprints());
     } catch {
       // ignore
     }
@@ -150,28 +142,6 @@ export function VoiceFingerprints() {
     }
   }
 
-  async function setActiveSpeaker(speakerName: string | null, threshold?: number) {
-    const thr = threshold ?? active.threshold;
-    try {
-      const result = await api.setActiveFingerprint({ speakerName, threshold: thr });
-      setActive(result);
-      useStore.getState().setActiveSpeakerName(result.speakerName);
-      useStore.getState().setSpeakerGateThreshold(result.threshold);
-    } catch {
-      // ignore
-    }
-  }
-
-  async function updateThreshold(threshold: number) {
-    setActive((prev) => ({ ...prev, threshold }));
-    useStore.getState().setSpeakerGateThreshold(threshold);
-    try {
-      await api.setActiveFingerprint({ speakerName: active.speakerName, threshold });
-    } catch {
-      // ignore
-    }
-  }
-
   function startTest() {
     if (!audioActive) {
       alert("Voice must be active to test. Enable the microphone first.");
@@ -210,46 +180,6 @@ export function VoiceFingerprints() {
 
   return (
     <div className="p-6 max-w-2xl space-y-6">
-      {/* Active Speaker Gate */}
-      <section>
-        <h2 className="text-sm font-semibold text-cc-fg mb-2">Speaker Gate</h2>
-        <p className="text-xs text-cc-muted mb-3">
-          When active, only audio matching the selected speaker profile is transcribed.
-          Each profile can have multiple voiceprints for cross-microphone robustness.
-        </p>
-        <select
-          value={active.speakerName ?? ""}
-          onChange={(e) => setActiveSpeaker(e.target.value || null)}
-          className="w-full px-3 py-2 rounded-lg bg-cc-input border border-cc-border text-cc-fg text-sm"
-        >
-          <option value="">None (no gating)</option>
-          {fingerprints.map((fp) => (
-            <option key={fp.id} value={fp.name}>{fp.name}</option>
-          ))}
-        </select>
-
-        {active.speakerName && (
-          <div className="mt-3">
-            <label className="flex items-center gap-2 text-xs text-cc-muted">
-              <span>Threshold: {active.threshold.toFixed(2)}</span>
-            </label>
-            <input
-              type="range"
-              min="0.0"
-              max="1.0"
-              step="0.01"
-              value={active.threshold}
-              onChange={(e) => updateThreshold(parseFloat(e.target.value))}
-              className="w-full mt-1"
-            />
-            <div className="flex justify-between text-xs text-cc-muted mt-0.5">
-              <span>Loose (0.0)</span>
-              <span>Strict (1.0)</span>
-            </div>
-          </div>
-        )}
-      </section>
-
       {/* Profile List */}
       <section>
         <div className="flex items-center justify-between mb-2">
@@ -280,7 +210,7 @@ export function VoiceFingerprints() {
 
         {fingerprints.map((fp) => {
           const isExpanded = expandedId === fp.id;
-          const isActive = active.speakerName === fp.name;
+          const isActive = useStore.getState().activeSpeakerName === fp.name;
           return (
             <div key={fp.id} className="mb-1.5">
               <div
@@ -419,11 +349,11 @@ export function VoiceFingerprints() {
                   <span className="text-xs text-cc-fg w-24 truncate">{s.name}</span>
                   <div className="flex-1 h-1.5 bg-cc-border rounded-full overflow-hidden">
                     <div
-                      className={`h-full rounded-full ${s.similarity >= active.threshold ? "bg-green-500" : "bg-red-400"}`}
+                      className={`h-full rounded-full ${s.similarity >= useStore.getState().speakerGateThreshold ? "bg-green-500" : "bg-red-400"}`}
                       style={{ width: `${Math.max(0, Math.min(100, s.similarity * 100))}%` }}
                     />
                   </div>
-                  <span className={`text-xs ${s.similarity >= active.threshold ? "text-green-500" : "text-red-400"}`}>
+                  <span className={`text-xs ${s.similarity >= useStore.getState().speakerGateThreshold ? "text-green-500" : "text-red-400"}`}>
                     {s.similarity.toFixed(3)}
                   </span>
                 </div>

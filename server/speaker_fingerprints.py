@@ -317,6 +317,19 @@ def clear_active(username: str) -> None:
         p.unlink()
 
 
+def get_embeddings_for_speaker(username: str, speaker_name: str) -> list[np.ndarray] | None:
+    """Resolve a speaker name to its embedding vectors, or None."""
+    profile = _find_profile_by_name(username, speaker_name)
+    if not profile or not profile.get("embeddings"):
+        return None
+    embeddings = [
+        np.array(e["embedding"], dtype=np.float32)
+        for e in profile["embeddings"]
+        if "embedding" in e
+    ]
+    return embeddings if embeddings else None
+
+
 def get_active_gate(username: str) -> dict | None:
     """Get the active gate data for STT: {embeddings: [np.ndarray, ...], threshold: float}, or None.
 
@@ -328,14 +341,7 @@ def get_active_gate(username: str) -> dict | None:
     speaker_name = active.get("speakerName")
     if not speaker_name:
         return None
-    profile = _find_profile_by_name(username, speaker_name)
-    if not profile or not profile.get("embeddings"):
-        return None
-    embeddings = [
-        np.array(e["embedding"], dtype=np.float32)
-        for e in profile["embeddings"]
-        if "embedding" in e
-    ]
+    embeddings = get_embeddings_for_speaker(username, speaker_name)
     if not embeddings:
         return None
     return {

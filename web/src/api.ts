@@ -436,6 +436,13 @@ export const api = {
       { muted },
     ),
 
+  // Speaker gate (client-scoped)
+  setSpeakerGateByClient: (clientId: string, data: { speakerName: string | null; threshold: number }) =>
+    post<{ ok: boolean; speakerName: string | null; threshold: number }>(
+      `/clients/${encodeURIComponent(clientId)}/speaker-gate`,
+      data,
+    ),
+
   // Ring0 meta-agent
   getRing0Status: () =>
     get<{ enabled: boolean; eventsMuted: boolean; sessionId: string | null }>("/ring0/status"),
@@ -453,7 +460,7 @@ export const api = {
   getIceServers: () =>
     get<{ iceServers: RTCIceServer[] }>("/webrtc/ice-servers"),
 
-  webrtcOffer: (clientId: string, offer: { sdp: string; type: string }, opts?: { playground?: boolean; profileId?: string; desktop?: boolean; desktopRole?: string; nodeId?: string }) =>
+  webrtcOffer: (clientId: string, offer: { sdp: string; type: string }, opts?: { playground?: boolean; profileId?: string; desktop?: boolean; desktopRole?: string; nodeId?: string; speakerGateName?: string; speakerGateThreshold?: number }) =>
     post<{ sdp: string; type: string }>("/webrtc/offer", {
       clientId,
       sdp: offer.sdp,
@@ -463,6 +470,8 @@ export const api = {
       ...(opts?.desktop ? { desktop: true } : {}),
       ...(opts?.desktopRole ? { desktopRole: opts.desktopRole } : {}),
       ...(opts?.nodeId ? { nodeId: opts.nodeId } : {}),
+      ...(opts?.speakerGateName ? { speakerGateName: opts.speakerGateName } : {}),
+      ...(opts?.speakerGateThreshold !== undefined ? { speakerGateThreshold: opts.speakerGateThreshold } : {}),
     }),
 
   // Voice Profiles

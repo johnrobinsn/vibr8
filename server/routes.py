@@ -1186,6 +1186,25 @@ def create_routes(
         webrtc_manager.set_tts_muted(client_id, muted)
         return web.json_response({"ok": True, "muted": muted})
 
+    @routes.post("/api/clients/{clientId}/speaker-gate")
+    async def set_speaker_gate_by_client(request: web.Request) -> web.Response:
+        if webrtc_manager is None:
+            return web.json_response({"error": "WebRTC not available"}, status=501)
+        client_id = request.match_info["clientId"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        speaker_name = body.get("speakerName")
+        threshold = float(body.get("threshold", 0.45))
+        username = _get_username(request)
+        found = webrtc_manager.set_speaker_gate_for_client(client_id, speaker_name, threshold, username)
+        return web.json_response({
+            "ok": True,
+            "speakerName": speaker_name if found else None,
+            "threshold": threshold,
+        })
+
     # ── Session-scoped guard/tts-mute (backward compat wrappers) ──
 
     @routes.get("/api/sessions/{id}/guard")
@@ -1276,6 +1295,8 @@ def create_routes(
         desktop = bool(body.get("desktop", False))
         desktop_role = body.get("desktopRole", "controller")
         profile_id = body.get("profileId")
+        speaker_gate_name = body.get("speakerGateName") or None
+        speaker_gate_threshold = float(body.get("speakerGateThreshold", 0.45))
         username = _get_username(request)
 
         if not client_id or not sdp:
@@ -1322,6 +1343,8 @@ def create_routes(
                 username=username,
                 desktop=desktop,
                 desktop_role=desktop_role,
+                speaker_gate_name=speaker_gate_name,
+                speaker_gate_threshold=speaker_gate_threshold,
             )
             return web.json_response(answer)
         except Exception as e:

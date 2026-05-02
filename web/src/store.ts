@@ -332,8 +332,8 @@ export const useStore = create<AppState>((set) => ({
   playgroundSegments: [],
   playgroundRmsDb: -60,
   playgroundVadActive: false,
-  activeSpeakerName: null,
-  speakerGateThreshold: 0.45,
+  activeSpeakerName: localStorage.getItem("vibr8_speaker_gate_name") || null,
+  speakerGateThreshold: parseFloat(localStorage.getItem("vibr8_speaker_gate_threshold") || "0.45"),
 
   setClientRole: (role) => set({ clientRole: role }),
   setSecondScreenContent: (content) => {
@@ -816,8 +816,15 @@ export const useStore = create<AppState>((set) => ({
   setPlaygroundLevel: (rmsDb) => set({ playgroundRmsDb: rmsDb }),
   setPlaygroundVadActive: (active) => set({ playgroundVadActive: active }),
 
-  setActiveSpeakerName: (id) => set({ activeSpeakerName: id }),
-  setSpeakerGateThreshold: (threshold) => set({ speakerGateThreshold: threshold }),
+  setActiveSpeakerName: (name) => {
+    if (name) localStorage.setItem("vibr8_speaker_gate_name", name);
+    else localStorage.removeItem("vibr8_speaker_gate_name");
+    set({ activeSpeakerName: name });
+  },
+  setSpeakerGateThreshold: (threshold) => {
+    localStorage.setItem("vibr8_speaker_gate_threshold", String(threshold));
+    set({ speakerGateThreshold: threshold });
+  },
 
   reset: () =>
     set({
