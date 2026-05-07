@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
-from server import env_manager, git_utils, session_names
+from server import artifacts, env_manager, git_utils, session_names
 from server import speaker_fingerprints, voice_profiles, voice_logger
 from server.usage_limits import get_usage_limits
 from server.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
@@ -62,44 +62,16 @@ def _extract_assistant_text(message: Any) -> tuple[str, bool]:
 
 
 def _format_session_output(messages: list[dict], permissions: list[dict]) -> str:
-    """Format session messages into readable text for Ring0. No per-message truncation."""
+    """Format session messages into readable text for Ring0. No per-message truncation.
+
+    Permissions are placed FIRST so they're never lost to context truncation.
+    """
     if not messages and not permissions:
         return "No messages in this session yet."
 
     lines: list[str] = []
-    trailing_tool_count = 0
-    for msg in messages:
-        role = msg.get("type", "?")
-        if role == "user_message":
-            content = msg.get("content", "")
-            lines.append(f"User: {content}")
-            trailing_tool_count = 0
-        elif role == "assistant":
-            raw_message = msg.get("message", "")
-            if isinstance(raw_message, dict) and "content" in raw_message:
-                raw_message = raw_message["content"]
-            text, has_real_text = _extract_assistant_text(raw_message)
-            if has_real_text:
-                lines.append(f"Assistant: {text}")
-                trailing_tool_count = 0
-            else:
-                trailing_tool_count += 1
-        elif role == "result":
-            data = msg.get("data", {})
-            if data.get("is_error"):
-                lines.append(f"Error: {', '.join(data.get('errors', []))}")
-                trailing_tool_count = 0
-    # Keep last 30 entries
-    lines = lines[-30:]
-    # Guard total size — drop oldest if over 50k chars
-    while len(lines) > 1 and sum(len(l) for l in lines) > 50000:
-        lines.pop(0)
-
-    if trailing_tool_count > 3:
-        lines.append(f"[Session is actively working — {trailing_tool_count} tool calls since last text response]")
 
     if permissions:
-        lines.append("")
         lines.append("--- PENDING PERMISSIONS (session is blocked, waiting for response) ---")
         for perm in permissions:
             rid = perm.get("request_id", "?")
@@ -111,6 +83,41 @@ def _format_session_output(messages: list[dict], permissions: list[dict]) -> str
                 lines.append(f"    Input: {inp}")
             else:
                 lines.append(f"  [{rid}] {tool}: {inp}")
+        lines.append("")
+
+    trailing_tool_count = 0
+    msg_lines: list[str] = []
+    for msg in messages:
+        role = msg.get("type", "?")
+        if role == "user_message":
+            content = msg.get("content", "")
+            msg_lines.append(f"User: {content}")
+            trailing_tool_count = 0
+        elif role == "assistant":
+            raw_message = msg.get("message", "")
+            if isinstance(raw_message, dict) and "content" in raw_message:
+                raw_message = raw_message["content"]
+            text, has_real_text = _extract_assistant_text(raw_message)
+            if has_real_text:
+                msg_lines.append(f"Assistant: {text}")
+                trailing_tool_count = 0
+            else:
+                trailing_tool_count += 1
+        elif role == "result":
+            data = msg.get("data", {})
+            if data.get("is_error"):
+                msg_lines.append(f"Error: {', '.join(data.get('errors', []))}")
+                trailing_tool_count = 0
+    # Keep last 30 entries
+    msg_lines = msg_lines[-30:]
+    # Guard total size — drop oldest if over 50k chars
+    while len(msg_lines) > 1 and sum(len(l) for l in msg_lines) > 50000:
+        msg_lines.pop(0)
+
+    if trailing_tool_count > 3:
+        msg_lines.append(f"[Session is actively working — {trailing_tool_count} tool calls since last text response]")
+
+    lines.extend(msg_lines)
 
     return "\n".join(lines) if lines else "No readable messages."
 
@@ -125,6 +132,71 @@ def _camel_dict(obj: Any) -> dict[str, Any]:
     """Convert a dataclass or dict with snake_case keys to camelCase."""
     d = obj if isinstance(obj, dict) else obj.__dict__
     return {_to_camel(k): v for k, v in d.items()}
+
+
+_opencode_models_cache: list[dict[str, str]] | None = None
+_opencode_models_cache_time: float = 0
+_OPENCODE_CACHE_TTL = 300  # 5 minutes
+
+_OPENCODE_PROVIDER_ORDER = {"opencode": 0, "openai": 1, "openrouter": 2}
+
+_OPENCODE_FALLBACK = [
+    {"value": "google/gemini-2.5-pro", "label": "Gemini 2.5 Pro", "description": "", "provider": "google"},
+    {"value": "google/gemini-2.5-flash", "label": "Gemini 2.5 Flash", "description": "", "provider": "google"},
+    {"value": "anthropic/claude-sonnet-4-20250514", "label": "Claude Sonnet 4", "description": "", "provider": "anthropic"},
+    {"value": "anthropic/claude-opus-4-20250514", "label": "Claude Opus 4", "description": "", "provider": "anthropic"},
+    {"value": "openai/gpt-4o", "label": "GPT-4o", "description": "", "provider": "openai"},
+    {"value": "openai/o3", "label": "o3", "description": "", "provider": "openai"},
+]
+
+
+def _model_id_to_label(model_id: str) -> str:
+    return model_id.replace("-", " ").replace(".", ".").title()
+
+
+def _parse_opencode_models(output: str) -> list[dict[str, str]]:
+    models: list[dict[str, str]] = []
+    for line in output.strip().splitlines():
+        line = line.strip()
+        if not line or "/" not in line:
+            continue
+        provider, _, model_part = line.partition("/")
+        # openrouter models have a second slash: openrouter/deepseek/deepseek-r1
+        label = _model_id_to_label(model_part.split("/")[-1])
+        models.append({
+            "value": line,
+            "label": label,
+            "description": "",
+            "provider": provider,
+        })
+    models.sort(key=lambda m: (
+        _OPENCODE_PROVIDER_ORDER.get(m["provider"], 99),
+        m["provider"],
+        m["label"].lower(),
+    ))
+    return models
+
+
+async def _get_opencode_models() -> list[dict[str, str]]:
+    global _opencode_models_cache, _opencode_models_cache_time
+    now = time.monotonic()
+    if _opencode_models_cache and now - _opencode_models_cache_time < _OPENCODE_CACHE_TTL:
+        return _opencode_models_cache
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "opencode", "models",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        models = _parse_opencode_models(stdout.decode())
+        if models:
+            _opencode_models_cache = models
+            _opencode_models_cache_time = now
+            return models
+    except Exception:
+        log.warning("[routes] Failed to fetch opencode models, using fallback")
+    return _opencode_models_cache or _OPENCODE_FALLBACK
 
 
 def create_routes(
@@ -374,20 +446,25 @@ def create_routes(
             # computer-use sessions for Android nodes also run on host (with nodeId passed through)
 
         elif target_node and node_registry and backend != "computer-use":
-            node = node_registry.get_node(target_node)
-            if node and node.tunnel and node.tunnel.connected:
+            node = node_registry.get_node(target_node) or node_registry.get_node_by_name(target_node)
+            if not node:
+                return web.json_response({"error": f"Node '{target_node}' not found"}, status=404)
+            if node.tunnel and node.tunnel.connected:
                 result = await node.tunnel.send_command({
                     "type": "create_session",
                     "options": {k: v for k, v in body.items() if k != "nodeId"},
                 })
                 if result.get("error"):
                     return web.json_response({"error": result["error"]}, status=500)
-                # Qualify the returned session ID at the hub boundary
                 raw_sid = result.get("sessionId")
                 if raw_sid:
                     from server.ws_bridge import WsBridge
-                    result["sessionId"] = WsBridge.qualify_session_id(target_node, raw_sid)
+                    result["sessionId"] = WsBridge.qualify_session_id(node.id, raw_sid)
                 return web.json_response(result)
+            elif node.tunnel is None:
+                pass  # Local node — fall through to local session creation
+            else:
+                return web.json_response({"error": f"Node '{node.name}' is offline"}, status=503)
 
         try:
             if backend not in ("claude", "codex", "opencode", "terminal", "computer-use"):
@@ -489,7 +566,18 @@ def create_routes(
             )
             session = launcher.launch(opts)
 
+            # Pre-create WsBridge session with correct backend_type so browser
+            # messages arriving before the adapter is attached get routed correctly
+            ws_bridge.get_or_create_session(session.sessionId, backend)
+
             session_dict = session.to_dict()
+
+            # Use directory basename as initial session name (e.g. "myapp" from /home/user/myapp)
+            effective_cwd = session.cwd or cwd or ""
+            dir_name = os.path.basename(effective_cwd) if effective_cwd else ""
+            name = body.get("name") or dir_name or session_names.generate_random_name()
+            session_names.set_name(session.sessionId, name)
+            session_dict["name"] = name
 
             if worktree_info:
                 worktree_tracker.add_mapping(WorktreeMapping(
@@ -785,18 +873,8 @@ def create_routes(
             except Exception:
                 return web.json_response({"error": "Failed to parse Codex models cache"}, status=500)
         if backend_id == "opencode":
-            return web.json_response([
-                {"value": "google/gemini-2.5-pro", "label": "Gemini 2.5 Pro", "description": "Google's most capable model"},
-                {"value": "google/gemini-2.5-flash", "label": "Gemini 2.5 Flash", "description": "Fast and efficient"},
-                {"value": "anthropic/claude-sonnet-4-20250514", "label": "Claude Sonnet 4", "description": "Anthropic Claude via OpenCode"},
-                {"value": "anthropic/claude-opus-4-20250514", "label": "Claude Opus 4", "description": "Anthropic's most capable model"},
-                {"value": "openai/gpt-4o", "label": "GPT-4o", "description": "OpenAI's flagship model"},
-                {"value": "openai/o3", "label": "o3", "description": "OpenAI reasoning model"},
-                {"value": "xai/grok-3", "label": "Grok 3", "description": "xAI's latest model"},
-                {"value": "groq/llama-3.3-70b", "label": "Llama 3.3 70B (Groq)", "description": "Ultra-fast via Groq"},
-                {"value": "mistral/mistral-large-latest", "label": "Mistral Large", "description": "Mistral's flagship"},
-                {"value": "openrouter/deepseek/deepseek-r1", "label": "DeepSeek R1", "description": "Via OpenRouter"},
-            ])
+            models = await _get_opencode_models()
+            return web.json_response(models)
         return web.json_response({"error": "Use frontend defaults for this backend"}, status=404)
 
     # ── Filesystem browsing ──────────────────────────────────────────────
@@ -1371,7 +1449,8 @@ def create_routes(
                 "cwd": info.cwd,
                 "backendType": info.backendType,
                 "archived": info.archived,
-                "pendingPermissions": ws_bridge.get_pending_permission_count(sid),
+                "pendingPermissionCount": ws_bridge.get_pending_permission_count(sid),
+                "pendingPermissions": ws_bridge.get_pending_permissions(sid),
                 "controlledBy": bridge_session.controlled_by if bridge_session else "ring0",
             }
             if r0_id and sid == r0_id:
@@ -2090,6 +2169,30 @@ def create_routes(
             "embeddingCount": len(embs),
             "embeddingLabels": [e.get("label", "") for e in embs],
         })
+
+    # ── Artifacts ─────────────────────────────────────────────────────────
+
+    @routes.get("/api/artifacts")
+    async def artifacts_list(request: web.Request) -> web.Response:
+        session_id = request.query.get("sessionId")
+        return web.json_response(artifacts.list_artifacts(session_id))
+
+    @routes.post("/api/artifacts")
+    async def artifacts_create(request: web.Request) -> web.Response:
+        username = _get_username(request)
+        body = await request.json()
+        artifact = artifacts.create_artifact(username, body)
+        await ws_bridge.broadcast_to_all_browsers({"type": "artifacts_changed"})
+        return web.json_response(artifact)
+
+    @routes.delete("/api/artifacts/{id}")
+    async def artifacts_delete(request: web.Request) -> web.Response:
+        artifact_id = request.match_info["id"]
+        deleted = artifacts.delete_artifact(artifact_id)
+        if not deleted:
+            return web.json_response({"error": "Not found"}, status=404)
+        await ws_bridge.broadcast_to_all_browsers({"type": "artifacts_changed"})
+        return web.json_response({"ok": True})
 
     # ── Voice Logs ───────────────────────────────────────────────────────
 

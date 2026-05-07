@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { SessionState, PermissionRequest, ChatMessage, SdkSessionInfo, TaskItem, NodeInfo, AndroidDeviceInfo } from "./types.js";
+import type { SessionState, PermissionRequest, ChatMessage, SdkSessionInfo, TaskItem, NodeInfo, AndroidDeviceInfo, Artifact } from "./types.js";
 
 function getClientId(): string {
   if (typeof window === "undefined") return crypto.randomUUID();
@@ -130,6 +130,12 @@ interface AppState {
   activeSpeakerName: string | null;
   speakerGateThreshold: number;
 
+  // Viewer pane + artifacts
+  viewerPaneOpen: boolean;
+  viewerPaneWidth: number;
+  viewerPaneContent: { type: string; content: string; filename?: string; nodeId?: string; _pushId?: number } | null;
+  artifacts: Artifact[];
+
   // Actions
   setClientRole: (role: "primary" | "secondscreen") => void;
   setSecondScreenContent: (content: { type: string; content: string; filename?: string; nodeId?: string; _pushId?: number } | null) => void;
@@ -243,6 +249,12 @@ interface AppState {
   setActiveSpeakerName: (id: string | null) => void;
   setSpeakerGateThreshold: (threshold: number) => void;
 
+  // Viewer pane + artifact actions
+  setViewerPaneOpen: (open: boolean) => void;
+  setViewerPaneWidth: (width: number) => void;
+  setViewerPaneContent: (content: { type: string; content: string; filename?: string; nodeId?: string } | null) => void;
+  setArtifacts: (artifacts: Artifact[]) => void;
+
   reset: () => void;
 }
 
@@ -334,6 +346,15 @@ export const useStore = create<AppState>((set) => ({
   playgroundVadActive: false,
   activeSpeakerName: localStorage.getItem("vibr8_speaker_gate_name") || null,
   speakerGateThreshold: parseFloat(localStorage.getItem("vibr8_speaker_gate_threshold") || "0.45"),
+  viewerPaneOpen: typeof window !== "undefined" ? localStorage.getItem("vibr8_viewer_pane_open") === "true" : false,
+  viewerPaneWidth: (() => {
+    if (typeof window === "undefined") return 600;
+    const stored = localStorage.getItem("vibr8_viewer_pane_width");
+    if (stored) { const n = parseInt(stored, 10); if (!isNaN(n) && n >= 280) return n; }
+    return Math.max(600, Math.round(window.innerWidth * 0.5));
+  })(),
+  viewerPaneContent: null,
+  artifacts: [],
 
   setClientRole: (role) => set({ clientRole: role }),
   setSecondScreenContent: (content) => {
@@ -826,6 +847,25 @@ export const useStore = create<AppState>((set) => ({
     set({ speakerGateThreshold: threshold });
   },
 
+  setViewerPaneOpen: (open) => {
+    localStorage.setItem("vibr8_viewer_pane_open", String(open));
+    set({ viewerPaneOpen: open });
+  },
+  setViewerPaneWidth: (width) => {
+    const clamped = Math.max(280, Math.min(width, window.innerWidth - 400));
+    localStorage.setItem("vibr8_viewer_pane_width", String(clamped));
+    set({ viewerPaneWidth: clamped });
+  },
+  setViewerPaneContent: (content) => {
+    if (content) {
+      const prevId = useStore.getState().viewerPaneContent?._pushId ?? 0;
+      set({ viewerPaneContent: { ...content, _pushId: prevId + 1 } });
+    } else {
+      set({ viewerPaneContent: null });
+    }
+  },
+  setArtifacts: (artifacts) => set({ artifacts }),
+
   reset: () =>
     set({
       sessions: new Map(),
@@ -876,6 +916,8 @@ export const useStore = create<AppState>((set) => ({
       playgroundVadActive: false,
       activeSpeakerName: null,
       speakerGateThreshold: 0.45,
+      viewerPaneContent: null,
+      artifacts: [],
     }),
 }));
 

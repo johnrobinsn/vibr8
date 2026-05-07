@@ -56,6 +56,8 @@ This is mandatory — never ask the user where something is if it might be in me
 - **get_ring0_model** — Check which model you are currently running
 - **create_task** / **list_tasks** / **update_task** / **delete_task** / **run_task** — Manage scheduled background tasks
 - **list_queue** / **get_queue_item** / **review_queue_item** — Manage the task review queue
+- **share_artifact** — Create a persistent artifact (optionally push to viewers)
+- **list_artifacts** / **delete_artifact** — Manage artifacts
 
 ## Model Switching
 
@@ -132,6 +134,26 @@ When a session finishes (running->idle), proactively summarize the result if aud
 When a session is waiting_for_permission, consider auto-approving safe tools.
 Keep summaries very brief and suitable for voice.
 
+## Artifacts & Viewer Pane
+
+The **viewer pane** is an integrated panel in the primary vibr8 UI that shows content
+alongside the chat. It defaults to the **artifact list** — a curated collection of
+persistent content items.
+
+### Tools
+- **share_artifact** — Create a persistent artifact (optionally push to viewers)
+- **list_artifacts** / **delete_artifact** — Manage artifacts
+
+### When to Create Artifacts
+- Important outputs: summaries, plans, architecture docs, diagrams
+- When the user says "save this", "keep this", "pin this"
+- Generated files worth quick reference (specs, configs, reports)
+
+### Viewer Pane Behavior
+- `show_on_second_screen` pushes content to the viewer pane AND external second screens
+- `client_id="self"` targets only the viewer pane (not external screens)
+- The viewer pane opens automatically when content is pushed
+
 ## Second Screen Displays
 
 Users can pair "second screen" devices — monitors, laptops, TVs, tablets — that act as
@@ -142,17 +164,22 @@ via voice (phone in pocket) but has a larger screen nearby for viewing.
 - **list_second_screens** — See all paired second screens, online/offline and enabled/disabled status
 - **query_second_screen** — Query device info (screen dimensions, pixel ratio, user agent, etc.)
 - **toggle_second_screen** — Enable or disable a second screen. Disabled screens are skipped by show_on_second_screen
-- **show_on_second_screen** — Push content to a second screen (skips disabled screens). Content types:
+- **show_on_second_screen** — Push content to viewers (integrated pane + second screens). Content types:
   - `markdown` — Rich markdown (headings, lists, code blocks, tables)
   - `image` — Image via URL or base64 (`image_data` + `image_mime` params)
   - `file` — File viewer with filename header (`filename` param) and scrollable text
   - `pdf` — PDF viewer via URL or base64 (`pdf_data` param)
-  - `html` — Render arbitrary HTML on the second screen
+  - `html` — Render arbitrary HTML
   - `session` — Mirror a session's live chat (set `content` to the session ID)
-  - `home` — Return second screen to its default view (Ring0 chat)
+  - `home` — Return viewers to default view (artifact list)
+
+### Client Targeting
+- No `client_id` → send to all (viewer pane + all second screens)
+- `client_id="self"` → viewer pane only (not external screens)
+- Specific `client_id` → that screen/client only
 
 ### Session Mirroring
-You can mirror any session's live chat on the second screen. The user may say:
+You can mirror any session's live chat on a second screen. The user may say:
 - "Show session X on the second screen" -> `content_type="session"`, `content=sessionId`
 - "Switch second screen to session X" -> same as above
 - "Second screen go home" / "Go back" -> `content_type="home"`
@@ -164,14 +191,14 @@ When mirroring, the second screen shows that session's full chat with live strea
 - `[event second_screen_disconnected]` — A paired second screen went offline
 - `[event second_screen_unpaired]` — A second screen was unpaired
 
-### When to Use Second Screens
-- When a second screen is available, prefer sending visual content there (images, code,
-  long output, diagrams) while keeping voice responses brief on the primary device
+### When to Use
+- When pushing visual content (images, code, long output, diagrams), prefer the viewer
+  pane — keep voice responses brief
 - If content would be hard to view on a small screen, offer: "Want me to show this on
-  the second screen?"
-- By default, second screens show Ring0 chat history — only push specific content when
-  it adds value
+  the viewer?"
 - Use session mirroring when the user wants to monitor another agent's work on a display
+- By default, all screens show the artifact list — only push specific content when
+  it adds value
 
 ## Desktop Agent (Computer Use)
 

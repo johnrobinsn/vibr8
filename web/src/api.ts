@@ -1,4 +1,4 @@
-import type { SdkSessionInfo, NodeInfo, AndroidDeviceInfo, DiscoveredDevice, MdnsDevice } from "./types.js";
+import type { SdkSessionInfo, NodeInfo, AndroidDeviceInfo, DiscoveredDevice, MdnsDevice, Artifact } from "./types.js";
 
 const BASE = "/api";
 
@@ -145,6 +145,7 @@ export interface BackendModelInfo {
   value: string;
   label: string;
   description: string;
+  provider?: string;
 }
 
 export interface GitRepoInfo {
@@ -299,7 +300,7 @@ export interface VoiceRecording {
 
 export const api = {
   createSession: (opts?: CreateSessionOpts) =>
-    post<{ sessionId: string; state: string; cwd: string }>(
+    post<{ sessionId: string; state: string; cwd: string; name?: string }>(
       "/sessions/create",
       opts,
     ),
@@ -590,6 +591,15 @@ export const api = {
     }),
 
   listAllNodes: () => get<Array<NodeInfo & { nodeType?: string; connectionMode?: string; deviceId?: string; capabilities?: Record<string, unknown> }>>("/nodes/all"),
+
+  // Artifacts
+  getArtifacts: (sessionId?: string) => {
+    const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+    return get<Artifact[]>(`/artifacts${qs}`);
+  },
+  createArtifact: (data: { title: string; type: string; content: string; sourceSessionId?: string; sourceSessionName?: string; filename?: string }) =>
+    post<Artifact>("/artifacts", data),
+  deleteArtifact: (id: string) => del(`/artifacts/${encodeURIComponent(id)}`),
 
   // Admin
   restartServer: () => post("/admin/restart"),

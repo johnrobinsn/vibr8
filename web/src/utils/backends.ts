@@ -5,6 +5,7 @@ export interface ModelOption {
   value: string;
   label: string;
   icon: string;
+  provider?: string;
 }
 
 export interface ModeOption {
@@ -34,6 +35,7 @@ export function toModelOptions(models: BackendModelInfo[]): ModelOption[] {
     value: m.value,
     label: m.label || m.value,
     icon: pickIcon(m.value, i),
+    provider: m.provider,
   }));
 }
 

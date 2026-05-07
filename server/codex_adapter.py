@@ -344,6 +344,9 @@ class CodexAdapter:
     def on_init_error(self, cb: Callable[[str], None]) -> None:
         self._init_error_cb = cb
 
+    def is_connected(self) -> bool:
+        return self._connected
+
     @property
     def connected(self) -> bool:
         return self._connected
@@ -1132,6 +1135,7 @@ class CodexAdapter:
 
         self._emit({"type": "result", "data": result})
         self._current_turn_id = None
+        self._emitted_tool_use_ids.clear()
 
     def _handle_token_usage_updated(self, params: Dict[str, Any]) -> None:
         token_usage = params.get("tokenUsage")
@@ -1298,3 +1302,4 @@ class CodexAdapter:
             return "never"
         # "plan", "acceptEdits", "default", or anything else
         return "unless-trusted"
+

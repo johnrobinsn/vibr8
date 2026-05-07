@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useStore } from "./store.js";
 import { api } from "./api.js";
 import { Sidebar } from "./components/Sidebar.js";
@@ -15,6 +15,7 @@ import { LoginPage } from "./components/LoginPage.js";
 import { CommandPalette } from "./components/CommandPalette.js";
 import { SettingsPage } from "./components/SettingsPage.js";
 import { AgentControls } from "./components/AgentControls.js";
+import { ViewerPane } from "./components/ViewerPane.js";
 import { connectSession, disconnectSession } from "./ws.js";
 import { startWebRTC, setAudioInOnly } from "./webrtc.js";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
@@ -23,6 +24,45 @@ function useHash() {
   return useSyncExternalStore(
     (cb) => { window.addEventListener("hashchange", cb); return () => window.removeEventListener("hashchange", cb); },
     () => window.location.hash,
+  );
+}
+
+function ViewerPaneDragHandle() {
+  const dragging = useRef(false);
+  const startX = useRef(0);
+  const startW = useRef(0);
+
+  const onPointerDown = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    dragging.current = true;
+    startX.current = e.clientX;
+    startW.current = useStore.getState().viewerPaneWidth;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, []);
+
+  const onPointerMove = useCallback((e: React.PointerEvent) => {
+    if (!dragging.current) return;
+    const dx = startX.current - e.clientX;
+    useStore.getState().setViewerPaneWidth(startW.current + dx);
+  }, []);
+
+  const onPointerUp = useCallback(() => {
+    dragging.current = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }, []);
+
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      className="hidden xl:flex absolute left-0 top-0 h-full w-1.5 z-10 cursor-col-resize items-center justify-center group"
+    >
+      <div className="w-0.5 h-8 rounded-full bg-cc-border group-hover:bg-cc-fg-muted transition-colors" />
+    </div>
   );
 }
 
@@ -57,6 +97,8 @@ export default function App() {
   const desktopStreamActive = useStore((s) => s.desktopStreamActive);
   const desktopStatus = useStore((s) => s.desktopStatus);
   const commandPaletteOpen = useStore((s) => s.commandPaletteOpen);
+  const viewerPaneOpen = useStore((s) => s.viewerPaneOpen);
+  const viewerPaneWidth = useStore((s) => s.viewerPaneWidth);
   const [ring0SessionId, setRing0SessionId] = useState<string | null>(null);
   useEffect(() => {
     api.getRing0Status().then((s) => setRing0SessionId(s.sessionId ?? null)).catch(() => {});
@@ -171,11 +213,61 @@ export default function App() {
           s.setSidebarOpen(!s.sidebarOpen);
           return;
         }
+        if (e.key === "v") {
+          e.preventDefault();
+          const s = useStore.getState();
+          s.setViewerPaneOpen(!s.viewerPaneOpen);
+          return;
+        }
       }
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [sidebarOpen, taskPanelOpen, ring0SessionId]);
+
+  // Right-edge swipe gesture to toggle viewer pane on mobile
+  useEffect(() => {
+    let startX = 0;
+    let startY = 0;
+    let tracking = false;
+
+    function onTouchStart(e: TouchEvent) {
+      const t = e.touches[0];
+      const fromRightEdge = window.innerWidth - t.clientX < 20;
+      const paneOpen = useStore.getState().viewerPaneOpen;
+      if (fromRightEdge && !paneOpen) {
+        startX = t.clientX;
+        startY = t.clientY;
+        tracking = true;
+      } else if (paneOpen) {
+        startX = t.clientX;
+        startY = t.clientY;
+        tracking = true;
+      }
+    }
+
+    function onTouchEnd(e: TouchEvent) {
+      if (!tracking) return;
+      tracking = false;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - startX;
+      const dy = Math.abs(t.clientY - startY);
+      if (dy > Math.abs(dx)) return;
+      const paneOpen = useStore.getState().viewerPaneOpen;
+      if (!paneOpen && dx < -50) {
+        useStore.getState().setViewerPaneOpen(true);
+      } else if (paneOpen && dx > 50) {
+        useStore.getState().setViewerPaneOpen(false);
+      }
+    }
+
+    document.addEventListener("touchstart", onTouchStart, { passive: true });
+    document.addEventListener("touchend", onTouchEnd, { passive: true });
+    return () => {
+      document.removeEventListener("touchstart", onTouchStart);
+      document.removeEventListener("touchend", onTouchEnd);
+    };
+  }, []);
 
   // Auto-disable split view when desktop stream stops (but not while connecting)
   useEffect(() => {
@@ -323,6 +415,26 @@ export default function App() {
           </div>
         </>
       )}
+
+      {/* Viewer pane — overlay below xl, inline at xl+ */}
+      {viewerPaneOpen && (
+        <div
+          className="fixed inset-0 bg-black/30 z-30 xl:hidden"
+          onClick={() => useStore.getState().setViewerPaneOpen(false)}
+        />
+      )}
+      <div
+        className={`
+          fixed xl:relative z-40 xl:z-auto right-0 top-0
+          h-full shrink-0 border-l border-cc-border
+          ${viewerPaneOpen ? "translate-x-0" : "w-0 translate-x-full xl:w-0 xl:translate-x-full"}
+          overflow-hidden
+        `}
+        style={viewerPaneOpen ? { width: Math.min(viewerPaneWidth, window.innerWidth) } : undefined}
+      >
+        {viewerPaneOpen && <ViewerPaneDragHandle />}
+        <ViewerPane />
+      </div>
 
       {commandPaletteOpen && <CommandPalette />}
     </div>

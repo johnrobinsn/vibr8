@@ -168,7 +168,7 @@ async def list_sessions() -> str:
         archived = s.get("archived", False)
         if archived:
             continue
-        pending = s.get("pendingPermissions", 0)
+        pending = s.get("pendingPermissionCount", 0) or len(s.get("pendingPermissions", []))
         perm_info = f", BLOCKED: {pending} pending permission(s)" if pending else ""
         pen = s.get("controlledBy", "ring0")
         pen_info = ", PEN: user (do not send messages)" if pen == "user" else ""
@@ -291,37 +291,8 @@ async def get_session_output(session_id: str) -> str:
         return "No messages in this session yet."
 
     lines = []
-    trailing_tool_count = 0
-    for msg in messages:
-        role = msg.get("type", "?")
-        if role == "user_message":
-            content = msg.get("content", "")
-            lines.append(f"User: {content}")
-            trailing_tool_count = 0
-        elif role == "assistant":
-            raw_message = msg.get("message", "")
-            if isinstance(raw_message, dict) and "content" in raw_message:
-                raw_message = raw_message["content"]
-            text, has_real_text = _extract_assistant_text(raw_message)
-            if has_real_text:
-                lines.append(f"Assistant: {text}")
-                trailing_tool_count = 0
-            else:
-                trailing_tool_count += 1
-        elif role == "result":
-            data = msg.get("data", {})
-            if data.get("is_error"):
-                lines.append(f"Error: {', '.join(data.get('errors', []))}")
-                trailing_tool_count = 0
-    lines = lines[-30:]
-    while len(lines) > 1 and sum(len(l) for l in lines) > 50000:
-        lines.pop(0)
-
-    if trailing_tool_count > 3:
-        lines.append(f"[Session is actively working — {trailing_tool_count} tool calls since last text response]")
 
     if permissions:
-        lines.append("")
         lines.append("--- PENDING PERMISSIONS (session is blocked, waiting for response) ---")
         for perm in permissions:
             rid = perm.get("request_id", "?")
@@ -333,8 +304,79 @@ async def get_session_output(session_id: str) -> str:
                 lines.append(f"    Input: {inp}")
             else:
                 lines.append(f"  [{rid}] {tool}: {inp}")
+        lines.append("")
+
+    trailing_tool_count = 0
+    msg_lines = []
+    for msg in messages:
+        role = msg.get("type", "?")
+        if role == "user_message":
+            content = msg.get("content", "")
+            msg_lines.append(f"User: {content}")
+            trailing_tool_count = 0
+        elif role == "assistant":
+            raw_message = msg.get("message", "")
+            if isinstance(raw_message, dict) and "content" in raw_message:
+                raw_message = raw_message["content"]
+            text, has_real_text = _extract_assistant_text(raw_message)
+            if has_real_text:
+                msg_lines.append(f"Assistant: {text}")
+                trailing_tool_count = 0
+            else:
+                trailing_tool_count += 1
+        elif role == "result":
+            data = msg.get("data", {})
+            if data.get("is_error"):
+                msg_lines.append(f"Error: {', '.join(data.get('errors', []))}")
+                trailing_tool_count = 0
+    msg_lines = msg_lines[-30:]
+    while len(msg_lines) > 1 and sum(len(l) for l in msg_lines) > 50000:
+        msg_lines.pop(0)
+
+    if trailing_tool_count > 3:
+        msg_lines.append(f"[Session is actively working — {trailing_tool_count} tool calls since last text response]")
+
+    lines.extend(msg_lines)
 
     return "\n".join(lines) if lines else "No readable messages."
+
+
+@mcp.tool()
+async def get_pending_permissions(session_id: str = "") -> str:
+    """Get pending permission requests, optionally filtered to one session.
+
+    Returns only the permissions — much cheaper than get_session_output for
+    long-running sessions. Omit session_id to see all pending permissions
+    across all sessions.
+
+    Args:
+        session_id: Optional session ID to filter to. Omit for all sessions.
+    """
+    sessions = await _get("/ring0/sessions")
+    lines = []
+    for s in sessions:
+        sid = s.get("sessionId", "")
+        if session_id and not sid.startswith(session_id):
+            continue
+        perms = s.get("pendingPermissions", [])
+        if not perms:
+            continue
+        name = s.get("name", sid[:8])
+        lines.append(f"Session: {name} [{sid[:8]}] — {len(perms)} pending")
+        for perm in perms:
+            rid = perm.get("request_id", "?")
+            tool = perm.get("tool_name", "?")
+            desc = perm.get("description", "")
+            inp = json.dumps(perm.get("input", {}), indent=2)
+            if desc:
+                lines.append(f"  [{rid}] {tool}: {desc}")
+                lines.append(f"    Input: {inp}")
+            else:
+                lines.append(f"  [{rid}] {tool}: {inp}")
+        lines.append("")
+    if not lines:
+        return "No pending permissions." if not session_id else f"No pending permissions for session {session_id}."
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -767,50 +809,62 @@ async def show_on_second_screen(
     elif content_type == "pdf" and pdf_data:
         display_content = f"data:application/pdf;base64,{pdf_data}"
 
-    # Get all second screen clients (online and enabled)
+    # Get primary clients (integrated viewer panes)
+    all_clients = await _get("/ring0/clients") or {}
+    primary_ids = [
+        cid for cid, info in all_clients.items()
+        if isinstance(info, dict) and info.get("role") == "primary"
+    ]
+
+    # Get external second screens
     screens = await _get("/second-screen/list")
     online_screens = [s for s in screens if s.get("online") and s.get("enabled", True)]
 
-    if not online_screens:
-        return "No second screens are online and enabled."
-
-    targets = online_screens
-    if client_id:
-        # Try name resolution first, fall back to prefix match on screen list
+    # Route based on client_id
+    targets_primary: list[str] = []
+    targets_screens: list[dict[str, Any]] = []
+    if client_id == "self":
+        targets_primary = primary_ids
+    elif client_id:
         resolved, err = await _resolve_client(client_id)
         if not err:
-            targets = [s for s in online_screens if s["clientId"] == resolved]
+            targets_primary = [c for c in primary_ids if c == resolved]
+            targets_screens = [s for s in online_screens if s["clientId"] == resolved]
         else:
-            targets = [s for s in online_screens if s["clientId"].startswith(client_id)]
-        if not targets:
-            return f"No online second screen matching '{client_id}'."
+            targets_primary = [c for c in primary_ids if c.startswith(client_id)]
+            targets_screens = [s for s in online_screens if s["clientId"].startswith(client_id)]
+        if not targets_primary and not targets_screens:
+            return f"No online client matching '{client_id}'."
+    else:
+        targets_primary = primary_ids
+        targets_screens = online_screens
+
+    if not targets_primary and not targets_screens:
+        return "No viewers are online."
+
+    # Build RPC method + params
+    if content_type == "session":
+        method = "mirror_session"
+        rpc_params: dict[str, Any] = {"sessionId": content}
+    elif content_type == "home":
+        method = "clear_content"
+        rpc_params = {}
+    else:
+        rpc_params = {"type": content_type, "content": display_content}
+        if filename:
+            rpc_params["filename"] = filename
+        if content_type == "desktop" and node_id:
+            rpc_params["nodeId"] = node_id
+        method = "show_content"
 
     results = []
-    for screen in targets:
-        # Session mirroring and home use a different RPC method
-        if content_type == "session":
-            body: dict[str, Any] = {
-                "clientId": screen["clientId"],
-                "method": "mirror_session",
-                "params": {"sessionId": content},
-            }
-        elif content_type == "home":
-            body = {
-                "clientId": screen["clientId"],
-                "method": "mirror_session",
-                "params": {"sessionId": None},
-            }
-        else:
-            params: dict[str, str] = {"type": content_type, "content": display_content}
-            if filename:
-                params["filename"] = filename
-            if content_type == "desktop" and node_id:
-                params["nodeId"] = node_id
-            body = {
-                "clientId": screen["clientId"],
-                "method": "show_content",
-                "params": params,
-            }
+    for cid in targets_primary:
+        result = await _post("/ring0/query-client", {"clientId": cid, "method": method, "params": rpc_params})
+        label = "viewer"
+        results.append(f"Sent to {label}" if not result.get("error") else f"Error ({label}): {result['error']}")
+
+    for screen in targets_screens:
+        body: dict[str, Any] = {"clientId": screen["clientId"], "method": method, "params": rpc_params}
         result = await _post("/ring0/query-client", body)
         if result.get("error"):
             results.append(f"Error sending to {screen['clientId'][:8]}: {result['error']}")
@@ -915,6 +969,87 @@ async def push_file_to_second_screen(
             results.append(f"Sent {title} ({content_type}) to {screen['clientId'][:8]}")
 
     return "\n".join(results)
+
+
+@mcp.tool()
+async def share_artifact(
+    title: str,
+    content: str,
+    content_type: str = "markdown",
+    session_id: str = "",
+    session_name: str = "",
+    filename: str = "",
+    show: bool = True,
+) -> str:
+    """Create a persistent artifact and optionally push it to viewers.
+
+    Artifacts are saved to the artifact list — a curated collection of persistent
+    content items visible in the viewer pane and on second screens.
+
+    Args:
+        title: Display title for the artifact.
+        content: The content body (markdown text, HTML, file text, etc.).
+        content_type: One of "markdown", "image", "file", "pdf", "html".
+        session_id: Source session ID (for attribution).
+        session_name: Source session name (for attribution).
+        filename: Display filename (for file-type artifacts).
+        show: If True (default), also push the content to all viewers immediately.
+    """
+    result = await _post("/artifacts", {
+        "title": title,
+        "type": content_type,
+        "content": content,
+        "sourceSessionId": session_id or None,
+        "sourceSessionName": session_name or None,
+        "filename": filename or None,
+    })
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    msg = f"Created artifact '{title}'"
+    if show:
+        push = await show_on_second_screen(content=content, content_type=content_type, filename=filename)
+        msg += f"\n{push}"
+    return msg
+
+
+@mcp.tool()
+async def list_artifacts(session_id: str = "") -> str:
+    """List all shared artifacts, optionally filtered by session.
+
+    Args:
+        session_id: If provided, only list artifacts from this session.
+    """
+    qs = f"?sessionId={session_id}" if session_id else ""
+    artifacts = await _get(f"/artifacts{qs}")
+    if not artifacts:
+        return "No artifacts."
+    lines = []
+    for a in artifacts:
+        source = f" (from {a.get('sourceSessionName', 'unknown')})" if a.get("sourceSessionName") else ""
+        lines.append(f"- [{a['id'][:8]}] {a['title']} ({a.get('type', 'unknown')}){source}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def delete_artifact(artifact_id: str) -> str:
+    """Delete an artifact by ID (or ID prefix).
+
+    Args:
+        artifact_id: The artifact ID or a prefix of it.
+    """
+    # Try exact match first, then prefix match
+    artifacts = await _get("/artifacts")
+    match = None
+    for a in (artifacts or []):
+        if a["id"] == artifact_id or a["id"].startswith(artifact_id):
+            match = a
+            break
+    if not match:
+        return f"No artifact matching '{artifact_id}'."
+    result = await _delete(f"/artifacts/{match['id']}")
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    return f"Deleted artifact '{match['title']}'."
 
 
 @mcp.tool()

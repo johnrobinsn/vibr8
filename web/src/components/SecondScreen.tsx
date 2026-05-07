@@ -2,7 +2,8 @@ import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react
 import { useStore } from "../store.js";
 import { api, setDeviceToken, getDeviceToken } from "../api.js";
 import { MessageFeed } from "./MessageFeed.js";
-import { MarkdownContent } from "./MessageBubble.js";
+import { PushedContentView, BackButton } from "./ContentRenderer.js";
+import { ArtifactList } from "./ArtifactList.js";
 import { handleMessage } from "../ws.js";
 import { connectDesktopViewer, disconnectDesktopViewer, sendDesktopViewerInput, getViewerClipboard, setViewerClipboard } from "../webrtc.js";
 
@@ -391,9 +392,13 @@ export function SecondScreen() {
       ) : (
         <div className="flex-1 flex flex-col min-h-0" style={{ zoom: scale }}>
           {pushedContent ? (
-            <PushedContentView key={pushedContent._pushId ?? 0} content={pushedContent} onHome={handleGoHome} />
-          ) : (
+            <PushedContentView key={pushedContent._pushId ?? 0} content={pushedContent} onBack={handleGoHome} />
+          ) : mirroredSessionId ? (
             <MessageFeed sessionId={displaySessionId} />
+          ) : (
+            <ArtifactList onSelect={(a) => {
+              useStore.getState().setSecondScreenContent({ type: a.type, content: a.content, filename: a.filename ?? undefined });
+            }} />
           )}
         </div>
       )}
@@ -460,136 +465,6 @@ function RenameDialog({
   );
 }
 
-function BackButton({ onClick, label = "Home" }: { onClick: () => void; label?: string }) {
-  return (
-    <div className="text-center mt-4 pb-4">
-      <button onClick={onClick} className="text-xs text-cc-fg-muted hover:text-cc-fg transition-colors">
-        {label}
-      </button>
-    </div>
-  );
-}
-
-function PushedContentView({
-  content,
-  onHome,
-}: {
-  content: { type: string; content: string; filename?: string; nodeId?: string };
-  onHome: () => void;
-}) {
-  const [imgError, setImgError] = useState(false);
-  const [imgLoaded, setImgLoaded] = useState(false);
-
-  // Reset image state when content changes
-  useEffect(() => {
-    setImgError(false);
-    setImgLoaded(false);
-  }, [content.content]);
-
-  // Desktop remote stream viewer
-  if (content.type === "desktop") {
-    return <DesktopViewer onHome={onHome} nodeId={content.nodeId} />;
-  }
-
-  // Image viewer
-  if (content.type === "image") {
-    let url = content.content.trim();
-    // Auto-wrap bare base64 data (Ring0 may put base64 in content instead of image_data)
-    if (url && !url.startsWith("data:") && !url.startsWith("http")) {
-      url = `data:image/png;base64,${url}`;
-    }
-    return (
-      <div className="h-full flex flex-col items-center justify-center p-8">
-        {!imgLoaded && !imgError && (
-          <div className="text-cc-fg-muted text-sm mb-4">Loading image…</div>
-        )}
-        {imgError ? (
-          <div className="text-red-400 text-sm">
-            Failed to load image
-            <div className="text-xs text-cc-fg-muted mt-1 break-all max-w-lg">{url}</div>
-          </div>
-        ) : (
-          <img
-            src={url}
-            alt=""
-            className="max-w-full max-h-[85vh] object-contain rounded"
-            onLoad={() => setImgLoaded(true)}
-            onError={() => setImgError(true)}
-          />
-        )}
-        <BackButton onClick={onHome} />
-      </div>
-    );
-  }
-
-  // Markdown viewer
-  if (content.type === "markdown") {
-    return (
-      <div className="h-full overflow-auto p-8">
-        <div className="max-w-3xl mx-auto">
-          <MarkdownContent text={content.content} />
-        </div>
-        <BackButton onClick={onHome} />
-      </div>
-    );
-  }
-
-  // File/text viewer
-  if (content.type === "file") {
-    return (
-      <div className="h-full flex flex-col">
-        {content.filename && (
-          <div className="shrink-0 px-4 py-2 bg-cc-code-bg border-b border-cc-border font-mono text-sm text-cc-fg-muted">
-            {content.filename}
-          </div>
-        )}
-        <pre className="flex-1 overflow-auto p-4 text-sm font-mono leading-relaxed bg-cc-code-bg text-cc-code-fg whitespace-pre-wrap">
-          {content.content}
-        </pre>
-        <BackButton onClick={onHome} />
-      </div>
-    );
-  }
-
-  // PDF viewer
-  if (content.type === "pdf") {
-    return (
-      <div className="h-full flex flex-col">
-        <iframe
-          src={content.content}
-          className="flex-1 w-full border-0"
-          title="PDF Viewer"
-        />
-        <BackButton onClick={onHome} />
-      </div>
-    );
-  }
-
-  // HTML viewer (sandboxed)
-  if (content.type === "html") {
-    return (
-      <div className="h-full flex flex-col">
-        <iframe
-          srcDoc={content.content}
-          className="flex-1 w-full border-0 bg-white"
-          title="HTML Content"
-          sandbox="allow-scripts allow-same-origin"
-        />
-        <BackButton onClick={onHome} />
-      </div>
-    );
-  }
-
-  // Fallback: plain text
-  return (
-    <div className="h-full overflow-auto p-8">
-      <div className="max-w-3xl mx-auto">
-        <pre className="whitespace-pre-wrap text-sm leading-relaxed">{content.content}</pre>
-      </div>
-      <BackButton onClick={onHome} />
-    </div>
-  );
-}
 
 /** Full desktop controller for second screens — video + input + toolbar. */
 function DesktopViewer({ onHome, nodeId }: { onHome: () => void; nodeId?: string }) {

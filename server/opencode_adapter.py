@@ -121,7 +121,10 @@ class OpenCodeAdapter:
             asyncio.create_task(self._handle_outgoing_interrupt())
             return True
         elif msg_type == "set_model":
-            logger.warning("[opencode] Runtime model switching not yet supported")
+            logger.warning("[opencode] Runtime model switching not supported")
+            return False
+        elif msg_type == "set_permission_mode":
+            logger.warning("[opencode] Runtime permission mode switching not supported")
             return False
         return False
 
@@ -146,6 +149,8 @@ class OpenCodeAdapter:
 
     async def disconnect(self) -> None:
         self._connected = False
+        if self._init_task and not self._init_task.done():
+            self._init_task.cancel()
         if self._sse_task and not self._sse_task.done():
             self._sse_task.cancel()
         if self._http and not self._http.closed:
@@ -189,17 +194,7 @@ class OpenCodeAdapter:
         try:
             self._http = ClientSession(timeout=ClientTimeout(total=300))
 
-            # Wait for server to be ready
-            for attempt in range(30):
-                try:
-                    await self._get("/health")
-                    break
-                except Exception:
-                    if attempt == 29:
-                        raise RuntimeError("OpenCode server did not start within 30s")
-                    await asyncio.sleep(1)
-
-            # Create a new session
+            # Create a new session (server readiness already confirmed by CliLauncher)
             session_info = await self._post("/session", {"title": f"vibr8-{self._session_id[:8]}"})
             self._opencode_session_id = session_info["id"]
 

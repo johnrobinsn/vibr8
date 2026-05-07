@@ -201,7 +201,8 @@ export type BrowserIncomingMessage =
   | { type: "node_switch"; nodeId: string; nodeName?: string }
   | { type: "rpc_request"; id: string; method: string; params?: Record<string, unknown> }
   | { type: "observation"; text: string; timestamp: number }
-  | { type: "confirm"; step: number; action_type: string; action_summary: string; thought?: string };
+  | { type: "confirm"; step: number; action_type: string; action_summary: string; thought?: string }
+  | { type: "artifacts_changed" };
 
 // ─── Session State ────────────────────────────────────────────────────────────
 

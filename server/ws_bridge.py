@@ -718,37 +718,95 @@ class WsBridge:
         session.adapter = adapter
 
         async def on_browser_msg(msg: dict[str, Any]) -> None:
-            if msg.get("type") == "session_init":
+            msg_type = msg.get("type")
+
+            if msg_type == "session_init":
                 session.state = {**session.state, **msg.get("session", {}), "backend_type": backend_type}
                 self._persist_session(session)
-            elif msg.get("type") == "session_update":
+            elif msg_type == "session_update":
                 session.state = {**session.state, **msg.get("session", {}), "backend_type": backend_type}
                 self._persist_session(session)
-            elif msg.get("type") == "status_change":
+            elif msg_type == "status_change":
                 session.state["is_compacting"] = msg.get("status") == "compacting"
                 self._persist_session(session)
 
-            if msg.get("type") in ("assistant", "result"):
+            if msg_type == "assistant":
                 session.message_history.append(msg)
-                # If CLI continues with new messages while permissions are pending,
-                # those permissions were auto-approved — clear them to avoid stale state.
+                # Detect idle → running transition
+                if not session.state.get("is_running"):
+                    session.state["is_running"] = True
+                    asyncio.ensure_future(self._notify_ring0_state_change(session, "idle→running"))
+                    asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
+                        "agentStatus": "running",
+                        "isRunning": True, "isWaitingForPermission": False,
+                    }))
+                # Auto-clear pending permissions (agent continued without waiting)
+                if session.pending_permissions:
+                    for req_id in list(session.pending_permissions):
+                        await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
+                        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
+                    session.pending_permissions.clear()
+                    session.state["is_waiting_for_permission"] = False
+                self._persist_session(session)
+
+            elif msg_type == "result":
+                session.message_history.append(msg)
+                # Detect running → idle transition
+                if session.state.get("is_running"):
+                    session.state["is_running"] = False
+                    asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
+                    asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
+                        "agentStatus": "idle",
+                        "isRunning": False, "isWaitingForPermission": False,
+                    }))
+                    if session.controlled_by == "user":
+                        self._schedule_pen_release(session)
+                session.state["is_waiting_for_permission"] = False
+                # Update cost/turn stats from result data
+                data = msg.get("data", {})
+                if isinstance(data, dict):
+                    if "total_cost_usd" in data:
+                        session.state["total_cost_usd"] = data["total_cost_usd"]
+                    if "num_turns" in data:
+                        session.state["num_turns"] = data["num_turns"]
+                # Auto-clear pending permissions
                 if session.pending_permissions:
                     for req_id in list(session.pending_permissions):
                         await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
                         await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
                     session.pending_permissions.clear()
                 self._persist_session(session)
+                # Cap active history
+                if len(session.message_history) > 500:
+                    self._archive_and_trim(session, keep_count=500)
 
-            if msg.get("type") == "permission_request":
+            if msg_type == "permission_request":
                 req = msg.get("request", {})
-                session.pending_permissions[req.get("request_id", "")] = req
+                req_id = req.get("request_id", "")
+                session.pending_permissions[req_id] = req
+                # Detect running → waiting_for_permission transition
+                tool_name = req.get("tool_name", "?")
+                desc = req.get("description") or ""
+                short_desc = desc if len(desc) <= 120 else desc[:117].rsplit(" ", 1)[0] + "..."
+                detail = f"{tool_name}: {short_desc}" if desc else tool_name
+                pending_count = len(session.pending_permissions)
+                if pending_count > 1:
+                    detail = f"{detail} ({pending_count} pending)"
+                if not session.state.get("is_waiting_for_permission"):
+                    session.state["is_waiting_for_permission"] = True
+                    asyncio.ensure_future(self._notify_ring0_state_change(
+                        session, "running→waiting_for_permission", detail=detail))
+                else:
+                    asyncio.ensure_future(self._notify_ring0_state_change(
+                        session, "waiting_for_permission", detail=detail))
+                asyncio.ensure_future(self._push_to_native_clients(session.id, "permission_request", {"request": req}))
                 self._persist_session(session)
 
             await self._broadcast_to_browsers(session, msg)
 
             # Auto-naming
             if (
-                msg.get("type") == "result"
+                msg_type == "result"
                 and not msg.get("data", {}).get("is_error")
                 and self._on_first_turn_completed
                 and session.id not in self._auto_naming_attempted
@@ -807,7 +865,6 @@ class WsBridge:
                     logger.warning(f"[ws-bridge] Failed to parse queued message for Codex")
 
         # Notify browsers and native clients
-        import asyncio
         asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
         asyncio.ensure_future(self._push_to_native_clients(session.id, "cli_connected"))
         logger.info(f"[ws-bridge] Codex adapter attached for session {session_id}")
@@ -1029,23 +1086,26 @@ class WsBridge:
             await self._send_to_browser(ws, {"type": "permission_request", "request": perm})
 
         # Check backend connectivity
-        if self._is_remote_session(session_id):
-            # Remote sessions: check if the node tunnel is connected
-            node_id, _ = self.parse_qualified_id(session_id)
-            node = self._node_registry.get_node(node_id) if self._node_registry and node_id else None
-            backend_connected = bool(node and node.tunnel and node.tunnel.connected)
-            logger.info(f"[ws-bridge] Backend check for remote session {session_id[:8]}: node={node_id[:8] if node_id else '?'} "
-                        f"node_found={node is not None} tunnel={node.tunnel is not None if node else False} "
-                        f"tunnel_connected={node.tunnel.connected if node and node.tunnel else False} → {backend_connected}")
-        else:
-            if session.backend_type in ("codex", "opencode"):
-                backend_connected = session.adapter is not None and session.adapter.is_connected()
-            elif session.backend_type == "computer-use":
-                backend_connected = session_id in self._computer_use_agents
+        try:
+            if self._is_remote_session(session_id):
+                node_id, _ = self.parse_qualified_id(session_id)
+                node = self._node_registry.get_node(node_id) if self._node_registry and node_id else None
+                backend_connected = bool(node and node.tunnel and node.tunnel.connected)
+                logger.info(f"[ws-bridge] Backend check for remote session {session_id[:8]}: node={node_id[:8] if node_id else '?'} "
+                            f"node_found={node is not None} tunnel={node.tunnel is not None if node else False} "
+                            f"tunnel_connected={node.tunnel.connected if node and node.tunnel else False} → {backend_connected}")
             else:
-                backend_connected = session.cli_socket is not None
-            logger.info(f"[ws-bridge] Backend check for local session {session_id[:8]}: "
-                        f"backend_type={session.backend_type} → {backend_connected}")
+                if session.backend_type in ("codex", "opencode"):
+                    backend_connected = session.adapter is not None and session.adapter.is_connected()
+                elif session.backend_type == "computer-use":
+                    backend_connected = session_id in self._computer_use_agents
+                else:
+                    backend_connected = session.cli_socket is not None
+                logger.info(f"[ws-bridge] Backend check for local session {session_id[:8]}: "
+                            f"backend_type={session.backend_type} → {backend_connected}")
+        except Exception:
+            logger.exception(f"[ws-bridge] Backend check failed for session {session_id[:8]}")
+            backend_connected = False
         if not backend_connected:
             logger.warning(f"[ws-bridge] Sending cli_disconnected to browser for session {session_id[:8]} (backend not connected)")
             await self._send_to_browser(ws, {"type": "cli_disconnected"})
@@ -2394,6 +2454,22 @@ class WsBridge:
         session = self._sessions.get(session_id)
         if session:
             await self._broadcast_to_browsers(session, msg)
+
+    async def broadcast_to_all_browsers(self, msg: dict[str, Any]) -> None:
+        """Send a message to every connected browser client across all sessions."""
+        data = json.dumps(msg)
+        for session in self._sessions.values():
+            dead: list[web.WebSocketResponse] = []
+            for ws in session.browser_sockets:
+                try:
+                    await ws.send_str(data)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                client_id = session.browser_sockets.pop(ws, "")
+                if client_id:
+                    self._client_sessions.pop(client_id, None)
+                    self._ws_by_client.pop(client_id, None)
 
     async def _broadcast_to_browsers(self, session: Session, msg: dict[str, Any]) -> None:
         # On vibr8-node: forward to hub tunnel instead of local browsers

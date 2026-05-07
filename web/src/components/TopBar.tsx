@@ -30,6 +30,8 @@ export function TopBar() {
   const sdkSessions = useStore((s) => s.sdkSessions);
   const sessionNames = useStore((s) => s.sessionNames);
   const activeAudioInputLabel = useStore((s) => s.activeAudioInputLabel);
+  const viewerPaneOpen = useStore((s) => s.viewerPaneOpen);
+  const viewerPaneHasContent = useStore((s) => s.viewerPaneContent !== null);
 
   const isTerminalSession = currentSessionId
     ? sdkSessions.find((x) => x.sessionId === currentSessionId)?.backendType === "terminal"
@@ -272,6 +274,25 @@ export function TopBar() {
             <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
               <path fillRule="evenodd" d="M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V4a2 2 0 00-2-2H6zm1 3a1 1 0 000 2h6a1 1 0 100-2H7zm0 4a1 1 0 000 2h6a1 1 0 100-2H7zm0 4a1 1 0 000 2h4a1 1 0 100-2H7z" clipRule="evenodd" />
             </svg>
+          </button>
+
+          {/* Viewer pane toggle */}
+          <button
+            onClick={() => useStore.getState().setViewerPaneOpen(!viewerPaneOpen)}
+            className={`relative flex items-center justify-center w-7 h-7 rounded-lg transition-colors cursor-pointer ${
+              viewerPaneOpen
+                ? "text-cc-primary bg-cc-active"
+                : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
+            }`}
+            aria-label={viewerPaneOpen ? "Close viewer pane (Ctrl+Alt+V)" : "Open viewer pane (Ctrl+Alt+V)"}
+            title="Toggle viewer pane (Ctrl+Alt+V)"
+          >
+            <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+              <path fillRule="evenodd" d="M2 4.25A2.25 2.25 0 014.25 2h11.5A2.25 2.25 0 0118 4.25v11.5A2.25 2.25 0 0115.75 18H4.25A2.25 2.25 0 012 15.75V4.25zM4.25 3.5a.75.75 0 00-.75.75v11.5c0 .414.336.75.75.75H12v-13H4.25zM13.5 3.5v13h2.25a.75.75 0 00.75-.75V4.25a.75.75 0 00-.75-.75H13.5z" clipRule="evenodd" />
+            </svg>
+            {!viewerPaneOpen && viewerPaneHasContent && (
+              <span className="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-cc-primary" />
+            )}
           </button>
         </div>
       )}

@@ -508,7 +508,7 @@ class CliLauncher:
             if resolved:
                 binary = resolved
 
-        args: List[str] = ["app-server"]
+        args: List[str] = ["app-server", "--enable", "use_legacy_landlock"]
 
         env = {**os.environ}
         if options.env:
@@ -713,26 +713,27 @@ class CliLauncher:
         proc: asyncio.subprocess.Process,
         timeout: float = 30.0,
     ) -> bool:
-        """Poll the OpenCode server until it responds to health checks."""
+        """Poll the OpenCode server until it responds to API requests."""
         import aiohttp
 
         auth = aiohttp.BasicAuth("opencode", password)
         deadline = time.time() + timeout
 
         while time.time() < deadline:
-            # Check if process died
             if proc.returncode is not None:
                 return False
 
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(
-                        f"{server_url}/health",
+                        f"{server_url}/session",
                         auth=auth,
                         timeout=aiohttp.ClientTimeout(total=2),
                     ) as resp:
                         if resp.status == 200:
-                            return True
+                            body = await resp.text()
+                            if body.startswith("["):
+                                return True
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
                 pass
 

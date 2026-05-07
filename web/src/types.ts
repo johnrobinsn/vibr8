@@ -108,3 +108,15 @@ export interface MdnsDevice {
   ip: string;
   port: number;
 }
+
+export interface Artifact {
+  id: string;
+  title: string;
+  type: string;
+  content: string;
+  sourceSessionId: string | null;
+  sourceSessionName: string | null;
+  createdAt: number;
+  filename: string | null;
+  username: string;
+}

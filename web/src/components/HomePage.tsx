@@ -64,6 +64,8 @@ export function HomePage() {
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const [showModeDropdown, setShowModeDropdown] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
+  const [modelSearch, setModelSearch] = useState("");
+  const modelSearchRef = useRef<HTMLInputElement>(null);
 
   // Worktree state
   const [gitRepoInfo, setGitRepoInfo] = useState<GitRepoInfo | null>(null);
@@ -120,7 +122,7 @@ export function HomePage() {
 
   // Fetch dynamic models for the selected backend
   useEffect(() => {
-    if (backend !== "codex") {
+    if (backend !== "codex" && backend !== "opencode") {
       setDynamicModels(null);
       return;
     }
@@ -143,6 +145,7 @@ export function HomePage() {
     function handleClick(e: MouseEvent) {
       if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
         setShowModelDropdown(false);
+        setModelSearch("");
       }
       if (modeDropdownRef.current && !modeDropdownRef.current.contains(e.target as Node)) {
         setShowModeDropdown(false);
@@ -296,12 +299,12 @@ export function HomePage() {
           cwd: cwd || "",
           createdAt: Date.now(),
           backendType: backend,
+          name: result.name,
         },
       ]);
 
-      // Assign a random session name
-      const existingNames = new Set(useStore.getState().sessionNames.values());
-      const sessionName = generateUniqueSessionName(existingNames);
+      // Use server-provided name, or generate a client-side fallback
+      const sessionName = result.name || generateUniqueSessionName(new Set(useStore.getState().sessionNames.values()));
       useStore.getState().setSessionName(sessionId, sessionName);
 
       // Save cwd to recent dirs
@@ -792,7 +795,14 @@ export function HomePage() {
           {/* Model selector */}
           <div className="relative" ref={modelDropdownRef}>
             <button
-              onClick={() => setShowModelDropdown(!showModelDropdown)}
+              onClick={() => {
+                const opening = !showModelDropdown;
+                setShowModelDropdown(opening);
+                if (opening) {
+                  setModelSearch("");
+                  setTimeout(() => modelSearchRef.current?.focus(), 0);
+                }
+              }}
               className="flex items-center gap-1.5 px-2 py-1 text-xs text-cc-muted hover:text-cc-fg rounded-md hover:bg-cc-hover transition-colors cursor-pointer"
             >
               <span>{selectedModel.icon}</span>
@@ -801,22 +811,67 @@ export function HomePage() {
                 <path d="M4 6l4 4 4-4" />
               </svg>
             </button>
-            {showModelDropdown && (
-              <div className="absolute left-0 bottom-full mb-1 w-48 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1">
-                {MODELS.map((m) => (
-                  <button
-                    key={m.value}
-                    onClick={() => { setModel(m.value); setShowModelDropdown(false); }}
-                    className={`w-full px-3 py-2 text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-2 ${
-                      m.value === model ? "text-cc-primary font-medium" : "text-cc-fg"
-                    }`}
-                  >
-                    <span>{m.icon}</span>
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-            )}
+            {showModelDropdown && (() => {
+              const query = modelSearch.toLowerCase();
+              const filtered = query
+                ? MODELS.filter((m) => m.label.toLowerCase().includes(query) || m.value.toLowerCase().includes(query))
+                : MODELS;
+              const groups: Record<string, typeof filtered> = {};
+              for (const m of filtered) {
+                const key = m.provider || "";
+                (groups[key] ||= []).push(m);
+              }
+              const groupKeys = Object.keys(groups).sort((a, b) => {
+                if (!a) return -1;
+                if (!b) return 1;
+                const ORDER: Record<string, number> = { opencode: 0, openai: 1, openrouter: 2 };
+                return (ORDER[a] ?? 99) - (ORDER[b] ?? 99) || a.localeCompare(b);
+              });
+              return (
+                <div className="absolute left-0 bottom-full mb-1 w-80 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1">
+                  <div className="px-2 py-1.5">
+                    <input
+                      ref={modelSearchRef}
+                      type="text"
+                      value={modelSearch}
+                      onChange={(e) => setModelSearch(e.target.value)}
+                      placeholder="Search models..."
+                      className="w-full px-2 py-1 text-xs bg-cc-bg border border-cc-border rounded-md text-cc-fg placeholder:text-cc-muted/50 outline-none focus:border-cc-primary/50"
+                    />
+                  </div>
+                  <div className="max-h-64 overflow-y-auto">
+                    {filtered.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-cc-muted">No models found</div>
+                    ) : (
+                      groupKeys.map((provider) => (
+                        <div key={provider}>
+                          {provider && groupKeys.length > 1 && (
+                            <div className="px-3 py-1 text-[10px] font-medium text-cc-muted/70 uppercase tracking-wider sticky top-0 bg-cc-card">
+                              {provider}
+                            </div>
+                          )}
+                          {groups[provider].map((m) => (
+                            <button
+                              key={m.value}
+                              onClick={() => { setModel(m.value); setShowModelDropdown(false); }}
+                              className={`w-full px-3 py-1.5 text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-2 ${
+                                m.value === model ? "text-cc-primary font-medium" : "text-cc-fg"
+                              }`}
+                            >
+                              <span className="shrink-0">{m.icon}</span>
+                              <span className="truncate">{m.label}</span>
+                              {m.provider && (
+                                <span className="ml-auto text-[10px] text-cc-muted shrink-0">{m.provider}</span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </div>
 

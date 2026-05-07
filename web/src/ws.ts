@@ -747,13 +747,23 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         const content = params?.content ?? "";
         const filename = params?.filename;
         const nodeId = params?.nodeId;
-        store.setSecondScreenContent({ type: contentType, content, ...(filename && { filename }), ...(nodeId && { nodeId }) });
+        const payload = { type: contentType, content, ...(filename && { filename }), ...(nodeId && { nodeId }) };
+        if (store.clientRole === "primary") {
+          store.setViewerPaneContent(payload);
+          store.setViewerPaneOpen(true);
+        } else {
+          store.setSecondScreenContent(payload);
+        }
         response = { type: "rpc_response", id: rpcId, result: { shown: true, type: contentType } };
       } else if (method === "mirror_session") {
         const params = data.params as Record<string, string> | undefined;
         const sid = params?.sessionId ?? null;
-        store.setMirroredSessionId(sid);
-        store.setSecondScreenContent(null);
+        if (store.clientRole === "primary") {
+          store.setViewerPaneContent(null);
+        } else {
+          store.setMirroredSessionId(sid);
+          store.setSecondScreenContent(null);
+        }
         response = { type: "rpc_response", id: rpcId, result: { mirroring: true, sessionId: sid } };
       } else if (method === "set_scale") {
         const params = data.params as Record<string, number> | undefined;
@@ -817,8 +827,12 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
           },
         };
       } else if (method === "clear_content") {
-        store.setSecondScreenContent(null);
-        store.setMirroredSessionId(null);
+        if (store.clientRole === "primary") {
+          store.setViewerPaneContent(null);
+        } else {
+          store.setSecondScreenContent(null);
+          store.setMirroredSessionId(null);
+        }
         response = { type: "rpc_response", id: rpcId, result: { cleared: true } };
       } else if (method === "bring_to_foreground") {
         const cap = (window as unknown as Record<string, unknown>).Capacitor as
@@ -989,6 +1003,13 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
       if (data.archivedMessageCount) {
         store.setArchivedCount(sessionId, data.archivedMessageCount);
       }
+      break;
+    }
+
+    case "artifacts_changed": {
+      import("./api.js").then(({ api }) => {
+        api.getArtifacts().then((a) => store.setArtifacts(a)).catch(() => {});
+      });
       break;
     }
   }
