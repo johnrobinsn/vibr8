@@ -80,6 +80,19 @@ export const OPENCODE_MODES: ModeOption[] = [
   { value: "plan", label: "Plan" },
 ];
 
+export const HERMES_MODELS: ModelOption[] = [
+  { value: "gpt-5.5", label: "GPT-5.5", icon: "◆" },
+  { value: "claude-opus-4", label: "Claude Opus 4", icon: "✳" },
+  { value: "claude-sonnet-4", label: "Claude Sonnet 4", icon: "◕" },
+  { value: "gpt-4o", label: "GPT-4o", icon: "●" },
+  { value: "deepseek-r1", label: "DeepSeek R1", icon: "✦" },
+];
+
+export const HERMES_MODES: ModeOption[] = [
+  { value: "bypassPermissions", label: "Auto" },
+  { value: "plan", label: "Plan" },
+];
+
 export const COMPUTER_USE_MODELS: ModelOption[] = [
   { value: "ByteDance-Seed/UI-TARS-1.5-7B", label: "UI-TARS 1.5 7B", icon: "\u25CF" },
 ];
@@ -93,6 +106,7 @@ export const COMPUTER_USE_MODES: ModeOption[] = [
 export function getModelsForBackend(backend: BackendType): ModelOption[] {
   if (backend === "codex") return CODEX_MODELS;
   if (backend === "opencode") return OPENCODE_MODELS;
+  if (backend === "hermes") return HERMES_MODELS;
   if (backend === "computer-use") return COMPUTER_USE_MODELS;
   return CLAUDE_MODELS;
 }
@@ -100,6 +114,7 @@ export function getModelsForBackend(backend: BackendType): ModelOption[] {
 export function getModesForBackend(backend: BackendType): ModeOption[] {
   if (backend === "codex") return CODEX_MODES;
   if (backend === "opencode") return OPENCODE_MODES;
+  if (backend === "hermes") return HERMES_MODES;
   if (backend === "computer-use") return COMPUTER_USE_MODES;
   return CLAUDE_MODES;
 }
@@ -107,6 +122,7 @@ export function getModesForBackend(backend: BackendType): ModeOption[] {
 export function getDefaultModel(backend: BackendType): string {
   if (backend === "codex") return CODEX_MODELS[0].value;
   if (backend === "opencode") return OPENCODE_MODELS[0].value;
+  if (backend === "hermes") return HERMES_MODELS[0].value;
   if (backend === "computer-use") return COMPUTER_USE_MODELS[0].value;
   return CLAUDE_MODELS[0].value;
 }
@@ -114,6 +130,7 @@ export function getDefaultModel(backend: BackendType): string {
 export function getDefaultMode(backend: BackendType): string {
   if (backend === "codex") return CODEX_MODES[0].value;
   if (backend === "opencode") return OPENCODE_MODES[0].value;
+  if (backend === "hermes") return HERMES_MODES[0].value;
   if (backend === "computer-use") return COMPUTER_USE_MODES[0].value;
   return CLAUDE_MODES[0].value;
 }

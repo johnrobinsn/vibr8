@@ -206,7 +206,7 @@ export type BrowserIncomingMessage =
 
 // ─── Session State ────────────────────────────────────────────────────────────
 
-export type BackendType = "claude" | "codex" | "opencode" | "terminal" | "computer-use";
+export type BackendType = "claude" | "codex" | "opencode" | "hermes" | "terminal" | "computer-use";
 
 export interface SessionState {
   session_id: string;

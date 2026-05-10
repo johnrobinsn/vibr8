@@ -199,6 +199,38 @@ async def _get_opencode_models() -> list[dict[str, str]]:
     return _opencode_models_cache or _OPENCODE_FALLBACK
 
 
+_HERMES_FALLBACK = [
+    {"value": "gpt-5.5", "label": "GPT-5.5", "description": "", "provider": "openai-codex"},
+    {"value": "claude-opus-4-20250514", "label": "Claude Opus 4", "description": "", "provider": "anthropic"},
+    {"value": "claude-sonnet-4-20250514", "label": "Claude Sonnet 4", "description": "", "provider": "anthropic"},
+    {"value": "gpt-4o", "label": "GPT-4o", "description": "", "provider": "openai"},
+    {"value": "deepseek-r1", "label": "DeepSeek R1", "description": "", "provider": "deepseek"},
+]
+
+
+def _get_hermes_models() -> list[dict[str, str]]:
+    """Read available models from Hermes config, falling back to a static list."""
+    try:
+        import yaml
+        config_path = Path.home() / ".hermes" / "config.yaml"
+        if config_path.exists():
+            config = yaml.safe_load(config_path.read_text())
+            model_config = config.get("model", {})
+            default_model = model_config.get("default", "")
+            default_provider = model_config.get("provider", "")
+            if default_model:
+                models = [{"value": default_model, "label": _model_id_to_label(default_model),
+                           "description": f"Default ({default_provider})" if default_provider else "Default",
+                           "provider": default_provider}]
+                for entry in _HERMES_FALLBACK:
+                    if entry["value"] != default_model:
+                        models.append(entry)
+                return models
+    except Exception:
+        log.warning("[routes] Failed to read hermes config, using fallback")
+    return list(_HERMES_FALLBACK)
+
+
 def create_routes(
     launcher: CliLauncher,
     ws_bridge: WsBridge,
@@ -467,7 +499,7 @@ def create_routes(
                 return web.json_response({"error": f"Node '{node.name}' is offline"}, status=503)
 
         try:
-            if backend not in ("claude", "codex", "opencode", "terminal", "computer-use"):
+            if backend not in ("claude", "codex", "opencode", "hermes", "terminal", "computer-use"):
                 return web.json_response({"error": f"Invalid backend: {backend}"}, status=400)
 
             if backend == "terminal":
@@ -851,6 +883,7 @@ def create_routes(
         backends.append({"id": "claude", "name": "Claude Code", "available": shutil.which("claude") is not None})
         backends.append({"id": "codex", "name": "Codex", "available": shutil.which("codex") is not None})
         backends.append({"id": "opencode", "name": "OpenCode", "available": shutil.which("opencode") is not None})
+        backends.append({"id": "hermes", "name": "Hermes", "available": shutil.which("hermes") is not None})
         backends.append({"id": "computer-use", "name": "Computer Use", "available": True})
         backends.append({"id": "terminal", "name": "Terminal", "available": True})
         return web.json_response(backends)
@@ -874,6 +907,9 @@ def create_routes(
                 return web.json_response({"error": "Failed to parse Codex models cache"}, status=500)
         if backend_id == "opencode":
             models = await _get_opencode_models()
+            return web.json_response(models)
+        if backend_id == "hermes":
+            models = _get_hermes_models()
             return web.json_response(models)
         return web.json_response({"error": "Use frontend defaults for this backend"}, status=404)
 
@@ -1716,7 +1752,7 @@ def create_routes(
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
         backend = body.get("backend", "claude")
-        if backend not in ("claude", "codex", "opencode", "computer-use"):
+        if backend not in ("claude", "codex", "opencode", "hermes", "computer-use"):
             return web.json_response({"error": f"Invalid backend: {backend}"}, status=400)
         cwd = body.get("cwd")
         if not cwd and backend != "computer-use":

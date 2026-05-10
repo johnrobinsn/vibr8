@@ -83,6 +83,7 @@ class LaunchOptions:
     claudeBinary: Optional[str] = None
     codexBinary: Optional[str] = None
     opencodeBinary: Optional[str] = None
+    hermesBinary: Optional[str] = None
     allowedTools: Optional[List[str]] = None
     env: Optional[Dict[str, str]] = None
     backendType: Optional[BackendType] = None
@@ -235,6 +236,10 @@ class CliLauncher:
         if options.mcpConfig:
             info.mcpConfig = options.mcpConfig
 
+        # Store agent config (e.g. Hermes MCP servers) for relaunch
+        if options.agentConfig:
+            info.agentConfig = options.agentConfig
+
         # Store worktree metadata if provided
         if options.worktreeInfo:
             info.isWorktree = options.worktreeInfo.isWorktree
@@ -259,6 +264,8 @@ class CliLauncher:
             asyncio.ensure_future(self._spawn_opencode(session_id, info, options))
         elif backend_type == "codex":
             asyncio.ensure_future(self._spawn_codex(session_id, info, options))
+        elif backend_type == "hermes":
+            asyncio.ensure_future(self._spawn_hermes(session_id, info, options))
         else:
             relaunch_opts = _RelaunchOptions(
                 model=options.model,
@@ -335,6 +342,17 @@ class CliLauncher:
                     model=info.model,
                     permissionMode=info.permissionMode,
                     cwd=info.cwd,
+                ),
+            )
+        elif info.backendType == "hermes":
+            await self._spawn_hermes(
+                session_id,
+                info,
+                LaunchOptions(
+                    model=info.model,
+                    permissionMode=info.permissionMode,
+                    cwd=info.cwd,
+                    agentConfig=info.agentConfig,
                 ),
             )
         else:
@@ -595,6 +613,105 @@ class CliLauncher:
         """Wait for a Codex subprocess to exit and update state."""
         exit_code = await proc.wait()
         logger.info("Codex session %s exited (code=%s)", session_id, exit_code)
+
+        session = self._sessions.get(session_id)
+        if session:
+            session.state = "exited"
+            session.exitCode = exit_code
+
+        self._processes.pop(session_id, None)
+        self._monitor_tasks.pop(session_id, None)
+        self._persist_state()
+
+    # ── Spawn: Hermes ────────────────────────────────────────────────────────
+
+    async def _spawn_hermes(
+        self,
+        session_id: str,
+        info: SdkSessionInfo,
+        options: LaunchOptions,
+    ) -> None:
+        """Spawn a Hermes ACP subprocess for a session.
+
+        Like Codex, Hermes ACP uses JSON-RPC over stdio.
+        """
+        binary = options.hermesBinary or "hermes"
+        if not binary.startswith("/"):
+            resolved = shutil.which(binary)
+            if resolved:
+                binary = resolved
+
+        args: List[str] = ["acp"]
+
+        env = {**os.environ}
+        if options.env:
+            env.update(options.env)
+
+        logger.info(
+            "Spawning Hermes session %s: %s %s",
+            session_id, binary, " ".join(args),
+        )
+
+        proc = await asyncio.create_subprocess_exec(
+            binary, *args,
+            cwd=info.cwd,
+            env=env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        info.pid = proc.pid
+        self._processes[session_id] = proc
+
+        if proc.stderr:
+            task = asyncio.create_task(
+                self._pipe_stream(session_id, proc.stderr, "stderr"),
+            )
+            self._pipe_tasks.append(task)
+
+        from server.hermes_adapter import HermesAdapter, HermesAdapterOptions
+        mcp_servers = None
+        if options.agentConfig and "mcpServers" in options.agentConfig:
+            mcp_servers = options.agentConfig["mcpServers"]
+        adapter = HermesAdapter(proc, session_id, HermesAdapterOptions(
+            model=options.model,
+            cwd=info.cwd,
+            approval_mode=options.permissionMode,
+            mcp_servers=mcp_servers,
+        ))
+
+        def _on_init_error(error: str) -> None:
+            logger.error("Hermes session %s init failed: %s", session_id, error)
+            session = self._sessions.get(session_id)
+            if session:
+                session.state = "exited"
+                session.exitCode = 1
+            self._persist_state()
+
+        adapter.on_init_error(_on_init_error)
+
+        if self._on_adapter:
+            self._on_adapter(session_id, adapter, "hermes")
+
+        info.state = "connected"
+
+        task = asyncio.create_task(
+            self._monitor_exit_hermes(session_id, proc),
+        )
+        self._monitor_tasks[session_id] = task
+
+        self._persist_state()
+
+    async def _monitor_exit_hermes(
+        self,
+        session_id: str,
+        proc: asyncio.subprocess.Process,
+    ) -> None:
+        """Wait for a Hermes subprocess to exit and update state."""
+        exit_code = await proc.wait()
+        logger.info("Hermes session %s exited (code=%s)", session_id, exit_code)
 
         session = self._sessions.get(session_id)
         if session:

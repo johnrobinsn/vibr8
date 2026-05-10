@@ -1,4 +1,4 @@
-import type { SdkSessionInfo, NodeInfo, AndroidDeviceInfo, DiscoveredDevice, MdnsDevice, Artifact } from "./types.js";
+import type { SdkSessionInfo, NodeInfo, AndroidDeviceInfo, DiscoveredDevice, MdnsDevice, Artifact, BackendType } from "./types.js";
 
 const BASE = "/api";
 
@@ -129,7 +129,7 @@ export interface CreateSessionOpts {
   branch?: string;
   createBranch?: boolean;
   useWorktree?: boolean;
-  backend?: "claude" | "codex" | "opencode" | "terminal" | "computer-use";
+  backend?: BackendType;
   nodeId?: string;
   agentType?: string;
   agentConfig?: Record<string, unknown>;

@@ -673,7 +673,7 @@ class WsBridge:
         session = self._sessions.get(session_id)
         if not session:
             return False
-        if session.backend_type in ("codex", "opencode"):
+        if session.backend_type in ("codex", "opencode", "hermes"):
             return session.adapter is not None and session.adapter.is_connected()
         if session.backend_type == "computer-use":
             return session_id in self._computer_use_agents
@@ -1095,7 +1095,7 @@ class WsBridge:
                             f"node_found={node is not None} tunnel={node.tunnel is not None if node else False} "
                             f"tunnel_connected={node.tunnel.connected if node and node.tunnel else False} → {backend_connected}")
             else:
-                if session.backend_type in ("codex", "opencode"):
+                if session.backend_type in ("codex", "opencode", "hermes"):
                     backend_connected = session.adapter is not None and session.adapter.is_connected()
                 elif session.backend_type == "computer-use":
                     backend_connected = session_id in self._computer_use_agents
@@ -1674,8 +1674,8 @@ class WsBridge:
                 agent.watch_stop()
             return
 
-        # For adapter-based sessions (Codex / OpenCode), delegate to the adapter
-        if session.backend_type in ("codex", "opencode"):
+        # For adapter-based sessions (Codex / OpenCode / Hermes), delegate to the adapter
+        if session.backend_type in ("codex", "opencode", "hermes"):
             if msg.get("type") == "user_message":
                 import time
                 source_client_id = session.browser_sockets.get(ws, "") if ws else ""
@@ -2238,7 +2238,7 @@ class WsBridge:
             return
 
         # Adapter-based backends — translate NDJSON wire format to browser format
-        if session.backend_type in ("codex", "opencode"):
+        if session.backend_type in ("codex", "opencode", "hermes"):
             browser_msg = self._ndjson_to_browser_msg(ndjson)
             if browser_msg:
                 if session.adapter:

@@ -78,6 +78,7 @@ class NodeAgent:
             self.port,
             config_path=node_dir / "ring0.json",
             work_dir=node_dir / "ring0",
+            scheme="http",
         )
 
         self._bridge.set_store(self._store)

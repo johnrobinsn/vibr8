@@ -286,9 +286,11 @@ class Ring0Manager:
         auth_manager: Optional[AuthManager] = None,
         config_path: Optional[Path] = None,
         work_dir: Optional[Path] = None,
+        scheme: Optional[str] = None,
     ) -> None:
         self._port = port
         self._auth_manager = auth_manager
+        self._scheme = scheme
         self._config_path = config_path or RING0_CONFIG_PATH
         self._work_dir = work_dir or RING0_WORK_DIR
         self._service_token: Optional[str] = None
@@ -373,6 +375,8 @@ class Ring0Manager:
         work_dir.mkdir(parents=True, exist_ok=True)
         mcp_config_path = self._write_config_files(work_dir)
 
+        non_claude_backends = ("codex", "opencode", "hermes")
+
         if backend_type == "codex":
             self._ensure_codex_mcp(work_dir)
         elif backend_type == "opencode":
@@ -391,8 +395,8 @@ class Ring0Manager:
             # Session exists but is exited — update config and relaunch
             info.cwd = str(work_dir)
             info.mcpConfig = str(mcp_config_path)
-            info.model = self._model if backend_type not in ("codex", "opencode") else None
-            if backend_type in ("codex", "opencode"):
+            info.model = self._model if backend_type not in non_claude_backends else None
+            if backend_type in non_claude_backends:
                 info.cliSessionId = None
             await launcher.relaunch(session_id)
             logger.info("[ring0] Relaunched session %s", session_id)
@@ -400,14 +404,20 @@ class Ring0Manager:
 
         # No session in launcher — fresh launch with fixed ID (+ resume if we have a CLI session)
         from server.cli_launcher import LaunchOptions
+
+        agent_config: dict[str, Any] | None = None
+        if backend_type == "hermes":
+            agent_config = {"mcpServers": self._build_acp_mcp_servers()}
+
         options = LaunchOptions(
             sessionId=session_id,
-            model=self._model if backend_type not in ("codex", "opencode") else None,
+            model=self._model if backend_type not in non_claude_backends else None,
             permissionMode="bypassPermissions",
             cwd=str(work_dir),
-            mcpConfig=str(mcp_config_path) if backend_type not in ("codex", "opencode") else None,
-            resumeSessionId=self._cli_session_id if backend_type not in ("codex", "opencode") else None,
+            mcpConfig=str(mcp_config_path) if backend_type not in non_claude_backends else None,
+            resumeSessionId=self._cli_session_id if backend_type not in non_claude_backends else None,
             backendType=backend_type,
+            agentConfig=agent_config,
         )
 
         launcher.launch(options)
@@ -506,6 +516,37 @@ class Ring0Manager:
 
         config_path.write_text(json.dumps(config, indent=2))
         logger.info("[ring0] Wrote OpenCode MCP config to %s", config_path)
+
+    def _get_mcp_env(self) -> dict[str, str]:
+        """Build env vars dict for the Ring0 MCP server process."""
+        server_dir = Path(__file__).parent.parent.resolve()
+        if self._scheme:
+            scheme = self._scheme
+        else:
+            scheme = "https" if (server_dir / "certs" / "cert.pem").exists() else "http"
+        env: dict[str, str] = {
+            "VIBR8_PORT": str(self._port),
+            "VIBR8_SCHEME": scheme,
+        }
+        token = self._get_service_token()
+        if token:
+            env["VIBR8_TOKEN"] = token
+        if self._model:
+            env["RING0_MODEL"] = self._model
+        return env
+
+    def _build_acp_mcp_servers(self) -> list[dict[str, Any]]:
+        """Build MCP server list in ACP McpServerStdio format for Hermes."""
+        server_dir = Path(__file__).parent.parent.resolve()
+        mcp_script = str(server_dir / "server" / "ring0_mcp.py")
+        uv_bin = shutil.which("uv") or "uv"
+        env = self._get_mcp_env()
+        return [{
+            "name": "vibr8",
+            "command": uv_bin,
+            "args": ["run", "--project", str(server_dir), "--no-sync", "python", mcp_script],
+            "env": [{"name": k, "value": v} for k, v in env.items()],
+        }]
 
     def _write_config_files(self, work_dir: Path) -> Path:
         """Write CLAUDE.md/AGENTS.md and MCP config to the Ring0 working directory."""
