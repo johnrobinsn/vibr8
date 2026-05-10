@@ -130,6 +130,8 @@ export async function startWebRTC(opts?: { desktop?: boolean }): Promise<void> {
     {
       ...(gateStore.activeSpeakerName ? { speakerGateName: gateStore.activeSpeakerName } : {}),
       ...(gateStore.activeSpeakerName ? { speakerGateThreshold: gateStore.speakerGateThreshold } : {}),
+      ...(gateStore.activeSpeakerName ? { speakerGateTseEnabled: gateStore.speakerGateTseEnabled } : {}),
+      ...(gateStore.activeSpeakerName ? { speakerGateTseThreshold: gateStore.speakerGateTseThreshold } : {}),
     },
   );
 

@@ -129,6 +129,8 @@ interface AppState {
   // Speaker fingerprint state
   activeSpeakerName: string | null;
   speakerGateThreshold: number;
+  speakerGateTseEnabled: boolean;
+  speakerGateTseThreshold: number;
 
   // Viewer pane + artifacts
   viewerPaneOpen: boolean;
@@ -248,6 +250,8 @@ interface AppState {
   // Speaker fingerprint actions
   setActiveSpeakerName: (id: string | null) => void;
   setSpeakerGateThreshold: (threshold: number) => void;
+  setSpeakerGateTseEnabled: (enabled: boolean) => void;
+  setSpeakerGateTseThreshold: (threshold: number) => void;
 
   // Viewer pane + artifact actions
   setViewerPaneOpen: (open: boolean) => void;
@@ -346,6 +350,8 @@ export const useStore = create<AppState>((set) => ({
   playgroundVadActive: false,
   activeSpeakerName: localStorage.getItem("vibr8_speaker_gate_name") || null,
   speakerGateThreshold: parseFloat(localStorage.getItem("vibr8_speaker_gate_threshold") || "0.45"),
+  speakerGateTseEnabled: localStorage.getItem("vibr8_speaker_gate_tse_enabled") === "true",
+  speakerGateTseThreshold: parseFloat(localStorage.getItem("vibr8_speaker_gate_tse_threshold") || "0.35"),
   viewerPaneOpen: typeof window !== "undefined" ? localStorage.getItem("vibr8_viewer_pane_open") === "true" : false,
   viewerPaneWidth: (() => {
     if (typeof window === "undefined") return 600;
@@ -846,6 +852,14 @@ export const useStore = create<AppState>((set) => ({
     localStorage.setItem("vibr8_speaker_gate_threshold", String(threshold));
     set({ speakerGateThreshold: threshold });
   },
+  setSpeakerGateTseEnabled: (enabled) => {
+    localStorage.setItem("vibr8_speaker_gate_tse_enabled", String(enabled));
+    set({ speakerGateTseEnabled: enabled });
+  },
+  setSpeakerGateTseThreshold: (threshold) => {
+    localStorage.setItem("vibr8_speaker_gate_tse_threshold", String(threshold));
+    set({ speakerGateTseThreshold: threshold });
+  },
 
   setViewerPaneOpen: (open) => {
     localStorage.setItem("vibr8_viewer_pane_open", String(open));
@@ -916,6 +930,8 @@ export const useStore = create<AppState>((set) => ({
       playgroundVadActive: false,
       activeSpeakerName: null,
       speakerGateThreshold: 0.45,
+      speakerGateTseEnabled: false,
+      speakerGateTseThreshold: 0.35,
       viewerPaneContent: null,
       artifacts: [],
     }),

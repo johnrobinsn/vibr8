@@ -339,28 +339,44 @@ class WebRTCManager:
 
     def refresh_speaker_gates(self, username: str) -> None:
         """Re-resolve per-client speaker gates after profile changes."""
-        from server.speaker_fingerprints import get_embeddings_for_speaker
+        from server.speaker_fingerprints import get_speaker_entries
         for cid, uname in self._client_usernames.items():
             if uname != username:
                 continue
             gate = self._client_speaker_gates.get(cid)
             if not gate:
                 continue
-            speaker_name, threshold = gate
             stt = self._stt_instances.get(cid)
             if not stt:
                 continue
-            embeddings = get_embeddings_for_speaker(username, speaker_name)
-            if embeddings:
-                stt.set_speaker_gate(embeddings, threshold)
-                logger.info("[webrtc] client %s: speaker gate refreshed (threshold=%.3f, %d embeddings)", cid, threshold, len(embeddings))
+            speaker_name = gate["speaker_name"]
+            entries = get_speaker_entries(username, speaker_name)
+            if entries:
+                stt.set_speaker_gate(
+                    entries,
+                    gate["threshold"],
+                    tse_enabled=gate.get("tse_enabled", False),
+                    tse_threshold=gate.get("tse_threshold", 0.35),
+                )
+                logger.info(
+                    "[webrtc] client %s: speaker gate refreshed (threshold=%.3f, "
+                    "tse=%s, %d entries)",
+                    cid, gate["threshold"], gate.get("tse_enabled", False), len(entries),
+                )
             else:
                 stt.clear_speaker_gate()
                 self._client_speaker_gates.pop(cid, None)
                 logger.info("[webrtc] client %s: speaker gate cleared (profile '%s' no longer exists)", cid, speaker_name)
 
-    def set_speaker_gate_for_client(self, client_id: str, speaker_name: str | None,
-                                    threshold: float, username: str) -> bool:
+    def set_speaker_gate_for_client(
+        self,
+        client_id: str,
+        speaker_name: str | None,
+        threshold: float,
+        username: str,
+        tse_enabled: bool = False,
+        tse_threshold: float = 0.35,
+    ) -> bool:
         """Set or clear speaker gate for a specific client. Returns True if applied."""
         stt = self._stt_instances.get(client_id)
         if not stt:
@@ -370,17 +386,27 @@ class WebRTCManager:
             self._client_speaker_gates.pop(client_id, None)
             logger.info("[webrtc] client %s: speaker gate cleared", client_id)
             return True
-        from server.speaker_fingerprints import get_embeddings_for_speaker
-        embeddings = get_embeddings_for_speaker(username, speaker_name)
-        if not embeddings:
+        from server.speaker_fingerprints import get_speaker_entries
+        entries = get_speaker_entries(username, speaker_name)
+        if not entries:
             stt.clear_speaker_gate()
             self._client_speaker_gates.pop(client_id, None)
             logger.info("[webrtc] client %s: speaker '%s' not found, gate cleared", client_id, speaker_name)
             return False
-        stt.set_speaker_gate(embeddings, threshold)
-        self._client_speaker_gates[client_id] = (speaker_name, threshold)
-        logger.info("[webrtc] client %s: speaker gate set (speaker='%s', threshold=%.3f, %d embeddings)",
-                    client_id, speaker_name, threshold, len(embeddings))
+        stt.set_speaker_gate(
+            entries, threshold, tse_enabled=tse_enabled, tse_threshold=tse_threshold,
+        )
+        self._client_speaker_gates[client_id] = {
+            "speaker_name": speaker_name,
+            "threshold": threshold,
+            "tse_enabled": bool(tse_enabled),
+            "tse_threshold": float(tse_threshold),
+        }
+        logger.info(
+            "[webrtc] client %s: speaker gate set (speaker='%s', threshold=%.3f, "
+            "tse=%s, %d entries)",
+            client_id, speaker_name, threshold, tse_enabled, len(entries),
+        )
         return True
 
     def get_voice_mode(self, client_id: str) -> VoiceMode | None:
@@ -431,6 +457,8 @@ class WebRTCManager:
         desktop_role: str = "controller",
         speaker_gate_name: str | None = None,
         speaker_gate_threshold: float = 0.45,
+        speaker_gate_tse_enabled: bool = False,
+        speaker_gate_tse_threshold: float = 0.35,
     ) -> dict[str, str]:
         """Process an SDP offer and return an SDP answer.
 
@@ -507,15 +535,11 @@ class WebRTCManager:
 
             # Apply per-client speaker gate if provided in the offer
             if speaker_gate_name:
-                from server.speaker_fingerprints import get_embeddings_for_speaker
-                embeddings = get_embeddings_for_speaker(username, speaker_gate_name)
-                if embeddings:
-                    stt.set_speaker_gate(embeddings, speaker_gate_threshold)
-                    self._client_speaker_gates[client_id] = (speaker_gate_name, speaker_gate_threshold)
-                    logger.info("[webrtc] client %s: speaker gate applied on connect (speaker='%s', threshold=%.3f, %d embeddings)",
-                                client_id, speaker_gate_name, speaker_gate_threshold, len(embeddings))
-                else:
-                    logger.info("[webrtc] client %s: speaker '%s' not found, no gate applied", client_id, speaker_gate_name)
+                self.set_speaker_gate_for_client(
+                    client_id, speaker_gate_name, speaker_gate_threshold, username,
+                    tse_enabled=speaker_gate_tse_enabled,
+                    tse_threshold=speaker_gate_tse_threshold,
+                )
             else:
                 logger.info("[webrtc] client %s: no speaker gate requested", client_id)
 
@@ -1017,10 +1041,18 @@ class WebRTCManager:
                     return
                 import numpy as np
                 from server.speaker_model import embed, cosine_sim
+                from server.wespeaker_model import embed as embed_ws
                 loop = asyncio.get_event_loop()
                 float_buf = audio.astype(np.float32) / np.iinfo(np.int16).max
-                emb = await loop.run_in_executor(None, embed, float_buf)
+                # Compute both embeddings in parallel on the executor — the
+                # SpeechBrain ECAPA gates the segment, the WeSpeaker ECAPA
+                # conditions the BSRNN target-speaker extractor (TSE).
+                emb_task = loop.run_in_executor(None, embed, float_buf)
+                emb_ws_task = loop.run_in_executor(None, embed_ws, float_buf)
+                emb = await emb_task
+                emb_ws = await emb_ws_task
                 emb_list = emb.tolist()
+                emb_ws_list = emb_ws.tolist()
 
                 username = self._client_usernames.get(client_id, "default")
                 from server import speaker_fingerprints
@@ -1045,6 +1077,7 @@ class WebRTCManager:
                         "type": "enrollment_segment",
                         "transcript": transcript,
                         "embedding": emb_list,
+                        "embeddingWespeaker": emb_ws_list,
                         "scores": scores,
                         "timeBegin": data.get("timeBegin", 0),
                         "timeEnd": data.get("timeEnd", 0),

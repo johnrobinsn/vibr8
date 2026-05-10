@@ -6,7 +6,25 @@ import { startEnrollmentWs, stopEnrollmentWs } from "../webrtc.js";
 interface EnrollmentSegment {
   transcript: string;
   embedding: number[];
+  embeddingWespeaker: number[] | null;
   scores: { id: string; name: string; similarity: number }[];
+}
+
+function meanCentroid(vectors: number[][]): number[] {
+  const dim = vectors[0].length;
+  const centroid = new Array<number>(dim).fill(0);
+  for (const v of vectors) {
+    for (let i = 0; i < dim; i++) centroid[i] += v[i];
+  }
+  for (let i = 0; i < dim; i++) centroid[i] /= vectors.length;
+  return centroid;
+}
+
+function l2NormalizedCentroid(vectors: number[][]): number[] {
+  const centroid = meanCentroid(vectors);
+  const norm = Math.sqrt(centroid.reduce((sum, x) => sum + x * x, 0)) + 1e-12;
+  for (let i = 0; i < centroid.length; i++) centroid[i] /= norm;
+  return centroid;
 }
 
 const ENROLLMENT_PASSAGES = [
@@ -81,6 +99,7 @@ export function VoiceFingerprints() {
         const seg: EnrollmentSegment = {
           transcript: msg.transcript as string,
           embedding: msg.embedding as number[],
+          embeddingWespeaker: (msg.embeddingWespeaker as number[] | undefined) ?? null,
           scores: msg.scores as { id: string; name: string; similarity: number }[],
         };
         enrollSegmentsRef.current = [...enrollSegmentsRef.current, seg];
@@ -99,23 +118,27 @@ export function VoiceFingerprints() {
   async function saveEnrollment() {
     if (enrollSegments.length === 0) return;
 
-    const dim = enrollSegments[0].embedding.length;
-    const centroid = new Array(dim).fill(0);
-    for (const seg of enrollSegments) {
-      for (let i = 0; i < dim; i++) centroid[i] += seg.embedding[i];
-    }
-    for (let i = 0; i < dim; i++) centroid[i] /= enrollSegments.length;
-    const norm = Math.sqrt(centroid.reduce((sum: number, v: number) => sum + v * v, 0)) + 1e-12;
-    for (let i = 0; i < dim; i++) centroid[i] /= norm;
+    const centroid = l2NormalizedCentroid(enrollSegments.map((s) => s.embedding));
+    const wsVectors = enrollSegments
+      .map((s) => s.embeddingWespeaker)
+      .filter((v): v is number[] => Array.isArray(v) && v.length > 0);
+    // WeSpeaker embeddings are *not* L2-normalized — the BSRNN target-speaker
+    // extractor was trained on raw ECAPA outputs.
+    const centroidWs =
+      wsVectors.length === enrollSegments.length ? meanCentroid(wsVectors) : null;
 
     const label = enrollLabel.trim() || "Default";
 
     try {
       if (enrollMode === "add-voiceprint" && enrollTargetProfile) {
-        await api.addEmbedding(enrollTargetProfile.id, { embedding: centroid, label });
+        await api.addEmbedding(enrollTargetProfile.id, {
+          embedding: centroid, embeddingWespeaker: centroidWs, label,
+        });
       } else {
         const name = enrollName.trim() || "Unnamed";
-        await api.createFingerprint({ name, embedding: centroid, label });
+        await api.createFingerprint({
+          name, embedding: centroid, embeddingWespeaker: centroidWs, label,
+        });
       }
       cancelEnrollment();
       loadData();

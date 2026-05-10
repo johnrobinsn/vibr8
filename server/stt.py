@@ -109,14 +109,46 @@ class STT:
         self._segment_time_begin: float = 0.0
         self._segment_time_end: float = 0.0
         self._idle_silence_time: float = 0.0  # seconds of silence in IDLE state
-        self._speaker_gate: dict | None = None  # {embeddings: [np.ndarray, ...], threshold: float}
+        # Speaker gate config:
+        #   {entries: [{embedding, embedding_wespeaker}, ...],
+        #    threshold: float,
+        #    tse_enabled: bool, tse_threshold: float}
+        self._speaker_gate: dict | None = None
 
         self._state_machine = self._create_state_machine()
 
     # ── Speaker gate ────────────────────────────────────────────────────
 
-    def set_speaker_gate(self, embeddings: list[np.ndarray], threshold: float) -> None:
-        self._speaker_gate = {"embeddings": embeddings, "threshold": threshold}
+    def set_speaker_gate(
+        self,
+        entries: list[dict],
+        threshold: float,
+        tse_enabled: bool = False,
+        tse_threshold: float = 0.35,
+    ) -> None:
+        """Configure the speaker gate.
+
+        ``entries``: list of ``{"embedding": np.ndarray (SpeechBrain),
+        "embedding_wespeaker": np.ndarray | None (WeSpeaker)}``. The first is
+        used to gate (cosine similarity); the second conditions TSE when
+        enabled. Backwards-compat: if a list of bare ``np.ndarray`` is passed,
+        they're treated as SpeechBrain-only entries with no TSE conditioning.
+        """
+        normalized: list[dict] = []
+        for e in entries:
+            if isinstance(e, dict):
+                normalized.append({
+                    "embedding": e["embedding"],
+                    "embedding_wespeaker": e.get("embedding_wespeaker"),
+                })
+            else:
+                normalized.append({"embedding": e, "embedding_wespeaker": None})
+        self._speaker_gate = {
+            "entries": normalized,
+            "threshold": threshold,
+            "tse_enabled": bool(tse_enabled),
+            "tse_threshold": float(tse_threshold),
+        }
 
     def clear_speaker_gate(self) -> None:
         self._speaker_gate = None
@@ -350,23 +382,65 @@ class STT:
                     combined = np.concatenate(s, axis=0)
                     float_buf = combined.astype(np.float32) / np.iinfo(np.int16).max
 
+                    # Speaker gate runs *before* Whisper so we (a) skip
+                    # transcription on rejected segments, and (b) optionally
+                    # clean the audio with target-speaker extraction (TSE)
+                    # before transcribing.
                     speaker_gate = stt._speaker_gate
+                    asr_audio = float_buf
                     if speaker_gate is not None:
                         try:
                             from server.speaker_model import embed, cosine_sim
+                            entries = speaker_gate["entries"]
+                            tse_enabled = speaker_gate.get("tse_enabled", False)
+                            threshold = (
+                                speaker_gate["tse_threshold"]
+                                if tse_enabled
+                                else speaker_gate["threshold"]
+                            )
                             emb = embed(float_buf)
-                            best_sim = max(cosine_sim(emb, ref) for ref in speaker_gate["embeddings"])
-                            logger.info("[stt] Speaker gate: best_sim=%.3f threshold=%.3f %s",
-                                        best_sim, speaker_gate["threshold"],
-                                        "PASS" if best_sim >= speaker_gate["threshold"] else "REJECT")
-                            if best_sim < speaker_gate["threshold"]:
+                            best_sim = -1.0
+                            best_idx = -1
+                            for i, entry in enumerate(entries):
+                                sim = cosine_sim(emb, entry["embedding"])
+                                if sim > best_sim:
+                                    best_sim = sim
+                                    best_idx = i
+                            logger.info(
+                                "[stt] Speaker gate: best_sim=%.3f threshold=%.3f tse=%s %s",
+                                best_sim, threshold, tse_enabled,
+                                "PASS" if best_sim >= threshold else "REJECT",
+                            )
+                            if best_sim < threshold:
                                 s.clear()
                                 stt._notify_listeners("voice_not_detected", None)
                                 return
+
+                            if tse_enabled and best_idx >= 0:
+                                ws_emb = entries[best_idx].get("embedding_wespeaker")
+                                if ws_emb is None:
+                                    logger.info(
+                                        "[stt] TSE enabled but matched embedding has no "
+                                        "wespeaker vector — falling back to raw audio",
+                                    )
+                                else:
+                                    try:
+                                        from server.tse_processor import extract as tse_extract
+                                        asr_audio = tse_extract(float_buf, ws_emb)
+                                        logger.info(
+                                            "[stt] TSE applied: %d samples → %d samples",
+                                            float_buf.shape[0], asr_audio.shape[0],
+                                        )
+                                    except Exception:
+                                        logger.warning(
+                                            "[stt] TSE failed — falling back to raw audio",
+                                            exc_info=True,
+                                        )
+                                        asr_audio = float_buf
                         except Exception:
                             logger.warning("[stt] Speaker gate error — failing open", exc_info=True)
 
-                    text = STT._transcribe(float_buf)
+                    text = STT._transcribe(asr_audio)
 
                     if params.verbose:
                         logger.info("[stt-verbose] Whisper raw: %r  duration=%.2fs", text, duration)

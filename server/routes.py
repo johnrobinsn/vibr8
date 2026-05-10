@@ -1311,12 +1311,19 @@ def create_routes(
             return web.json_response({"error": "Invalid JSON"}, status=400)
         speaker_name = body.get("speakerName")
         threshold = float(body.get("threshold", 0.45))
+        tse_enabled = bool(body.get("tseEnabled", False))
+        tse_threshold = float(body.get("tseThreshold", 0.35))
         username = _get_username(request)
-        found = webrtc_manager.set_speaker_gate_for_client(client_id, speaker_name, threshold, username)
+        found = webrtc_manager.set_speaker_gate_for_client(
+            client_id, speaker_name, threshold, username,
+            tse_enabled=tse_enabled, tse_threshold=tse_threshold,
+        )
         return web.json_response({
             "ok": True,
             "speakerName": speaker_name if found else None,
             "threshold": threshold,
+            "tseEnabled": tse_enabled,
+            "tseThreshold": tse_threshold,
         })
 
     # ── Session-scoped guard/tts-mute (backward compat wrappers) ──
@@ -1411,6 +1418,8 @@ def create_routes(
         profile_id = body.get("profileId")
         speaker_gate_name = body.get("speakerGateName") or None
         speaker_gate_threshold = float(body.get("speakerGateThreshold", 0.45))
+        speaker_gate_tse_enabled = bool(body.get("speakerGateTseEnabled", False))
+        speaker_gate_tse_threshold = float(body.get("speakerGateTseThreshold", 0.35))
         username = _get_username(request)
 
         if not client_id or not sdp:
@@ -1459,6 +1468,8 @@ def create_routes(
                 desktop_role=desktop_role,
                 speaker_gate_name=speaker_gate_name,
                 speaker_gate_threshold=speaker_gate_threshold,
+                speaker_gate_tse_enabled=speaker_gate_tse_enabled,
+                speaker_gate_tse_threshold=speaker_gate_tse_threshold,
             )
             return web.json_response(answer)
         except Exception as e:
@@ -2068,16 +2079,22 @@ def create_routes(
         body = await request.json()
         name = body.get("name", "Untitled")
         embedding = body.get("embedding")
+        embedding_ws = body.get("embeddingWespeaker")
         label = body.get("label", "Default")
         if not embedding or not isinstance(embedding, list):
             return web.json_response({"error": "embedding required"}, status=400)
+        if embedding_ws is not None and not isinstance(embedding_ws, list):
+            return web.json_response({"error": "embeddingWespeaker must be a list"}, status=400)
         import base64
         audio = None
         audio_b64 = body.get("audio")
         if audio_b64:
             import numpy as np
             audio = np.frombuffer(base64.b64decode(audio_b64), dtype=np.int16)
-        fp = speaker_fingerprints.create_fingerprint(username, name, embedding, label=label, audio=audio)
+        fp = speaker_fingerprints.create_fingerprint(
+            username, name, embedding, label=label, audio=audio,
+            embedding_wespeaker=embedding_ws,
+        )
         embs = fp.get("embeddings", [])
         return web.json_response({
             "id": fp["id"], "name": fp["name"], "user": fp.get("user", username),
@@ -2102,26 +2119,48 @@ def create_routes(
         username = _get_username(request)
         active = speaker_fingerprints.get_active(username)
         if not active:
-            return web.json_response({"speakerName": None, "threshold": 0.45})
+            return web.json_response({
+                "speakerName": None,
+                "threshold": speaker_fingerprints.DEFAULT_THRESHOLD,
+                "tseEnabled": False,
+                "tseThreshold": speaker_fingerprints.DEFAULT_TSE_THRESHOLD,
+            })
         return web.json_response(active)
 
     @routes.put("/api/voice/fingerprints/active")
     async def fingerprints_active_set(request: web.Request) -> web.Response:
         username = _get_username(request)
         body = await request.json()
-        threshold = float(body.get("threshold", 0.45))
+        threshold = float(body.get("threshold", speaker_fingerprints.DEFAULT_THRESHOLD))
+        tse_enabled = bool(body.get("tseEnabled", False))
+        tse_threshold = float(body.get("tseThreshold", speaker_fingerprints.DEFAULT_TSE_THRESHOLD))
         speaker_name = body.get("speakerName")
         if speaker_name is None:
             speaker_fingerprints.clear_active(username)
             if webrtc_manager:
                 webrtc_manager.refresh_speaker_gates(username)
-            return web.json_response({"speakerName": None, "threshold": threshold})
-        config = speaker_fingerprints.set_active(username, speaker_name, threshold)
+            return web.json_response({
+                "speakerName": None, "threshold": threshold,
+                "tseEnabled": tse_enabled, "tseThreshold": tse_threshold,
+            })
+        config = speaker_fingerprints.set_active(
+            username, speaker_name, threshold,
+            tse_enabled=tse_enabled, tse_threshold=tse_threshold,
+        )
         if not config:
             return web.json_response({"error": "Speaker profile not found"}, status=404)
         if webrtc_manager:
             webrtc_manager.refresh_speaker_gates(username)
         return web.json_response(config)
+
+    @routes.get("/api/voice/tse/available")
+    async def tse_available(request: web.Request) -> web.Response:
+        """Report whether target-speaker extraction can be enabled.
+
+        Requires CUDA + the WeSep BSRNN checkpoint on disk.
+        """
+        from server import tse_processor
+        return web.json_response({"available": tse_processor.is_available()})
 
     @routes.post("/api/voice/fingerprints/refresh")
     async def fingerprints_refresh(request: web.Request) -> web.Response:
@@ -2167,9 +2206,12 @@ def create_routes(
         profile_id = request.match_info["id"]
         body = await request.json()
         embedding = body.get("embedding")
+        embedding_ws = body.get("embeddingWespeaker")
         label = body.get("label", "Default")
         if not embedding or not isinstance(embedding, list):
             return web.json_response({"error": "embedding required"}, status=400)
+        if embedding_ws is not None and not isinstance(embedding_ws, list):
+            return web.json_response({"error": "embeddingWespeaker must be a list"}, status=400)
         import base64
         audio = None
         audio_b64 = body.get("audio")
@@ -2177,7 +2219,10 @@ def create_routes(
             import numpy as np
             audio = np.frombuffer(base64.b64decode(audio_b64), dtype=np.int16)
         try:
-            fp = speaker_fingerprints.add_embedding(username, profile_id, embedding, label=label, audio=audio)
+            fp = speaker_fingerprints.add_embedding(
+                username, profile_id, embedding, label=label, audio=audio,
+                embedding_wespeaker=embedding_ws,
+            )
         except ValueError:
             return web.json_response({"error": "Profile not found"}, status=404)
         embs = fp.get("embeddings", [])

@@ -260,6 +260,8 @@ export interface SpeakerFingerprint {
 export interface ActiveFingerprint {
   speakerName: string | null;
   threshold: number;
+  tseEnabled: boolean;
+  tseThreshold: number;
 }
 
 export interface VoiceSegment {
@@ -438,8 +440,8 @@ export const api = {
     ),
 
   // Speaker gate (client-scoped)
-  setSpeakerGateByClient: (clientId: string, data: { speakerName: string | null; threshold: number }) =>
-    post<{ ok: boolean; speakerName: string | null; threshold: number }>(
+  setSpeakerGateByClient: (clientId: string, data: { speakerName: string | null; threshold: number; tseEnabled?: boolean; tseThreshold?: number }) =>
+    post<{ ok: boolean; speakerName: string | null; threshold: number; tseEnabled: boolean; tseThreshold: number }>(
       `/clients/${encodeURIComponent(clientId)}/speaker-gate`,
       data,
     ),
@@ -461,7 +463,7 @@ export const api = {
   getIceServers: () =>
     get<{ iceServers: RTCIceServer[] }>("/webrtc/ice-servers"),
 
-  webrtcOffer: (clientId: string, offer: { sdp: string; type: string }, opts?: { playground?: boolean; profileId?: string; desktop?: boolean; desktopRole?: string; nodeId?: string; speakerGateName?: string; speakerGateThreshold?: number }) =>
+  webrtcOffer: (clientId: string, offer: { sdp: string; type: string }, opts?: { playground?: boolean; profileId?: string; desktop?: boolean; desktopRole?: string; nodeId?: string; speakerGateName?: string; speakerGateThreshold?: number; speakerGateTseEnabled?: boolean; speakerGateTseThreshold?: number }) =>
     post<{ sdp: string; type: string }>("/webrtc/offer", {
       clientId,
       sdp: offer.sdp,
@@ -473,6 +475,8 @@ export const api = {
       ...(opts?.nodeId ? { nodeId: opts.nodeId } : {}),
       ...(opts?.speakerGateName ? { speakerGateName: opts.speakerGateName } : {}),
       ...(opts?.speakerGateThreshold !== undefined ? { speakerGateThreshold: opts.speakerGateThreshold } : {}),
+      ...(opts?.speakerGateTseEnabled !== undefined ? { speakerGateTseEnabled: opts.speakerGateTseEnabled } : {}),
+      ...(opts?.speakerGateTseThreshold !== undefined ? { speakerGateTseThreshold: opts.speakerGateTseThreshold } : {}),
     }),
 
   // Voice Profiles
@@ -486,11 +490,12 @@ export const api = {
 
   // Speaker Fingerprints
   listFingerprints: () => get<SpeakerFingerprint[]>("/voice/fingerprints"),
-  createFingerprint: (data: { name: string; embedding: number[]; label?: string; audio?: string }) => post<SpeakerFingerprint>("/voice/fingerprints", data),
+  createFingerprint: (data: { name: string; embedding: number[]; embeddingWespeaker?: number[] | null; label?: string; audio?: string }) => post<SpeakerFingerprint>("/voice/fingerprints", data),
   deleteFingerprint: (id: string) => del(`/voice/fingerprints/${encodeURIComponent(id)}`),
   getActiveFingerprint: () => get<ActiveFingerprint>("/voice/fingerprints/active"),
-  setActiveFingerprint: (data: { speakerName: string | null; threshold?: number }) => put<ActiveFingerprint>("/voice/fingerprints/active", data),
-  addEmbedding: (profileId: string, data: { embedding: number[]; label?: string; audio?: string }) => post<SpeakerFingerprint>(`/voice/fingerprints/${encodeURIComponent(profileId)}/embeddings`, data),
+  setActiveFingerprint: (data: { speakerName: string | null; threshold?: number; tseEnabled?: boolean; tseThreshold?: number }) => put<ActiveFingerprint>("/voice/fingerprints/active", data),
+  getTseAvailable: () => get<{ available: boolean }>("/voice/tse/available"),
+  addEmbedding: (profileId: string, data: { embedding: number[]; embeddingWespeaker?: number[] | null; label?: string; audio?: string }) => post<SpeakerFingerprint>(`/voice/fingerprints/${encodeURIComponent(profileId)}/embeddings`, data),
   removeEmbedding: (profileId: string, embId: string) => del(`/voice/fingerprints/${encodeURIComponent(profileId)}/embeddings/${encodeURIComponent(embId)}`),
   refreshSpeakerGate: () => post("/voice/fingerprints/refresh"),
 
