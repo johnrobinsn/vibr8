@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -29,6 +31,98 @@ from server.session_types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---- Codex sandbox-mode detection -------------------------------------------
+#
+# Codex's `read-only` and `workspace-write` sandbox modes both run shell commands
+# inside a bubblewrap user namespace. On systems where unprivileged user-namespace
+# creation is blocked (the default on Ubuntu 24.04 via
+# `kernel.apparmor_restrict_unprivileged_userns=1`), every sandboxed exec fails
+# with "bwrap: setting up uid map: Permission denied" and codex falls back to
+# asking the host to retry without the sandbox -- one approval round-trip per
+# command.
+#
+# Vibr8 already routes every privileged action through its own browser-based
+# approval UI (PermissionRequest → user accept/reject), so the codex sandbox is
+# redundant *and* broken in this configuration. When we detect that bwrap can't
+# create user namespaces, we tell codex to use `danger-full-access` (no sandbox)
+# at thread/start time. Vibr8's approval layer remains the trust boundary.
+#
+# When bwrap *does* work, we keep `workspace-write` so the sandbox provides
+# defense-in-depth.
+
+_SANDBOX_MODE_CACHE: Optional[str] = None
+_SANDBOX_REASON_CACHE: str = ""
+
+
+def _probe_bwrap_user_namespace() -> tuple[bool, str]:
+    """Return (works, reason). True iff bwrap can create a user namespace."""
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
+        return False, "bwrap binary not found on PATH"
+
+    try:
+        with open("/proc/sys/kernel/apparmor_restrict_unprivileged_userns") as f:
+            if f.read().strip() == "1":
+                return False, (
+                    "kernel.apparmor_restrict_unprivileged_userns=1 "
+                    "(unprivileged user namespaces blocked by AppArmor)"
+                )
+    except OSError:
+        pass
+
+    try:
+        result = subprocess.run(
+            [bwrap, "--unshare-user", "--bind", "/", "/", "--dev", "/dev",
+             "--tmpfs", "/tmp", "/bin/true"],
+            capture_output=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"bwrap probe failed to run: {exc}"
+
+    if result.returncode == 0:
+        return True, "bwrap user namespace probe succeeded"
+    stderr_text = (result.stderr or b"").decode("utf-8", "replace").strip()
+    return False, f"bwrap probe exited {result.returncode}: {stderr_text or 'no stderr'}"
+
+
+def detect_codex_sandbox_mode() -> str:
+    """Return the codex `sandbox` value to send in thread/start.
+
+    `workspace-write` if bwrap can create a user namespace on this host;
+    otherwise `danger-full-access` (vibr8's approval UI remains the trust
+    boundary). Cached for the life of the process.
+    """
+    global _SANDBOX_MODE_CACHE, _SANDBOX_REASON_CACHE
+    if _SANDBOX_MODE_CACHE is not None:
+        return _SANDBOX_MODE_CACHE
+
+    works, reason = _probe_bwrap_user_namespace()
+    if works:
+        _SANDBOX_MODE_CACHE = "workspace-write"
+        _SANDBOX_REASON_CACHE = reason
+        logger.info(
+            "[codex-adapter] sandbox=workspace-write (%s)", reason,
+        )
+    else:
+        _SANDBOX_MODE_CACHE = "danger-full-access"
+        _SANDBOX_REASON_CACHE = reason
+        logger.warning(
+            "[codex-adapter] sandbox=danger-full-access -- bwrap unavailable "
+            "(%s). Codex commands will run without sandboxing; vibr8's "
+            "approval UI remains the trust boundary.",
+            reason,
+        )
+    return _SANDBOX_MODE_CACHE
+
+
+def codex_sandbox_reason() -> str:
+    """Human-readable reason for the chosen sandbox mode (for diagnostics)."""
+    if _SANDBOX_MODE_CACHE is None:
+        detect_codex_sandbox_mode()
+    return _SANDBOX_REASON_CACHE
 
 
 # ---- Codex JSON-RPC Types (internal) ----------------------------------------
@@ -256,6 +350,10 @@ class CodexAdapter:
         # Queue messages received before initialization completes
         self._pending_outgoing: List[BrowserOutgoingMessage] = []
 
+        # Track init failure so we can surface errors on subsequent messages
+        self._init_failed: bool = False
+        self._init_error_msg: str = ""
+
         # Pending approval requests (request_id -> JSON-RPC id)
         self._pending_approvals: Dict[str, int] = {}
 
@@ -293,6 +391,12 @@ class CodexAdapter:
         if not self._initialized or not self._thread_id:
             msg_type = msg.get("type")  # type: ignore[union-attr]
             if msg_type in ("user_message", "permission_response"):
+                if self._init_failed:
+                    self._emit({
+                        "type": "error",
+                        "message": f"Codex session failed to initialize: {self._init_error_msg}",
+                    })
+                    return True
                 logger.info(
                     "[codex-adapter] Queuing %s -- adapter not yet initialized",
                     msg_type,
@@ -388,6 +492,8 @@ class CodexAdapter:
             self._connected = True
             self._initialized = True
 
+            sandbox_mode = detect_codex_sandbox_mode()
+
             # Step 3: Start or resume a thread
             if self._options.thread_id:
                 # Resume an existing thread
@@ -398,7 +504,7 @@ class CodexAdapter:
                     "approvalPolicy": self._map_approval_policy(
                         self._options.approval_mode
                     ),
-                    "sandbox": "workspace-write",
+                    "sandbox": sandbox_mode,
                 })
                 self._thread_id = resume_result["thread"]["id"]
             else:
@@ -409,7 +515,7 @@ class CodexAdapter:
                     "approvalPolicy": self._map_approval_policy(
                         self._options.approval_mode
                     ),
-                    "sandbox": "workspace-write",
+                    "sandbox": sandbox_mode,
                 })
                 self._thread_id = thread_result["thread"]["id"]
 
@@ -463,6 +569,8 @@ class CodexAdapter:
         except Exception as exc:
             error_msg = f"Codex initialization failed: {exc}"
             logger.error("[codex-adapter] %s", error_msg)
+            self._init_failed = True
+            self._init_error_msg = str(exc)
             self._emit({"type": "error", "message": error_msg})
             self._connected = False
             if self._init_error_cb is not None:
@@ -654,6 +762,24 @@ class CodexAdapter:
         json_rpc_id: int,
         params: Dict[str, Any],
     ) -> None:
+        reason = params.get("reason", "")
+        if "retry without sandbox" in reason:
+            # Defense in depth: with detect_codex_sandbox_mode() picking
+            # `danger-full-access` when bwrap can't run, this branch should
+            # almost never fire. If it does (e.g. bwrap probe passed but the
+            # actual command still failed inside the sandbox), auto-accept the
+            # retry rather than blocking the session.
+            logger.warning(
+                "[codex-adapter] Sandbox retry requested even though sandbox=%s "
+                "was selected at thread/start (reason=%s). Auto-approving retry.",
+                _SANDBOX_MODE_CACHE,
+                _SANDBOX_REASON_CACHE,
+            )
+            asyncio.create_task(
+                self._transport.respond(json_rpc_id, {"decision": "accept"})
+            )
+            return
+
         request_id = f"codex-approval-{uuid.uuid4()}"
         self._pending_approvals[request_id] = json_rpc_id
 
@@ -675,7 +801,7 @@ class CodexAdapter:
                 "command": command_str,
                 "cwd": params.get("cwd") or self._options.cwd or "",
             },
-            "description": params.get("reason") or f"Execute: {command_str}",
+            "description": reason or f"Execute: {command_str}",
             "tool_use_id": params.get("itemId") or request_id,
             "timestamp": time.time() * 1000,  # ms like Date.now()
         }
@@ -1301,5 +1427,5 @@ class CodexAdapter:
         if mode == "bypassPermissions":
             return "never"
         # "plan", "acceptEdits", "default", or anything else
-        return "unless-trusted"
+        return "on-request"
 

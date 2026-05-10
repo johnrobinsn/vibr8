@@ -508,15 +508,25 @@ class CliLauncher:
             if resolved:
                 binary = resolved
 
-        args: List[str] = ["app-server", "--enable", "use_legacy_landlock"]
+        # Note: we used to pass `--enable use_legacy_landlock` here, but that
+        # feature flag is `deprecated` in current codex (`codex features list`)
+        # and routes through bubblewrap anyway. The actual sandbox-vs-no-sandbox
+        # choice is made at thread/start in codex_adapter.py via
+        # detect_codex_sandbox_mode().
+        args: List[str] = ["app-server"]
 
         env = {**os.environ}
         if options.env:
             env.update(options.env)
 
+        # Log the chosen sandbox mode once per spawn so it's obvious in logs
+        # which mode every session uses.
+        from server.codex_adapter import detect_codex_sandbox_mode, codex_sandbox_reason
+        sandbox_mode = detect_codex_sandbox_mode()
+
         logger.info(
-            "Spawning Codex session %s: %s %s",
-            session_id, binary, " ".join(args),
+            "Spawning Codex session %s: %s %s (sandbox=%s; %s)",
+            session_id, binary, " ".join(args), sandbox_mode, codex_sandbox_reason(),
         )
 
         proc = await asyncio.create_subprocess_exec(
