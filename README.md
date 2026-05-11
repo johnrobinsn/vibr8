@@ -5,36 +5,43 @@
 <h1 align="center">vibr8</h1>
 
 <p align="center">
-  Web UI for launching and interacting with Claude Code agents
+  Web UI for launching and interacting with coding agents (Claude Code, Codex, OpenCode, Hermes) and computer-use agents
 </p>
 
 ---
 
 ## Features
 
-- **Multi-session management** — Launch, monitor, and switch between multiple Claude Code or Codex sessions
-- **Real-time voice** — Bidirectional WebRTC audio with push-to-talk, speech-to-text (Whisper + Silero VAD with speculative decoding), and text-to-speech (Kokoro local TTS by default, OpenAI cloud TTS optional)
-- **Speaker fingerprinting** — ECAPA-TDNN voice embeddings gate STT to a specific speaker, preventing unauthorized voice input
-- **Prompt accumulation** — Multi-segment utterances are combined before submission, so pauses mid-thought don't split your input
-- **Live streaming** — Watch agent output stream in real-time over WebSocket (NDJSON protocol)
-- **Remote nodes** — Run sessions on remote machines (Docker, EC2, macOS) connected via WebSocket tunnel, with Claude Code or Codex backends
-- **Computer-use agent** — Vision-language model (UI-TARS) controls desktop GUIs autonomously — screenshots, clicks, typing, scrolling
-- **Ring0 meta-agent** — Voice-controlled supervisor that manages sessions, permissions, second screens, and client devices via MCP tools
-- **Second screen** — Push markdown, images, PDFs, HTML, or live session mirrors to paired display devices (TVs, tablets, etc.)
-- **Code viewer** — Syntax-highlighted file viewer with CodeMirror
-- **Git integration** — Branch tracking, worktree isolation, ahead/behind counts, and diff stats per session
-- **Environment sets** — Create and switch between named sets of environment variables
-- **Voice commands** — Guard-word activated commands for hands-free control (guard mode, note mode, node switching, TTS mute, etc.)
-- **Auto-reconnect** — Automatic reconnection with timeout, cancel, and manual retry
-- **Dark / light mode** — Persisted theme preference
+- **Multiple coding-agent backends** — Claude Code, Codex (app-server), OpenCode, and Hermes (ACP) in one UI. Each session picks its backend, model, and permission mode independently.
+- **Multi-session management** — Launch, monitor, and switch between any number of concurrent sessions across all backends.
+- **Computer-use agent** — Vision-language model (UI-TARS) controls desktop GUIs autonomously — screenshots, clicks, typing, scrolling.
+- **Real-time voice** — Bidirectional WebRTC audio with push-to-talk, speech-to-text (Whisper + Silero VAD with speculative decoding), and text-to-speech (Kokoro local TTS by default, OpenAI cloud TTS optional).
+- **Speaker fingerprinting** — Multi-embedding voice profiles (one per device/environment) gate STT to a specific speaker, blocking other voices before transcription.
+- **Target speaker extraction (TSE)** — Optional WeSep BSRNN model isolates the enrolled speaker's voice from background talkers (TV, family in the room) before Whisper runs. Useful in noisy environments.
+- **Prompt accumulation** — Multi-segment utterances are combined before submission, so pauses mid-thought don't split your input.
+- **Live streaming** — Watch agent output stream in real-time over WebSocket (NDJSON protocol).
+- **Remote nodes** — Run sessions on remote machines (Docker, EC2, macOS) connected via WebSocket tunnel, with any of the four coding-agent backends.
+- **Ring0 meta-agent** — Voice-controlled supervisor that manages sessions, permissions, second screens, artifacts, and client devices via MCP tools.
+- **Artifacts + viewer pane** — Sessions and Ring0 can publish persistent content items (summaries, plans, reports) that surface in a resizable side panel, separate from the chat transcript.
+- **Second screen** — Push markdown, images, PDFs, HTML, or live session mirrors to paired display devices (TVs, tablets, etc.).
+- **Code viewer** — Syntax-highlighted file viewer with CodeMirror.
+- **Git integration** — Branch tracking, worktree isolation, ahead/behind counts, and diff stats per session.
+- **Environment sets** — Create and switch between named sets of environment variables.
+- **Voice commands** — Guard-word activated commands for hands-free control (guard mode, note mode, node switching, TTS mute, etc.).
+- **Auto-reconnect** — Automatic reconnection with timeout, cancel, and manual retry.
+- **Dark / light mode** — Persisted theme preference.
 
 ## Prerequisites
 
 - Python 3.11 or 3.12
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
 - [Bun](https://bun.sh/) (JavaScript runtime / package manager)
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- Optional: [Codex CLI](https://github.com/openai/codex) for Codex backend sessions
+- At least one coding-agent CLI installed and authenticated:
+  - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — `claude` binary on PATH
+  - [Codex CLI](https://github.com/openai/codex) — `codex` binary on PATH
+  - [OpenCode CLI](https://github.com/sst/opencode) — `opencode` binary on PATH
+  - [Hermes CLI](https://github.com/jasonkneen/hermes) — `hermes` binary on PATH
+- Optional: NVIDIA GPU for target speaker extraction (TSE) and computer-use VLM inference
 
 ## Quick Start
 
@@ -61,6 +68,21 @@ Open [http://localhost:5174](http://localhost:5174) in your browser.
 | `make test-py`       | Python tests (`pytest`)                        |
 | `make test-frontend` | Frontend tests (`vitest`)                      |
 
+## Coding Agent Backends
+
+vibr8 can drive four different coding-agent CLIs in a single UI. Each session picks its backend at creation; the wire format the browser sees (messages, tool calls, permission prompts) is normalized regardless of which backend is running.
+
+| Backend | Transport | Notes |
+|---|---|---|
+| **Claude Code** | WebSocket (`--sdk-url`) | Native protocol; full feature support |
+| **Codex** | JSON-RPC over stdio (`codex app-server`) | Sandbox mode auto-selected per host (workspace-write when bwrap user namespaces work, danger-full-access otherwise — vibr8's approval UI is the trust boundary in the latter case) |
+| **OpenCode** | NDJSON over stdio | Dynamic model list fetched from `opencode models` (5-min cache) |
+| **Hermes** | JSON-RPC over stdio (ACP, `hermes acp`) | Default model read from `~/.hermes/config.yaml`; routes vibr8's MCP through ACP `McpServerStdio` |
+
+A fifth "backend" is the **computer-use** agent — not a coding agent, but uses the same session machinery. See [Computer-Use Agent](#computer-use-agent) below.
+
+`GET /api/backends` reports which backends have their CLI on PATH at runtime; the New Session UI greys out the unavailable ones.
+
 ## Text-to-Speech
 
 vibr8 supports two TTS engines, controlled by the `VIBR8_TTS_ENGINE` environment variable:
@@ -83,24 +105,64 @@ Additional TTS configuration:
 
 Speaker fingerprinting uses ECAPA-TDNN embeddings (via SpeechBrain) to identify speakers by voice. When a fingerprint is active, the STT pipeline only accepts audio from that speaker — other voices are rejected before transcription.
 
+### Profiles and Multi-Embedding
+
+A profile is one person; each profile can hold **multiple labeled embeddings** captured from different devices and environments (e.g. "MacBook mic", "AirPods", "kitchen", "car"). The gate matches against the best-scoring embedding per profile, so a single profile can cover the room mic *and* a noisy phone mic without false rejections. Profiles are stored under `~/.vibr8/data/voice/fingerprints/{username}/` in a versioned schema (currently v3).
+
 ### Setup
 
-1. Go to **Settings > Speaker ID**
-2. Click **Start Enrollment** — speak a few sentences to capture your voice
-3. Save the fingerprint and set it as active
-4. Adjust the similarity threshold (default 0.45) if needed
+1. Go to **Settings → Speaker ID**.
+2. Click **Start Enrollment** — speak a few sentences to capture your voice.
+3. Save the fingerprint and set it as active.
+4. Adjust the similarity threshold (default 0.45) if needed.
+5. To cover another device or room, **add embedding** to the same profile rather than creating a new one.
 
 Speaker gates are applied per-user and activate automatically on WebRTC connect.
 
+### Target Speaker Extraction (TSE) — Noisy Environments
+
+When you're in a room with other people talking (family in the background, TV, hallway noise), even a tight similarity gate can struggle: it correctly rejects the background speaker's utterances, but if you and someone else speak simultaneously, the mixed audio fails the gate. TSE fixes this by **isolating** your voice from the mixture before the gate runs.
+
+Pipeline:
+
+```
+audio segment
+  → SpeechBrain ECAPA embedding → cosine gate (rejects pure background talkers)
+  → if TSE on + your voice matched: WeSep BSRNN(audio, WeSpeaker embedding)
+                                       → cleaned audio containing only your voice
+  → Whisper
+```
+
+Each enrollment captures **two** embeddings — SpeechBrain ECAPA (for the gate) and WeSpeaker ECAPA (to condition the BSRNN extractor) — because the two ECAPA training regimes produce incompatible embedding spaces.
+
+#### Requirements
+
+- NVIDIA GPU (CUDA) — TSE runs the BSRNN model per voice segment
+- WeSep BSRNN checkpoint (`avg_model.pt`) in one of:
+  - `$VIBR8_WESEP_DIR` (env var override)
+  - `~/.vibr8/models/wespeaker-bsrnn-vox1/avg_model.pt`
+  - `~/.wesep/english/avg_model.pt`
+
+When unavailable, `GET /api/voice/tse/available` returns `{"available": false}` and the UI hides the toggle.
+
+#### Setup
+
+1. Make sure your active fingerprint has a `embedding_wespeaker` field — newly enrolled voiceprints get it automatically. To backfill a pre-existing profile from its stored audio:
+   ```bash
+   uv run python -m server.scripts.migrate_v3_wespeaker --user <username>
+   ```
+2. In **Settings → Speaker ID**, flip **Enable TSE** on. Adjust the TSE threshold (default 0.35; lower because cleaned audio scores higher on the gate).
+3. The toggle is disabled if either the GPU or the BSRNN checkpoint is missing.
+
 ## Remote Nodes
 
-vibr8 supports remote nodes that can host Claude Code or Codex sessions and desktop environments. Nodes connect to the hub via outbound WebSocket — no SSH or local network access required.
+vibr8 supports remote nodes that can host coding-agent sessions and desktop environments. Nodes connect to the hub via outbound WebSocket — no SSH or local network access required.
 
 ### How It Works
 
 - Nodes register with the hub using API keys and maintain a persistent WebSocket connection
 - Sessions created with a `nodeId` are forwarded to the remote node, which spawns the CLI locally
-- Nodes can run either Claude Code or Codex as their default backend (`--default-backend codex`)
+- Any of the four coding-agent backends (Claude Code, Codex, OpenCode, Hermes) can run on a node; set the default via `--default-backend {claude|codex|opencode|hermes}`
 - Computer-use sessions run VLM inference on the hub but target the remote node's desktop for screen capture and input injection
 - Each node can run its own Ring0 instance for voice-controlled session management
 
@@ -128,15 +190,19 @@ Docker images are provided for various configurations:
 | `Dockerfile.node-gpu` | GPU-enabled variant |
 | `Dockerfile.node-gui` | X11 GUI desktop support |
 
-### Running a Codex Node
+### Running a Node with a Specific Backend
 
 ```bash
-# Run a node with Codex as the default backend
+# Codex as the default backend
 uv run python -m vibr8_node \
   --hub wss://your-hub:3456 \
   --name my-codex-node \
   --default-backend codex \
   --api-key <node-api-key>
+
+# Same pattern for opencode or hermes
+uv run python -m vibr8_node --hub wss://your-hub:3456 --name my-opencode-node \
+  --default-backend opencode --api-key <node-api-key>
 ```
 
 ### Node Management
@@ -188,10 +254,11 @@ The agent panel provides pause/resume, watch/act mode toggle, and an execution m
 
 Ring0 is a supervisor agent that controls vibr8 via voice. When enabled, all voice input routes to Ring0 instead of the active session. Ring0 exposes MCP tools for:
 
-- **Session management** — Create, list, rename, interrupt, and send messages to sessions (Claude, Codex, or computer-use backends)
+- **Session management** — Create, list, rename, interrupt, and send messages to sessions across all backends (Claude, Codex, OpenCode, Hermes, computer-use)
 - **Permission handling** — View and respond to pending permission requests
 - **UI control** — Switch which session the browser displays, set session modes (plan / acceptEdits)
 - **Client management** — List connected clients, query device info, send notifications, control audio devices, read/write clipboard
+- **Artifacts** — Publish, list, share, and delete persistent content items (summaries, plans, reports) that surface in the viewer pane
 - **Second screen** — Pair, list, push content, adjust scale/dark mode/TV-safe margins
 - **Screenshot capture** — Capture any client's current view
 - **Android control** — Launch apps on connected Android devices
@@ -268,6 +335,10 @@ Pair external displays (TVs, tablets, spare monitors) to show content pushed by 
 ## Voice Commands
 
 vibr8 supports voice input via WebRTC. Speech is transcribed by Whisper (with speculative decoding via distil-large-v3) + Silero VAD and routed to the active session (or Ring0 if enabled).
+
+### Background Voice via the vibr8 Android App
+
+The companion vibr8 Android app keeps voice working **in the background**: you can switch to other apps on your phone — browse, message, drive with maps up — and still issue voice commands to vibr8. The mic stays connected over WebRTC even when the vibr8 app isn't on screen, so guard-word commands ("vibr8 …"), Ring0 routing, and note mode all keep working while you use the phone for something else. Pair with `vibr8 guard` so it only acts on intentional, guard-prefixed speech.
 
 ### Guard Word
 
@@ -368,14 +439,16 @@ vibr8 stores configuration in `~/.vibr8/`:
 | `ring0.json` | Ring0 config: `enabled`, `sessionId`, `model` |
 | `ring0-events.json5` | Ring0 event routing rules |
 | `nodes.json` | Registered remote nodes |
+| `artifacts.json` | Persistent artifacts published by sessions / Ring0 |
 | `envs/` | Environment profiles (named sets of env vars) |
 | `sessions/` | Persisted session data (atomic writes) |
 | `worktrees/` | Worktree-to-session mappings |
 | `worktrees.json` | Worktree tracking metadata |
 | `ice-servers.json` | STUN/TURN server config for WebRTC (optional) |
 | `secret.key` | HMAC signing key for auth tokens |
+| `models/wespeaker-bsrnn-vox1/` | WeSep BSRNN checkpoint for TSE (optional) |
 | `data/voice/logs/` | Voice recordings and segment logs |
-| `data/voice/fingerprints/` | Speaker fingerprint embeddings |
+| `data/voice/fingerprints/` | Speaker fingerprint v3 profiles (SpeechBrain + WeSpeaker embeddings) |
 
 ### Environment Variables
 
@@ -387,26 +460,32 @@ vibr8 stores configuration in `~/.vibr8/`:
 | `VIBR8_TTS_VOICE` | `af_sarah` | TTS voice name |
 | `VIBR8_TTS_SPEED` | `1.0` | TTS playback speed |
 | `OPENAI_API_KEY` | — | Required when using OpenAI TTS |
+| `VIBR8_WESEP_DIR` | — | Override location of the WeSep BSRNN checkpoint (TSE) |
 
 For HTTPS (required for WebRTC on non-localhost), place `key.pem` and `cert.pem` in `certs/`.
 
 ## Architecture
 
 ```
-Browser (React 19 + WebRTC)
-    │
+Browser (React 19 + WebRTC)               Android app (background voice)
+    │                                         │
     ├── WebSocket (NDJSON) ──► WsBridge ──► Claude Code CLI subprocess
-    │                                  └──► Codex app-server (JSON-RPC)
+    │                              ├──────► Codex app-server (JSON-RPC stdio)
+    │                              ├──────► OpenCode (NDJSON stdio)
+    │                              └──────► Hermes (ACP JSON-RPC stdio)
     │
     ├── RTCPeerConnection ──► WebRTCManager
     │                              ├── AsyncSTT (Whisper + speculative decoding)
-    │                              ├── Speaker Gate (ECAPA-TDNN embeddings)
+    │                              ├── Speaker Gate (SpeechBrain ECAPA, multi-embedding)
+    │                              ├── TSE — optional (WeSep BSRNN, GPU-only)
     │                              └── QueuedAudioTrack (Kokoro / OpenAI TTS)
+    │
+    ├── Viewer Pane ◄── Artifacts (persistent content items)
     │
     └── Second Screen ──► WebSocket (content push, session mirror)
 
 Remote Nodes ──► WebSocket tunnel ──► Hub
-    ├── CliLauncher (spawns Claude/Codex locally)
+    ├── CliLauncher (spawns Claude / Codex / OpenCode / Hermes locally)
     ├── DesktopWebRTC (screen capture + input injection)
     └── Ring0 (optional, local MCP server)
 
@@ -416,15 +495,17 @@ Computer-Use Pipeline:
                       ──► DesktopTarget.inject() (WebRTC data channel)
 ```
 
-**Backend** — Python/aiohttp with 40+ REST endpoints for sessions, git, filesystem, environments, nodes, and WebRTC signaling. Each session spawns a Claude Code CLI subprocess (or Codex app-server) managed via WebSocket bridge.
+**Backend** — Python/aiohttp with 40+ REST endpoints for sessions, git, filesystem, environments, nodes, artifacts, voice, and WebRTC signaling. Coding-agent sessions spawn either a Claude CLI subprocess (WebSocket sdk-url) or a stdio adapter (`codex_adapter.py`, `opencode_adapter.py`, `hermes_adapter.py`). All four backends emit the same normalized browser-facing message types.
 
-**Frontend** — React 19, TypeScript, Tailwind CSS 4, Zustand state management. Code viewing with CodeMirror, file trees with react-arborist, terminal via xterm.js.
+**Frontend** — React 19, TypeScript, Tailwind CSS 4, Zustand state management. Code viewing with CodeMirror, file trees with react-arborist, terminal via xterm.js. Sessions, the viewer pane, and remote desktops share the main pane via resizable splits.
 
 ## Tech Stack
 
-**Backend:** Python 3.11+, aiohttp, aiortc, PyTorch, Whisper, Silero VAD, SpeechBrain, Kokoro, Transformers, BitsAndBytes
+**Backend:** Python 3.11+, aiohttp, aiortc, PyTorch, Whisper (with distil-large-v3 speculative decoding), Silero VAD, SpeechBrain (ECAPA gate), WeSpeaker + WeSep BSRNN (vendored, for TSE), Kokoro, Transformers, BitsAndBytes (UI-TARS int4 quantization)
 
-**Frontend:** React 19, TypeScript, Vite, Tailwind CSS 4, Zustand, CodeMirror, xterm.js
+**Adapter protocols:** WebSocket (Claude SDK), Codex app-server JSON-RPC, OpenCode NDJSON, Hermes Agent Client Protocol (ACP)
+
+**Frontend:** React 19, TypeScript, Vite, Tailwind CSS 4, Zustand, CodeMirror, xterm.js, react-arborist
 
 ## License
 
