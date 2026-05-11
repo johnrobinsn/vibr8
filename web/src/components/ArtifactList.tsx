@@ -9,6 +9,7 @@ const TYPE_ICONS: Record<string, string> = {
   file: "M6 2h8l4 4v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm7 0v5h5",
   pdf: "M6 2h8l4 4v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm7 0v5h5M9 13h6M9 16h4",
   html: "M4 4l2 14 6 2 6-2 2-14H4zm5 4h6l-.5 6-2.5 1-2.5-1-.2-2",
+  audio: "M9 17V5l10-2v12M9 17a3 3 0 11-6 0 3 3 0 016 0zm10-2a3 3 0 11-6 0 3 3 0 016 0z",
 };
 
 function TypeIcon({ type }: { type: string }) {

@@ -125,6 +125,28 @@ export function PushedContentView({
     );
   }
 
+  if (content.type === "audio") {
+    let url = content.content.trim();
+    if (url && !url.startsWith("data:") && !url.startsWith("http")) {
+      const ext = content.filename?.toLowerCase().split(".").pop();
+      const mime = ext === "mp3" ? "audio/mpeg"
+                 : ext === "ogg" || ext === "oga" ? "audio/ogg"
+                 : "audio/wav";
+      url = `data:${mime};base64,${url}`;
+    }
+    return (
+      <div className="h-full flex flex-col items-center justify-center p-8">
+        {content.filename && (
+          <div className="text-xs text-cc-fg-muted mb-3 font-mono break-all max-w-lg text-center">
+            {content.filename}
+          </div>
+        )}
+        <audio controls preload="metadata" src={url} className="w-full max-w-lg" />
+        <BackButton onClick={onBack} label={backLabel} />
+      </div>
+    );
+  }
+
   return (
     <div className="h-full overflow-auto p-8">
       <div className="max-w-3xl mx-auto">
