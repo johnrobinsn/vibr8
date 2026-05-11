@@ -135,7 +135,7 @@ interface AppState {
   // Viewer pane + artifacts
   viewerPaneOpen: boolean;
   viewerPaneWidth: number;
-  viewerPaneContent: { type: string; content: string; filename?: string; nodeId?: string; _pushId?: number } | null;
+  viewerPaneContent: { type: string; content: string; contentUrl?: string; filename?: string; nodeId?: string; _pushId?: number } | null;
   artifacts: Artifact[];
 
   // Actions
@@ -256,7 +256,7 @@ interface AppState {
   // Viewer pane + artifact actions
   setViewerPaneOpen: (open: boolean) => void;
   setViewerPaneWidth: (width: number) => void;
-  setViewerPaneContent: (content: { type: string; content: string; filename?: string; nodeId?: string } | null) => void;
+  setViewerPaneContent: (content: { type: string; content: string; contentUrl?: string; filename?: string; nodeId?: string } | null) => void;
   setArtifacts: (artifacts: Artifact[]) => void;
 
   reset: () => void;

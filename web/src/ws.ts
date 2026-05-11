@@ -747,7 +747,14 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         const content = params?.content ?? "";
         const filename = params?.filename;
         const nodeId = params?.nodeId;
-        const payload = { type: contentType, content, ...(filename && { filename }), ...(nodeId && { nodeId }) };
+        const contentUrl = params?.contentUrl;
+        const payload = {
+          type: contentType,
+          content,
+          ...(contentUrl && { contentUrl }),
+          ...(filename && { filename }),
+          ...(nodeId && { nodeId }),
+        };
         if (store.clientRole === "primary") {
           store.setViewerPaneContent(payload);
           store.setViewerPaneOpen(true);

@@ -2275,6 +2275,32 @@ def create_routes(
         await ws_bridge.broadcast_to_all_browsers({"type": "artifacts_changed"})
         return web.json_response({"ok": True})
 
+    @routes.get("/api/artifacts/{id}/content")
+    async def artifacts_get_content(request: web.Request) -> web.Response:
+        """Serve an artifact's raw bytes with the correct Content-Type.
+
+        Decouples payload size from the MCP/websocket transport: large
+        artifacts (audio, PDFs, images) ride this endpoint, not the
+        artifact-list response. Artifacts are immutable, so the response is
+        long-cached.
+        """
+        artifact_id = request.match_info["id"]
+        result = artifacts.read_content(artifact_id)
+        if result is None:
+            return web.Response(status=404, text="Not found")
+        body, mime, filename = result
+
+        headers = {
+            "Content-Type": mime,
+            "Cache-Control": "public, max-age=31536000, immutable",
+        }
+        if filename:
+            safe = filename.replace('"', "").replace("\r", "").replace("\n", "")
+            headers["Content-Disposition"] = f'inline; filename="{safe}"'
+        else:
+            headers["Content-Disposition"] = "inline"
+        return web.Response(body=body, headers=headers)
+
     # ── Voice Logs ───────────────────────────────────────────────────────
 
     @routes.get("/api/voice/logs")

@@ -70,7 +70,12 @@ export function ViewerPane() {
         )}
         {view === "artifact" && viewingArtifact && (
           <PushedContentView
-            content={{ type: viewingArtifact.type, content: viewingArtifact.content, filename: viewingArtifact.filename ?? undefined }}
+            content={{
+              type: viewingArtifact.type,
+              content: viewingArtifact.content,
+              contentUrl: viewingArtifact.contentUrl ?? undefined,
+              filename: viewingArtifact.filename ?? undefined,
+            }}
             onBack={handleBack}
             backLabel="Back to artifacts"
           />

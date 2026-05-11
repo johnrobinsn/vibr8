@@ -113,7 +113,12 @@ export interface Artifact {
   id: string;
   title: string;
   type: string;
+  // Inline content body. Empty for artifacts created after on-disk storage
+  // landed — those advertise `contentUrl` and clients fetch the payload from
+  // GET /api/artifacts/:id/content. Kept for backwards compat with legacy
+  // (pre-on-disk) artifacts that still have their content inlined here.
   content: string;
+  contentUrl?: string | null;
   sourceSessionId: string | null;
   sourceSessionName: string | null;
   createdAt: number;

@@ -777,6 +777,7 @@ async def show_on_second_screen(
     filename: str = "",
     pdf_data: str = "",
     node_id: str = "",
+    content_url: str = "",
 ) -> str:
     """Push content to one or all connected second screen displays.
 
@@ -851,6 +852,11 @@ async def show_on_second_screen(
         rpc_params = {}
     else:
         rpc_params = {"type": content_type, "content": display_content}
+        if content_url:
+            # When the caller has a server-hosted URL (e.g. an artifact stored
+            # on disk), forward it instead of stuffing the bytes through the
+            # websocket. The receiving renderer prefers contentUrl when set.
+            rpc_params["contentUrl"] = content_url
         if filename:
             rpc_params["filename"] = filename
         if content_type == "desktop" and node_id:
@@ -1005,9 +1011,22 @@ async def share_artifact(
     })
     if result.get("error"):
         return f"Error: {result['error']}"
+    artifact_id = result.get("id", "")
+    content_url = result.get("contentUrl") or ""
     msg = f"Created artifact '{title}'"
+    if artifact_id:
+        msg += f" (id={artifact_id[:8]})"
+    if content_url:
+        msg += f"\nURL: {content_url}"
     if show:
-        push = await show_on_second_screen(content=content, content_type=content_type, filename=filename)
+        # Hand the viewer the URL, not the payload — keeps the websocket
+        # push tiny regardless of artifact size.
+        push = await show_on_second_screen(
+            content="",
+            content_url=content_url,
+            content_type=content_type,
+            filename=filename,
+        )
         msg += f"\n{push}"
     return msg
 
