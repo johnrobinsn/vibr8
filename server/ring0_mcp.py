@@ -977,38 +977,73 @@ async def push_file_to_second_screen(
     return "\n".join(results)
 
 
+def _format_size(num_bytes: int) -> str:
+    """Render a byte count as a short human string ("42.3 MB")."""
+    if num_bytes < 1024:
+        return f"({num_bytes} B)"
+    for unit in ("KB", "MB", "GB", "TB"):
+        num_bytes_f = num_bytes / 1024
+        if num_bytes_f < 1024 or unit == "TB":
+            return f"({num_bytes_f:.1f} {unit})"
+        num_bytes = int(num_bytes_f)
+    return ""
+
+
 @mcp.tool()
 async def share_artifact(
     title: str,
-    content: str,
+    content: str = "",
     content_type: str = "markdown",
     session_id: str = "",
     session_name: str = "",
     filename: str = "",
     show: bool = True,
+    file_path: str = "",
 ) -> str:
     """Create a persistent artifact and optionally push it to viewers.
 
     Artifacts are saved to the artifact list — a curated collection of persistent
-    content items visible in the viewer pane and on second screens.
+    content items visible in the viewer pane and on second screens. The actual
+    bytes live on disk under ~/.vibr8/artifacts/<id>; clients fetch them from
+    GET /api/artifacts/<id>/content.
 
     Args:
         title: Display title for the artifact.
-        content: The content body (markdown text, HTML, file text, etc.).
-        content_type: One of "markdown", "image", "file", "pdf", "html".
+        content: The content body. For text types (markdown/html/file), the
+            literal text. For binary types (image/pdf/audio/download), the
+            base64-encoded bytes. Leave empty when using `file_path`.
+        content_type: One of "markdown", "image", "file", "pdf", "html",
+            "audio", "download". The "download" type marks an artifact as a
+            file the user should save to disk — APKs, ZIPs, installers, etc.
+            The server sends Content-Disposition: attachment and the right
+            MIME for the extension (.apk gets application/vnd.android.package-
+            archive so Android shows the install prompt when the user taps).
         session_id: Source session ID (for attribution).
         session_name: Source session name (for attribution).
-        filename: Display filename (for file-type artifacts).
-        show: If True (default), also push the content to all viewers immediately.
+        filename: Display filename. For "download" artifacts the extension
+            drives the MIME type, so set this (e.g. "app-release.apk"). If
+            `file_path` is set and `filename` is empty, the basename of the
+            file is used.
+        show: If True (default), also push the content to all viewers
+            immediately. For "download" artifacts this opens the download
+            card in the viewer pane; the user still taps the button to save.
+        file_path: Server-local path to a file. When set, the server copies
+            the file straight into the artifact store and `content` is
+            ignored. Use this for large binaries (APKs, archives) to avoid
+            base64-encoding multi-megabyte payloads over MCP stdio.
     """
-    result = await _post("/artifacts", {
+    body: dict[str, Any] = {
         "title": title,
         "type": content_type,
-        "content": content,
         "sourceSessionId": session_id or None,
         "sourceSessionName": session_name or None,
         "filename": filename or None,
-    })
+    }
+    if file_path:
+        body["sourceFilePath"] = file_path
+    else:
+        body["content"] = content
+    result = await _post("/artifacts", body)
     if result.get("error"):
         return f"Error: {result['error']}"
     artifact_id = result.get("id", "")
@@ -1016,6 +1051,9 @@ async def share_artifact(
     msg = f"Created artifact '{title}'"
     if artifact_id:
         msg += f" (id={artifact_id[:8]})"
+    size = result.get("size")
+    if isinstance(size, (int, float)) and size > 0:
+        msg += f" {_format_size(int(size))}"
     if content_url:
         msg += f"\nURL: {content_url}"
     if show:

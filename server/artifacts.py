@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -25,7 +26,16 @@ _ARTIFACTS_PATH = Path.home() / ".vibr8" / "artifacts.json"
 _CONTENT_DIR = Path.home() / ".vibr8" / "artifacts"
 
 # Types whose `content` field is base64-encoded bytes (rather than text).
-_BINARY_TYPES = {"audio", "image", "pdf"}
+# `download` is binary too, but it's served with Content-Disposition: attachment
+# (see server/routes.py) so the browser saves it rather than rendering inline.
+_BINARY_TYPES = {"audio", "image", "pdf", "download"}
+
+# Types meant to be downloaded rather than rendered inline.
+_DOWNLOAD_TYPES = {"download"}
+
+
+def is_download_type(artifact_type: str) -> bool:
+    return artifact_type in _DOWNLOAD_TYPES
 
 
 # ── Index I/O ────────────────────────────────────────────────────────────────
@@ -87,16 +97,36 @@ def _mime_for(artifact: dict) -> str:
         return "text/markdown; charset=utf-8"
     if typ == "file":
         return "text/plain; charset=utf-8"
+    if typ == "download":
+        # Pick the MIME the browser (and Android, for APKs) expects so the
+        # native install / save dialog fires correctly. Fall back to
+        # octet-stream for anything we don't know.
+        return {
+            "apk": "application/vnd.android.package-archive",
+            "zip": "application/zip",
+            "tar": "application/x-tar",
+            "gz": "application/gzip", "tgz": "application/gzip",
+            "bz2": "application/x-bzip2",
+            "xz": "application/x-xz",
+            "7z": "application/x-7z-compressed",
+            "dmg": "application/x-apple-diskimage",
+            "iso": "application/x-iso9660-image",
+            "deb": "application/vnd.debian.binary-package",
+            "rpm": "application/x-rpm",
+            "exe": "application/octet-stream",
+            "msi": "application/octet-stream",
+            "bin": "application/octet-stream",
+        }.get(ext, "application/octet-stream")
     return "application/octet-stream"
 
 
-def _write_content(artifact_id: str, artifact_type: str, raw_content: str) -> None:
+def _write_content(artifact_id: str, artifact_type: str, raw_content: str) -> int:
     """Write the raw `content` field to disk in its canonical form.
 
-    Binary types (audio/image/pdf) come in as base64 strings; we decode them
-    so the file holds real bytes and `<audio>`/`<img>`/`<iframe>` can stream
-    them directly without per-request decoding. Text types are written as
-    UTF-8.
+    Binary types come in as base64 strings; we decode them so the file holds
+    real bytes and `<audio>`/`<img>`/`<iframe>`/`<a download>` can stream them
+    directly without per-request decoding. Text types are written as UTF-8.
+    Returns the number of bytes written.
     """
     _CONTENT_DIR.mkdir(parents=True, exist_ok=True)
     path = _content_path(artifact_id)
@@ -108,9 +138,24 @@ def _write_content(artifact_id: str, artifact_type: str, raw_content: str) -> No
             # bytes so we don't lose data, but the rendered output may be junk.
             decoded = raw_content.encode("utf-8", errors="replace") if isinstance(raw_content, str) else b""
         path.write_bytes(decoded)
-    else:
-        text = raw_content if isinstance(raw_content, str) else ""
-        path.write_text(text, encoding="utf-8")
+        return len(decoded)
+    text = raw_content if isinstance(raw_content, str) else ""
+    encoded = text.encode("utf-8")
+    path.write_bytes(encoded)
+    return len(encoded)
+
+
+def _copy_from_file(artifact_id: str, source_path: str) -> int:
+    """Copy a local file into the artifact store. Used by `sourceFilePath` to
+    avoid the base64 round-trip on large binary payloads (e.g. APKs). Returns
+    the size of the copied file. Raises on failure."""
+    src = Path(source_path).expanduser().resolve()
+    if not src.is_file():
+        raise FileNotFoundError(f"sourceFilePath does not exist: {source_path}")
+    _CONTENT_DIR.mkdir(parents=True, exist_ok=True)
+    dst = _content_path(artifact_id)
+    shutil.copyfile(src, dst)
+    return dst.stat().st_size
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -151,19 +196,30 @@ def get_artifact(artifact_id: str) -> dict | None:
 def create_artifact(username: str, data: dict) -> dict:
     artifact_id = str(uuid.uuid4())
     artifact_type = data.get("type", "markdown")
-    raw_content = data.get("content", "")
+    source_file_path = data.get("sourceFilePath")
+    filename = data.get("filename")
 
-    _write_content(artifact_id, artifact_type, raw_content)
+    if source_file_path:
+        # Server-local file path — copy bytes directly, skip the base64
+        # round-trip. The caller (Ring0 / a session MCP) is co-located with
+        # the vibr8 server so this just hits the local filesystem.
+        size = _copy_from_file(artifact_id, source_file_path)
+        if not filename:
+            filename = Path(source_file_path).name
+    else:
+        raw_content = data.get("content", "")
+        size = _write_content(artifact_id, artifact_type, raw_content)
 
     artifact = {
         "id": artifact_id,
         "title": data.get("title", "Untitled"),
         "type": artifact_type,
         "contentUrl": _content_url(artifact_id),
+        "size": size,
         "sourceSessionId": data.get("sourceSessionId"),
         "sourceSessionName": data.get("sourceSessionName"),
         "createdAt": time.time(),
-        "filename": data.get("filename"),
+        "filename": filename,
         "username": username,
     }
     artifacts = _load()

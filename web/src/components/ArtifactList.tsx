@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
 import type { Artifact } from "../types.js";
+import { formatBytes } from "./ContentRenderer.js";
 
 const TYPE_ICONS: Record<string, string> = {
   markdown: "M4 4h16v12H4V4zm2 2v8h3l3-4 3 4h3V6H6z",
@@ -10,6 +11,7 @@ const TYPE_ICONS: Record<string, string> = {
   pdf: "M6 2h8l4 4v12a2 2 0 01-2 2H6a2 2 0 01-2-2V4a2 2 0 012-2zm7 0v5h5M9 13h6M9 16h4",
   html: "M4 4l2 14 6 2 6-2 2-14H4zm5 4h6l-.5 6-2.5 1-2.5-1-.2-2",
   audio: "M9 17V5l10-2v12M9 17a3 3 0 11-6 0 3 3 0 016 0zm10-2a3 3 0 11-6 0 3 3 0 016 0z",
+  download: "M12 3v12m0 0l-4-4m4 4l4-4M5 21h14",
 };
 
 function TypeIcon({ type }: { type: string }) {
@@ -97,28 +99,53 @@ export function ArtifactList({ onSelect }: { onSelect: (artifact: Artifact) => v
         </div>
       )}
       <div className="flex-1 overflow-auto">
-        {filtered.map((artifact) => (
-          <button
-            key={artifact.id}
-            onClick={() => onSelect(artifact)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setContextMenu({ x: e.clientX, y: e.clientY, artifact });
-            }}
-            className="w-full text-left px-3 py-2.5 border-b border-cc-border hover:bg-cc-bg-hover transition-colors group"
-          >
-            <div className="flex items-start gap-2">
-              <TypeIcon type={artifact.type} />
-              <div className="min-w-0 flex-1">
-                <div className="text-sm text-cc-fg truncate">{artifact.title}</div>
-                <div className="flex items-center gap-2 text-[10px] text-cc-fg-muted mt-0.5">
-                  {artifact.sourceSessionName && <span className="truncate">{artifact.sourceSessionName}</span>}
-                  <span>{timeAgo(artifact.createdAt)}</span>
+        {filtered.map((artifact) => {
+          const isDownload = artifact.type === "download";
+          const sizeLabel = formatBytes(artifact.size);
+          return (
+            <div
+              key={artifact.id}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu({ x: e.clientX, y: e.clientY, artifact });
+              }}
+              className="flex items-stretch border-b border-cc-border hover:bg-cc-bg-hover transition-colors group"
+            >
+              <button
+                onClick={() => onSelect(artifact)}
+                className="flex-1 min-w-0 text-left px-3 py-2.5"
+              >
+                <div className="flex items-start gap-2">
+                  <TypeIcon type={artifact.type} />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm text-cc-fg truncate">{artifact.title}</div>
+                    <div className="flex items-center gap-2 text-[10px] text-cc-fg-muted mt-0.5">
+                      {artifact.sourceSessionName && <span className="truncate">{artifact.sourceSessionName}</span>}
+                      <span>{timeAgo(artifact.createdAt)}</span>
+                      {isDownload && sizeLabel && <span>{sizeLabel}</span>}
+                    </div>
+                  </div>
                 </div>
-              </div>
+              </button>
+              {isDownload && artifact.contentUrl && (
+                // Sibling of the row button, not nested — keeps HTML valid
+                // and stops the row's onSelect from firing on tap.
+                <a
+                  href={artifact.contentUrl}
+                  download={artifact.filename ?? ""}
+                  onClick={(e) => e.stopPropagation()}
+                  className="shrink-0 px-3 flex items-center text-cc-fg-muted hover:text-cc-accent transition-colors"
+                  title={`Download${artifact.filename ? ` ${artifact.filename}` : ""}`}
+                  aria-label="Download"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} className="w-5 h-5">
+                    <path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </a>
+              )}
             </div>
-          </button>
-        ))}
+          );
+        })}
       </div>
       {contextMenu && (
         <div

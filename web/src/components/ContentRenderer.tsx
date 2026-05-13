@@ -17,7 +17,20 @@ type ContentLike = {
   contentUrl?: string;
   filename?: string;
   nodeId?: string;
+  size?: number;
 };
+
+export function formatBytes(n: number | undefined | null): string {
+  if (!n || n <= 0) return "";
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let val = n / 1024;
+  for (const u of units) {
+    if (val < 1024 || u === "TB") return `${val.toFixed(val < 10 ? 1 : 0)} ${u}`;
+    val /= 1024;
+  }
+  return "";
+}
 
 const TEXT_TYPES = new Set(["markdown", "html", "file"]);
 
@@ -205,6 +218,53 @@ export function PushedContentView({
           title="HTML Content"
           sandbox="allow-scripts allow-same-origin"
         />
+        <BackButton onClick={onBack} label={backLabel} />
+      </div>
+    );
+  }
+
+  if (content.type === "download") {
+    // Download artifacts are binary files (APKs, ZIPs, installers). The
+    // server sends Content-Disposition: attachment so the browser saves
+    // them rather than navigating into them. APKs ride the right MIME so
+    // Android's package installer fires on tap.
+    const url = content.contentUrl ?? "";
+    const isApk = (content.filename ?? "").toLowerCase().endsWith(".apk");
+    const sizeLabel = formatBytes(content.size);
+    return (
+      <div className="h-full flex flex-col items-center justify-center p-8 gap-4">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.2} className="w-16 h-16 text-cc-fg-muted">
+          <path
+            d={isApk
+              ? "M7 8a5 5 0 0110 0v4H7V8zm-1 6h12v6a2 2 0 01-2 2H8a2 2 0 01-2-2v-6zm3-8l-1.5-2M15 6l1.5-2M10 18v-2M14 18v-2"
+              : "M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"}
+            strokeLinecap="round" strokeLinejoin="round"
+          />
+        </svg>
+        {content.filename && (
+          <div className="text-sm font-mono text-cc-fg text-center break-all max-w-lg">
+            {content.filename}
+          </div>
+        )}
+        {sizeLabel && (
+          <div className="text-xs text-cc-fg-muted">{sizeLabel}</div>
+        )}
+        {url ? (
+          <a
+            href={url}
+            download={content.filename || ""}
+            className="px-6 py-2 rounded bg-cc-accent text-white text-sm font-medium hover:opacity-90 transition-opacity"
+          >
+            Download
+          </a>
+        ) : (
+          <div className="text-red-400 text-sm">No download URL</div>
+        )}
+        {isApk && (
+          <div className="text-xs text-cc-fg-muted max-w-lg text-center">
+            Tap on an Android device to install. Requires "Install unknown apps" enabled for your browser.
+          </div>
+        )}
         <BackButton onClick={onBack} label={backLabel} />
       </div>
     );

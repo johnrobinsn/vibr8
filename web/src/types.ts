@@ -119,6 +119,7 @@ export interface Artifact {
   // (pre-on-disk) artifacts that still have their content inlined here.
   content: string;
   contentUrl?: string | null;
+  size?: number;
   sourceSessionId: string | null;
   sourceSessionName: string | null;
   createdAt: number;

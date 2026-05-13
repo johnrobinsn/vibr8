@@ -2290,15 +2290,22 @@ def create_routes(
             return web.Response(status=404, text="Not found")
         body, mime, filename = result
 
+        # Download-type artifacts get `attachment` so the browser saves them
+        # instead of trying to render inline. The right MIME on top (e.g.
+        # application/vnd.android.package-archive for an .apk) is what makes
+        # mobile Chrome show the install prompt when the user taps.
+        artifact = artifacts.get_artifact(artifact_id)
+        disposition = "attachment" if artifact and artifacts.is_download_type(artifact.get("type", "")) else "inline"
+
         headers = {
             "Content-Type": mime,
             "Cache-Control": "public, max-age=31536000, immutable",
         }
         if filename:
             safe = filename.replace('"', "").replace("\r", "").replace("\n", "")
-            headers["Content-Disposition"] = f'inline; filename="{safe}"'
+            headers["Content-Disposition"] = f'{disposition}; filename="{safe}"'
         else:
-            headers["Content-Disposition"] = "inline"
+            headers["Content-Disposition"] = disposition
         return web.Response(body=body, headers=headers)
 
     # ── Voice Logs ───────────────────────────────────────────────────────
