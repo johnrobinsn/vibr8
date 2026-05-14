@@ -13,6 +13,7 @@ import dataclasses
 import logging
 import re
 import threading
+import time
 import warnings
 from collections import Counter
 from dataclasses import dataclass
@@ -338,6 +339,7 @@ class STT:
             })
             sm.prompt_segments.clear()
             sm.prompt_wait_counter = 0
+            sm.last_segment_appended_at = None
         self._segment = []
         self._capture_time = 0.0
         self._segment_time_begin = 0.0
@@ -362,6 +364,13 @@ class STT:
                 self.eou_counter = 0
                 self.prompt_segments: list[str] = []
                 self.prompt_wait_counter = 0
+                # Wall-clock timestamp (time.monotonic()) of the most recent
+                # append to prompt_segments. Used by AsyncSTT's watchdog to
+                # force a final_transcript when the WebRTC track stops
+                # delivering frames mid-PROMPT_WAIT — the frame-counted
+                # prompt_wait_counter only advances on incoming silence
+                # frames, so without this the segment hangs forever.
+                self.last_segment_appended_at: Optional[float] = None
 
                 def process_segment(s: list, b: np.ndarray) -> None:
                     s.append(b)
@@ -524,6 +533,7 @@ class STT:
 
                     # Accumulate segment for prompt assembly
                     self.prompt_segments.append(text.strip())
+                    self.last_segment_appended_at = time.monotonic()
                     joined = " ".join(self.prompt_segments)
                     stt._notify_listeners("interim_transcript", {
                         "transcript": joined,
@@ -575,6 +585,7 @@ class STT:
                         })
                         self.prompt_segments.clear()
                         self.prompt_wait_counter = 0
+                        self.last_segment_appended_at = None
                         self.state = STT.State.IDLE
 
                 self.transitions = {
@@ -659,10 +670,58 @@ class AsyncSTT(STT):
         self._worker = ThreadWorker(support_out_q=False)
         self._lock = threading.Lock()
         self._loop = asyncio.get_event_loop()
+        # Wall-clock watchdog: protects against PROMPT_WAIT freezing when the
+        # WebRTC track stops delivering frames mid-utterance. See the comment
+        # in `_create_state_machine` on `last_segment_appended_at`.
+        self._watchdog_task: asyncio.Task[None] = asyncio.create_task(self._watchdog())
 
     def stop(self) -> None:
         """Shut down the worker thread."""
+        self._watchdog_task.cancel()
         self._worker.stop()
+
+    # ── Wall-clock watchdog ───────────────────────────────────────────────
+
+    async def _watchdog(self) -> None:
+        """Background timer that force-flushes a stalled PROMPT_WAIT.
+
+        The frame-counted `prompt_wait_silence` only advances when audio
+        frames arrive. If the upstream goes idle (Opus DTX, mobile background
+        audio scheduling, transient network gap), no frames arrive and the
+        state machine sits in PROMPT_WAIT with `prompt_segments` populated
+        but never emitting `final_transcript`. This task wakes periodically
+        on the asyncio loop (independent of audio frames), checks
+        `last_segment_appended_at`, and enqueues a `flush()` on the worker
+        if wall-clock time exceeds `prompt_timeout_ms` plus a small grace
+        period (so the frame path wins in the common case and we don't
+        double-fire).
+        """
+        check_interval = 0.3
+        grace_seconds = 0.2
+        while True:
+            try:
+                await asyncio.sleep(check_interval)
+                sm = self._state_machine
+                last_at = sm.last_segment_appended_at
+                if last_at is None or not sm.prompt_segments:
+                    continue
+                elapsed = time.monotonic() - last_at
+                timeout_s = self._params.prompt_timeout_ms / 1000.0 + grace_seconds
+                if elapsed < timeout_s:
+                    continue
+                # Clear the timestamp synchronously so a slow flush doesn't
+                # let us re-fire on the next tick.
+                sm.last_segment_appended_at = None
+                logger.warning(
+                    "[stt] watchdog: PROMPT_WAIT stalled %.2fs (timeout=%.2fs) — "
+                    "frame path stopped delivering, forcing flush of %d segment(s)",
+                    elapsed, timeout_s, len(sm.prompt_segments),
+                )
+                self.flush()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[stt] watchdog error (continuing)")
 
     # Override listener notification to dispatch back to the event loop.
 
