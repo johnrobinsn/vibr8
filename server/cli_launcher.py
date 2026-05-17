@@ -252,6 +252,21 @@ class CliLauncher:
 
         self._sessions[session_id] = info
 
+        # Inject worktree guardrails for any backend that supports project-level
+        # agent context (Claude reads .claude/CLAUDE.md; codex/opencode/hermes
+        # read AGENTS.md). Skipped for terminal/computer-use.
+        if info.isWorktree and info.branch and backend_type not in ("computer-use", "terminal"):
+            parent_branch: Optional[str] = None
+            if info.actualBranch and info.actualBranch != info.branch:
+                parent_branch = info.branch
+            self._inject_worktree_guardrails(
+                info.cwd,
+                info.actualBranch or info.branch,
+                info.repoRoot or "",
+                parent_branch,
+                backend_type=backend_type,
+            )
+
         if backend_type == "computer-use":
             # Computer-use runs in-process — no subprocess to spawn
             info.state = "connected"
@@ -315,6 +330,21 @@ class CliLauncher:
                 pass
 
         info.state = "starting"
+
+        # Re-inject worktree guardrails (matches launch() behavior; useful if
+        # the user deleted the context file between sessions).
+        backend_type = info.backendType or "claude"
+        if info.isWorktree and info.branch and backend_type not in ("computer-use", "terminal"):
+            parent_branch: Optional[str] = None
+            if info.actualBranch and info.actualBranch != info.branch:
+                parent_branch = info.branch
+            self._inject_worktree_guardrails(
+                info.cwd,
+                info.actualBranch or info.branch,
+                info.repoRoot or "",
+                parent_branch,
+                backend_type=backend_type,
+            )
 
         if info.backendType == "computer-use":
             # Computer-use is in-process — just mark connected and re-create
@@ -411,17 +441,8 @@ class CliLauncher:
         if options.mcpConfig:
             args.extend(["--mcp-config", options.mcpConfig, "--strict-mcp-config"])
 
-        # Inject CLAUDE.md guardrails for worktree sessions
-        if info.isWorktree and info.branch:
-            parent_branch: Optional[str] = None
-            if info.actualBranch and info.actualBranch != info.branch:
-                parent_branch = info.branch
-            self._inject_worktree_guardrails(
-                info.cwd,
-                info.actualBranch or info.branch,
-                info.repoRoot or "",
-                parent_branch,
-            )
+        # Worktree guardrails are injected by launch() / relaunch() before
+        # dispatching to the spawn function.
 
         # Always pass -p "" for headless mode. When relaunching, also pass --resume
         # to restore the CLI's conversation context.
@@ -680,6 +701,7 @@ class CliLauncher:
             cwd=info.cwd,
             approval_mode=options.permissionMode,
             mcp_servers=mcp_servers,
+            session_id_to_resume=info.cliSessionId,
         ))
 
         def _on_init_error(error: str) -> None:
@@ -688,6 +710,14 @@ class CliLauncher:
             if session:
                 session.state = "exited"
                 session.exitCode = 1
+                # If init failed while trying to resume, clear the saved id
+                # so the next relaunch starts fresh.
+                if info.cliSessionId:
+                    logger.warning(
+                        "Clearing cliSessionId for session %s after failed Hermes init",
+                        session_id,
+                    )
+                    session.cliSessionId = None
             self._persist_state()
 
         adapter.on_init_error(_on_init_error)
@@ -697,8 +727,9 @@ class CliLauncher:
 
         info.state = "connected"
 
+        spawned_at = time.time() * 1000
         task = asyncio.create_task(
-            self._monitor_exit_hermes(session_id, proc),
+            self._monitor_exit_hermes(session_id, proc, spawned_at),
         )
         self._monitor_tasks[session_id] = task
 
@@ -708,6 +739,7 @@ class CliLauncher:
         self,
         session_id: str,
         proc: asyncio.subprocess.Process,
+        spawned_at: float,
     ) -> None:
         """Wait for a Hermes subprocess to exit and update state."""
         exit_code = await proc.wait()
@@ -717,6 +749,18 @@ class CliLauncher:
         if session:
             session.state = "exited"
             session.exitCode = exit_code
+
+            # If Hermes died within ~5s of spawning and we had a session to
+            # resume, treat that as a failed session/load and start fresh on
+            # the next relaunch (same heuristic as _monitor_exit_cli).
+            uptime = time.time() * 1000 - spawned_at
+            if uptime < 5000 and session.cliSessionId:
+                logger.error(
+                    "Hermes session %s exited immediately after session/load (%.0fms). "
+                    "Clearing cliSessionId for fresh start.",
+                    session_id, uptime,
+                )
+                session.cliSessionId = None
 
         self._processes.pop(session_id, None)
         self._monitor_tasks.pop(session_id, None)
@@ -918,10 +962,13 @@ class CliLauncher:
         branch: str,
         repo_root: str,
         parent_branch: Optional[str] = None,
+        backend_type: str = "claude",
     ) -> None:
-        """Inject a CLAUDE.md file into the worktree with branch guardrails.
+        """Inject branch-guardrails into the worktree's agent context file.
 
-        Only injects into actual worktree directories, never the main repo.
+        Claude reads ``.claude/CLAUDE.md``; codex/opencode/hermes read
+        ``AGENTS.md`` at the project root. Only injects into actual worktree
+        directories, never the main repo.
         """
         wt = Path(worktree_path)
 
@@ -963,38 +1010,51 @@ class CliLauncher:
             f"{MARKER_END}"
         )
 
-        claude_dir = wt / ".claude"
-        claude_md_path = claude_dir / "CLAUDE.md"
-
-        try:
-            claude_dir.mkdir(parents=True, exist_ok=True)
-
-            if claude_md_path.exists():
-                existing = claude_md_path.read_text(encoding="utf-8")
-                # Replace existing guardrails section or append
-                if MARKER_START in existing:
-                    before = existing[: existing.index(MARKER_START)]
-                    end_idx = existing.find(MARKER_END)
-                    after = (
-                        existing[end_idx + len(MARKER_END) :]
-                        if end_idx >= 0
-                        else ""
-                    )
-                    claude_md_path.write_text(
-                        before + guardrails + after, encoding="utf-8",
-                    )
-                else:
-                    claude_md_path.write_text(
-                        existing + "\n\n" + guardrails, encoding="utf-8",
-                    )
-            else:
-                claude_md_path.write_text(guardrails, encoding="utf-8")
-
-            logger.info("Injected worktree guardrails for branch %s", branch)
-        except Exception:
-            logger.warning(
-                "Failed to inject worktree guardrails", exc_info=True,
+        if backend_type == "claude":
+            target_paths = [wt / ".claude" / "CLAUDE.md"]
+        elif backend_type in ("codex", "opencode", "hermes"):
+            target_paths = [wt / "AGENTS.md"]
+        else:
+            logger.info(
+                "Skipping guardrails injection: no known context file for backend %s",
+                backend_type,
             )
+            return
+
+        for target in target_paths:
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+
+                if target.exists():
+                    existing = target.read_text(encoding="utf-8")
+                    # Replace existing guardrails section or append
+                    if MARKER_START in existing:
+                        before = existing[: existing.index(MARKER_START)]
+                        end_idx = existing.find(MARKER_END)
+                        after = (
+                            existing[end_idx + len(MARKER_END) :]
+                            if end_idx >= 0
+                            else ""
+                        )
+                        target.write_text(
+                            before + guardrails + after, encoding="utf-8",
+                        )
+                    else:
+                        target.write_text(
+                            existing + "\n\n" + guardrails, encoding="utf-8",
+                        )
+                else:
+                    target.write_text(guardrails, encoding="utf-8")
+
+                logger.info(
+                    "Injected worktree guardrails for branch %s into %s",
+                    branch, target,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to inject worktree guardrails into %s", target,
+                    exc_info=True,
+                )
 
     # ── Session State Mutations ─────────────────────────────────────────────
 
