@@ -55,6 +55,8 @@ make dev
 
 Open [http://localhost:5174](http://localhost:5174) in your browser.
 
+For a complete walkthrough (system packages, GPU setup, ML model requirements, Docker deployment), see **[INSTALL.md](INSTALL.md)**.
+
 ## Commands
 
 | Command              | Description                                    |
