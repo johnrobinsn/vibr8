@@ -172,6 +172,9 @@ class HermesAdapter:
         self._streaming_text: str = ""
         self._msg_counter: int = 0
         self._emitted_tool_use_ids: set[str] = set()
+        # Tracks status updates we have already pushed for a given tool call,
+        # so we don't spam the browser with identical progress events.
+        self._tool_call_last_status: Dict[str, str] = {}
         self._pending_outgoing: List[BrowserOutgoingMessage] = []
         self._pending_approvals: Dict[str, Any] = {}
 
@@ -179,6 +182,12 @@ class HermesAdapter:
         self._turn_start_time: float = 0
         self._total_cost_usd: float = 0
         self._num_turns: int = 0
+
+        # Streaming content-block bracketing: track whether a text/thinking
+        # block is currently "open" within the current turn so we can emit
+        # matching content_block_start / content_block_stop events.
+        self._open_block_type: Optional[str] = None  # "text" | "thinking" | None
+        self._open_block_index: int = 0
 
         if proc.stdout is None or proc.stdin is None:
             raise RuntimeError("Hermes process must have stdio pipes")
@@ -227,8 +236,21 @@ class HermesAdapter:
             asyncio.create_task(self._handle_outgoing_set_model(msg))
             return True
         elif msg_type == "set_permission_mode":
-            logger.warning("[hermes-adapter] Runtime permission mode switching not supported")
-            return False
+            # ACP 0.11.2 has no client→server mode-switch RPC; modes are
+            # driven by Hermes itself via current_mode_update notifications.
+            # Acknowledge the toggle and broadcast a session_update so the
+            # UI doesn't get stuck "loading".
+            requested_mode = msg.get("mode", "")
+            logger.info(
+                "[hermes-adapter] set_permission_mode(%s): ACP has no runtime "
+                "mode-switch RPC; acknowledging without applying.",
+                requested_mode,
+            )
+            if requested_mode:
+                self._emit({"type": "session_update", "session": {
+                    "permissionMode": requested_mode,
+                }})
+            return True
         return False
 
     def on_browser_message(self, cb: Callable[[dict], None]) -> None:
@@ -403,6 +425,9 @@ class HermesAdapter:
             self._turn_start_time = time.monotonic()
             self._streaming_text = ""
             self._emitted_tool_use_ids.clear()
+            self._tool_call_last_status.clear()
+            self._open_block_type = None
+            self._open_block_index = 0
 
             self._emit({"type": "stream_event", "event": {"type": "message_start"}})
 
@@ -503,20 +528,53 @@ class HermesAdapter:
             self._handle_tool_call_update(update)
         elif update_type == "usage_update":
             self._handle_usage_update(update)
-        elif update_type in ("user_message_chunk", "session_info_update", "current_mode_update",
-                             "available_commands_update", "plan", "config_option_update"):
+        elif update_type == "available_commands_update":
+            self._handle_available_commands(update)
+        elif update_type == "current_mode_update":
+            self._handle_current_mode(update)
+        elif update_type in ("user_message_chunk", "session_info_update",
+                             "plan", "config_option_update"):
             pass
         else:
             logger.debug("[hermes-adapter] Unhandled session update type: %s", update_type)
+
+    def _open_block(self, block_type: str) -> None:
+        """Open a streaming content block of the given type, closing any
+        existing block first. Idempotent if the same block is already open."""
+        if self._open_block_type == block_type:
+            return
+        self._close_open_block()
+        self._open_block_index += 1
+        if block_type == "thinking":
+            content_block: Dict[str, Any] = {"type": "thinking", "thinking": ""}
+        else:
+            content_block = {"type": "text", "text": ""}
+        self._emit({"type": "stream_event", "event": {
+            "type": "content_block_start",
+            "index": self._open_block_index,
+            "content_block": content_block,
+        }})
+        self._open_block_type = block_type
+
+    def _close_open_block(self) -> None:
+        if self._open_block_type is None:
+            return
+        self._emit({"type": "stream_event", "event": {
+            "type": "content_block_stop",
+            "index": self._open_block_index,
+        }})
+        self._open_block_type = None
 
     def _handle_agent_message_chunk(self, params: Dict[str, Any]) -> None:
         content = params.get("content", {})
         if content.get("type") == "text":
             text = content.get("text", "")
             if text:
+                self._open_block("text")
                 self._streaming_text += text
                 self._emit({"type": "stream_event", "event": {
                     "type": "content_block_delta",
+                    "index": self._open_block_index,
                     "delta": {"type": "text_delta", "text": text},
                 }})
 
@@ -525,25 +583,44 @@ class HermesAdapter:
         if content.get("type") == "text":
             text = content.get("text", "")
             if text:
+                self._open_block("thinking")
                 self._emit({"type": "stream_event", "event": {
                     "type": "content_block_delta",
+                    "index": self._open_block_index,
                     "delta": {"type": "thinking_delta", "thinking": text},
                 }})
 
-    def _handle_tool_call_start(self, params: Dict[str, Any]) -> None:
-        tool_call_id = params.get("toolCallId", str(uuid.uuid4()))
-        title = params.get("title", "tool_call")
-        raw_input = params.get("rawInput")
+    def _handle_available_commands(self, params: Dict[str, Any]) -> None:
+        commands = params.get("availableCommands") or params.get("commands") or []
+        names: List[str] = []
+        for c in commands:
+            if isinstance(c, dict):
+                name = c.get("name") or c.get("id") or c.get("title")
+                if isinstance(name, str) and name:
+                    names.append(name)
+            elif isinstance(c, str):
+                names.append(c)
+        self._emit({"type": "session_update", "session": {
+            "slash_commands": names,
+        }})
 
-        if tool_call_id in self._emitted_tool_use_ids:
-            return
+    def _handle_current_mode(self, params: Dict[str, Any]) -> None:
+        mode = params.get("currentMode") or params.get("mode")
+        if isinstance(mode, dict):
+            mode = mode.get("name") or mode.get("id")
+        if isinstance(mode, str) and mode:
+            self._emit({"type": "session_update", "session": {
+                "permissionMode": mode,
+            }})
 
-        self._emitted_tool_use_ids.add(tool_call_id)
-
+    def _emit_tool_use(self, tool_call_id: str, title: str, raw_input: Any) -> None:
+        """Emit a tool_use assistant message for a Hermes tool_call."""
+        tool_input = (
+            raw_input if isinstance(raw_input, dict)
+            else {"input": str(raw_input) if raw_input else ""}
+        )
         self._flush_streaming_text()
-
-        tool_input = raw_input if isinstance(raw_input, dict) else {"input": str(raw_input) if raw_input else ""}
-
+        self._close_open_block()
         self._msg_counter += 1
         msg_id = f"hermes-msg-{self._msg_counter}"
         self._emit({
@@ -560,6 +637,16 @@ class HermesAdapter:
             },
         })
 
+    def _handle_tool_call_start(self, params: Dict[str, Any]) -> None:
+        tool_call_id = params.get("toolCallId", str(uuid.uuid4()))
+        title = params.get("title", "tool_call")
+        raw_input = params.get("rawInput")
+
+        if tool_call_id in self._emitted_tool_use_ids:
+            return
+        self._emitted_tool_use_ids.add(tool_call_id)
+        self._emit_tool_use(tool_call_id, title, raw_input)
+
     def _handle_tool_call_update(self, params: Dict[str, Any]) -> None:
         tool_call_id = params.get("toolCallId", "")
         status = params.get("status")
@@ -567,26 +654,26 @@ class HermesAdapter:
         content_list = params.get("content", [])
 
         if tool_call_id not in self._emitted_tool_use_ids:
+            # Backfill the tool_use block if we missed the start event.
             self._emitted_tool_use_ids.add(tool_call_id)
             title = params.get("title", "tool_call")
-            raw_input = params.get("rawInput")
-            tool_input = raw_input if isinstance(raw_input, dict) else {"input": str(raw_input) if raw_input else ""}
-            self._flush_streaming_text()
-            self._msg_counter += 1
-            msg_id = f"hermes-msg-{self._msg_counter}"
-            self._emit({
-                "type": "assistant",
-                "msg_id": msg_id,
-                "message": {
-                    "role": "assistant",
-                    "content": [{
-                        "type": "tool_use",
-                        "id": tool_call_id,
-                        "name": title,
-                        "input": tool_input,
-                    }],
-                },
-            })
+            self._emit_tool_use(tool_call_id, title, params.get("rawInput"))
+
+        # Surface in-flight progress so the UI can show "running" / "pending"
+        # rather than jumping from start straight to result. Dedup repeated
+        # statuses for the same tool call.
+        if isinstance(status, str) and status not in ("completed", "errored"):
+            last = self._tool_call_last_status.get(tool_call_id)
+            if status != last:
+                self._tool_call_last_status[tool_call_id] = status
+                self._emit({"type": "stream_event", "event": {
+                    "type": "tool_use_progress",
+                    "tool_use_id": tool_call_id,
+                    "status": status,
+                }})
+            # Don't emit a result yet for in-progress updates.
+            if raw_output is None and not content_list:
+                return
 
         if status in ("completed", "errored") or raw_output is not None:
             output_text = ""
@@ -603,6 +690,8 @@ class HermesAdapter:
                 output_text = "\n".join(parts)
 
             is_error = status == "errored"
+            # Clear progress tracking once we have a final outcome.
+            self._tool_call_last_status.pop(tool_call_id, None)
 
             self._msg_counter += 1
             msg_id = f"hermes-msg-{self._msg_counter}"
@@ -670,6 +759,9 @@ class HermesAdapter:
         duration_ms = int((time.monotonic() - self._turn_start_time) * 1000) if self._turn_start_time else 0
         self._num_turns += 1
         self._emitted_tool_use_ids.clear()
+        self._tool_call_last_status.clear()
+        # Close any text/thinking block still open from streaming deltas.
+        self._close_open_block()
 
         result: CLIResultMessage = {
             "type": "result",
