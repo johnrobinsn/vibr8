@@ -471,8 +471,8 @@ def create_routes(
         android_node = android_registry.get_node(target_node) if android_registry and target_node else None
 
         if android_node:
-            if backend in ("claude", "codex", "opencode"):
-                # Android node can't run Claude/Codex/OpenCode — create on host with associatedNodeId
+            if backend in ("claude", "codex", "opencode", "hermes"):
+                # Android node can't run Claude/Codex/OpenCode/Hermes — create on host with associatedNodeId
                 body.pop("nodeId", None)
                 body["associatedNodeId"] = target_node
             # computer-use sessions for Android nodes also run on host (with nodeId passed through)

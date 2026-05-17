@@ -1996,7 +1996,7 @@ class WsBridge:
         if ring0.events_muted:
             return
         ring0_session = self._sessions.get(ring0.session_id)
-        if not ring0_session or not ring0_session.cli_socket:
+        if not ring0_session or not self.is_cli_connected(ring0.session_id):
             return
 
         router = getattr(self, "_ring0_event_router", None)

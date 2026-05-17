@@ -95,10 +95,11 @@ async def create_session(
     Args:
         name: Human-readable session name (e.g., "auth refactor", "frontend tests",
               "Desktop: open Chrome").
-        backend: Backend type — "claude" (default), "codex", "opencode", or "computer-use".
+        backend: Backend type — "claude" (default), "codex", "opencode", "hermes", or "computer-use".
                  Use "opencode" for non-Anthropic models (Gemini, GPT, Grok, Groq, etc.).
+                 Use "hermes" for the Hermes ACP agent (multi-provider, configured via ~/.hermes/config.yaml).
                  Use "computer-use" for desktop/Android GUI tasks (opens apps, clicks, types).
-        project_dir: Working directory for the session. Only used for claude/codex/opencode backends.
+        project_dir: Working directory for the session. Only used for claude/codex/opencode/hermes backends.
                      If empty, creates /mntc/code/{slugified-name}.
         model: Optional model override (e.g., "claude-sonnet-4-6").
         initial_message: Optional first message to send to the session after creation.
@@ -108,8 +109,8 @@ async def create_session(
                  locally), the session runs on the host but is associated with the node.
                  For desktop nodes, the session runs on the remote node.
     """
-    if backend not in ("claude", "codex", "opencode", "computer-use"):
-        return f"Error: backend must be 'claude', 'codex', 'opencode', or 'computer-use', got '{backend}'."
+    if backend not in ("claude", "codex", "opencode", "hermes", "computer-use"):
+        return f"Error: backend must be 'claude', 'codex', 'opencode', 'hermes', or 'computer-use', got '{backend}'."
 
     body: dict[str, Any] = {"backend": backend, "name": name}
     if model:
