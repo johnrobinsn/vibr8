@@ -294,17 +294,40 @@ class HermesAdapter:
                 })
                 self._hermes_session_id = result.get("sessionId") or result.get("session_id")
 
-            model = self._options.model or ""
+            current_model = ""
             models_info = result.get("models", {})
             if isinstance(models_info, dict):
                 if models_info.get("current"):
-                    model = models_info["current"]
+                    current_model = models_info["current"]
                 elif models_info.get("availableModels"):
                     for m in models_info["availableModels"]:
                         desc = m.get("description", "")
                         if "current" in desc.lower():
-                            model = m.get("name") or m.get("modelId", model)
+                            current_model = m.get("name") or m.get("modelId", "")
                             break
+
+            # If the caller specified a model (from /api/sessions/create), tell
+            # Hermes to use it. session/new has no model parameter, so we have
+            # to follow up with session/set_model.
+            model = self._options.model or current_model
+            if (
+                self._options.model
+                and self._options.model != current_model
+                and self._hermes_session_id
+            ):
+                try:
+                    await self._transport.call("session/set_model", {
+                        "sessionId": self._hermes_session_id,
+                        "model": self._options.model,
+                    })
+                    model = self._options.model
+                except Exception as exc:
+                    logger.warning(
+                        "[hermes-adapter] set_model(%s) failed during init: %s; "
+                        "falling back to %s",
+                        self._options.model, exc, current_model,
+                    )
+                    model = current_model
 
             if self._session_meta_cb is not None:
                 self._session_meta_cb({
