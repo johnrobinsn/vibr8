@@ -285,3 +285,47 @@ When writing tests for a new adapter, cover:
 - [ ] Queued messages flushed on attach
 
 See `server/tests/test_codex_adapter.py` for a complete example (49 tests).
+
+---
+
+## Reference Adapter: Hermes (ACP)
+
+`hermes_adapter.py` translates the Agent Client Protocol (ACP, v0.11.2)
+JSON-RPC over stdio to vibr8's browser message format. The wire transport
+is structurally identical to Codex's, but the method names and event
+shapes are different.
+
+### ACP subset used
+
+| Direction | Method | Purpose |
+|---|---|---|
+| → server | `initialize` | Handshake with `protocolVersion: 1` + `clientInfo`. |
+| ← server | `notifications/initialized` | Acked silently. |
+| → server | `session/new` | Create a fresh session. Takes `cwd` and `mcpServers`. Returns `sessionId` and optional `models.current`. |
+| → server | `session/load` | Resume an existing session by id. Used by `_spawn_hermes` when `info.cliSessionId` is set. |
+| → server | `session/prompt` | Submit a turn. `prompt` is an array of content parts (text + base64 images). Returns `{stopReason}`. |
+| → server | `session/cancel` (notification) | Interrupt the current turn. |
+| → server | `session/set_model` | Switch the active model mid-session. Called after init when an explicit `options.model` differs from `result.models.current`, and on outgoing `set_model` browser messages. |
+| ← server | `session/update` notifications | Streaming + state, discriminated by `sessionUpdate`. Handled: `agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update`, `usage_update`, `available_commands_update`, `current_mode_update`. Silently ignored: `user_message_chunk`, `session_info_update`, `plan`, `config_option_update`. |
+| ← server | `session/request_permission` (request) | Tool approval. Adapter records `rpc_id` under a synthesized `request_id`, emits `permission_request` with `_acp_options` so the response handler can pick the right `optionId`. |
+
+### Key differences from the Codex adapter
+
+- **No per-turn cost.** Codex emits per-turn token usage in `turn/completed`; Hermes only sends cumulative `usage_update` notifications. The adapter accumulates `_total_cost_usd` and reports the same total in every `result` message.
+- **Session resume uses `session/load`** rather than a thread-id parameter on the create call. `_spawn_hermes` passes `info.cliSessionId` as `session_id_to_resume`; `_monitor_exit_hermes` clears it if the process dies within 5s (treated as a failed load).
+- **Streaming bracketing is synthesised.** Hermes emits `agent_message_chunk` / `agent_thought_chunk` only — no item-start/stop events. The adapter tracks `_open_block_type` / `_open_block_index` to emit matching `content_block_start` / `content_block_stop` events around runs of deltas. Blocks close on tool_use, on type change, and at turn end.
+- **Tool calls are emitted as full assistant messages** (`tool_use` + `tool_result` blocks). For non-final statuses (`in_progress`, `pending`) the adapter additionally emits a deduped `tool_use_progress` `stream_event` so the UI can render running indicators between start and result.
+- **Permission options are ACP-shaped.** The browser-side `permission_request` carries an `_acp_options` array; the response handler looks for the first option with `kind` in `{"allow", "allow_always"}` and sends `{"outcome": {"outcome": "selected", "optionId": ...}}` (or `{"outcome": "cancelled"}` for deny).
+- **`available_commands_update`** is mapped to `session_update(slash_commands=[...])`; **`current_mode_update`** is mapped to `session_update(permissionMode=...)`. Both accept either an object (`{name: "plan"}`) or a plain string.
+
+### Known limitations
+
+- **`set_permission_mode` is ack-only.** ACP 0.11.2 has no client→server mode-switch RPC — mode changes come from Hermes via `current_mode_update`. The outgoing handler acknowledges (`returns True`) and broadcasts a `session_update` with the requested mode so the UI badge doesn't get stuck, but the agent's behaviour does not change.
+- **Per-session model selection requires a follow-up call.** `session/new` has no `model` parameter, so the adapter calls `session/set_model` post-init when an explicit model was requested. If that call fails, the adapter falls back to whatever `models.current` Hermes returned.
+- **`plan` updates are ignored.** Mapping ACP's plan structure into vibr8's UI is non-trivial; currently dropped.
+
+### Testing
+
+`server/tests/test_hermes_adapter.py` (50 tests) covers the JSON-RPC transport,
+interface compliance, both init paths, streaming/bracketing, tool calls,
+session updates, permission flow, and the outgoing dispatch table.
