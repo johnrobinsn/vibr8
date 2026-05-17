@@ -299,6 +299,7 @@ class Ring0Manager:
         self._session_id: str = RING0_SESSION_ID
         self._cli_session_id: Optional[str] = None
         self._model: Optional[str] = None
+        self._backend_type: str = "claude"
         self._load_state()
 
     # ── Properties ────────────────────────────────────────────────────────
@@ -318,6 +319,23 @@ class Ring0Manager:
     @property
     def model(self) -> Optional[str]:
         return self._model
+
+    @property
+    def backend_type(self) -> str:
+        return self._backend_type
+
+    def set_backend_type(self, backend_type: str) -> None:
+        """Set the backend type used when launching the Ring0 session.
+
+        Caller is responsible for relaunching the session if it is already
+        running with the previous backend.
+        """
+        if backend_type not in ("claude", "codex", "opencode", "hermes"):
+            raise ValueError(f"Unsupported Ring0 backend: {backend_type}")
+        if backend_type != self._backend_type:
+            self._cli_session_id = None
+        self._backend_type = backend_type
+        self._save_state()
 
     def _get_service_token(self) -> Optional[str]:
         """Get or create a service token for Ring0 MCP API calls."""
@@ -363,13 +381,21 @@ class Ring0Manager:
         self,
         launcher: CliLauncher,
         ws_bridge: WsBridge,
-        backend_type: str = "claude",
+        backend_type: Optional[str] = None,
     ) -> str:
         """Ensure the Ring0 session is running. Always uses the fixed session ID.
 
         On restart, reuses the persisted session and resumes the CLI conversation.
+        If ``backend_type`` is omitted, falls back to the persisted setting.
         Returns the session_id.
         """
+        if backend_type is None:
+            backend_type = self._backend_type
+        else:
+            # Caller explicitly chose a backend — persist the choice.
+            self._backend_type = backend_type
+            self._save_state()
+
         session_id = self._session_id
         work_dir = self._work_dir
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -587,6 +613,7 @@ class Ring0Manager:
                 self._events_muted = data.get("eventsMuted", False)
                 self._cli_session_id = data.get("cliSessionId")
                 self._model = data.get("model")
+                self._backend_type = data.get("backendType", "claude")
             except Exception:
                 logger.warning("[ring0] Failed to load state from %s", self._config_path)
 
@@ -597,6 +624,7 @@ class Ring0Manager:
             "eventsMuted": self._events_muted,
             "sessionId": self._session_id,
             "cliSessionId": self._cli_session_id,
+            "backendType": self._backend_type,
         }
         if self._model:
             data["model"] = self._model

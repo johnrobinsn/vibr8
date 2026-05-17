@@ -1527,6 +1527,7 @@ def create_routes(
             "eventsMuted": ring0_manager.events_muted,
             "sessionId": ring0_manager.session_id,
             "model": ring0_manager.model,
+            "backendType": ring0_manager.backend_type,
         })
 
     @routes.post("/api/ring0/toggle")
@@ -1538,12 +1539,73 @@ def create_routes(
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
         enabled = bool(body.get("enabled", False))
+        # Optional backendType: only honored when Ring0 is currently off
+        # (no running session). Use /api/ring0/switch-backend to change the
+        # backend while Ring0 is enabled.
+        backend_override = body.get("backendType")
+        if backend_override:
+            if backend_override not in ("claude", "codex", "opencode", "hermes"):
+                return web.json_response(
+                    {"error": f"Invalid backendType: {backend_override}"}, status=400,
+                )
+            running = launcher.is_alive(ring0_manager.session_id)
+            if running and backend_override != ring0_manager.backend_type:
+                return web.json_response({
+                    "error": "Ring0 is running with a different backend; use /api/ring0/switch-backend to change it",
+                    "current": ring0_manager.backend_type,
+                }, status=409)
+            try:
+                ring0_manager.set_backend_type(backend_override)
+            except ValueError as e:
+                return web.json_response({"error": str(e)}, status=400)
         ring0_manager.toggle(enabled)
         # Ensure session exists when enabling
         if enabled:
             session_id = await ring0_manager.ensure_session(launcher, ws_bridge)
-            return web.json_response({"ok": True, "enabled": True, "sessionId": session_id})
-        return web.json_response({"ok": True, "enabled": False, "sessionId": ring0_manager.session_id})
+            return web.json_response({
+                "ok": True, "enabled": True, "sessionId": session_id,
+                "backendType": ring0_manager.backend_type,
+            })
+        return web.json_response({
+            "ok": True, "enabled": False, "sessionId": ring0_manager.session_id,
+            "backendType": ring0_manager.backend_type,
+        })
+
+    @routes.post("/api/ring0/switch-backend")
+    async def ring0_switch_backend(request: web.Request) -> web.Response:
+        """Switch Ring0 to a different backend. Kills session and starts fresh."""
+        if ring0_manager is None:
+            return web.json_response({"error": "Ring0 not available"}, status=501)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        backend = body.get("backendType", "").strip()
+        if backend not in ("claude", "codex", "opencode", "hermes"):
+            return web.json_response(
+                {"error": "backendType must be one of claude, codex, opencode, hermes"},
+                status=400,
+            )
+
+        previous = ring0_manager.backend_type
+        if backend == previous:
+            return web.json_response({
+                "ok": True, "backendType": backend, "previous": previous,
+                "changed": False,
+            })
+
+        async def _do_switch() -> None:
+            import asyncio
+            await asyncio.sleep(1.5)
+            ring0_manager.set_backend_type(backend)
+            await launcher.kill(ring0_manager.session_id)
+            await ring0_manager.ensure_session(launcher, ws_bridge)
+
+        import asyncio
+        asyncio.create_task(_do_switch())
+        return web.json_response({
+            "ok": True, "backendType": backend, "previous": previous, "changed": True,
+        })
 
     @routes.post("/api/ring0/mute-events")
     async def ring0_mute_events(request: web.Request) -> web.Response:
