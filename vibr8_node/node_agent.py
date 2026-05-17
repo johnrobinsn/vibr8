@@ -47,6 +47,10 @@ class NodeAgent:
         self.ring0_config = ring0_config or {}
         self.default_backend = default_backend
         self.node_id: str = ""
+        # Service token issued by the hub at registration. Used by Ring0 MCP
+        # to authenticate against hub-side client / second-screen / artifact
+        # endpoints over HTTP. Empty when the hub has auth disabled.
+        self.hub_service_token: str = ""
         self._ssl_ctx: ssl.SSLContext | bool | None = None
         if "localhost" in hub_url or "127.0.0.1" in hub_url:
             ctx = ssl.create_default_context()
@@ -115,16 +119,18 @@ class NodeAgent:
         # Start minimal local aiohttp server for CLI WebSocket + Ring0 MCP
         await self._start_local_server()
 
-        # Auto-launch Ring0 session if enabled
-        if self._ring0 and self._ring0.is_enabled:
-            logger.info("Ring0 enabled — auto-launching session (backend=%s)", self.default_backend)
-            await self._ring0.ensure_session(self._launcher, self._bridge, backend_type=self.default_backend)
-
-        # Register with hub
+        # Register first — _register sets the hub endpoint on Ring0 so its
+        # MCP subprocess (spawned by the auto-launch below) starts with
+        # VIBR8_HUB_URL / VIBR8_HUB_TOKEN already in its env.
         registered = await self._register()
         if not registered:
             logger.error("Failed to register with hub — exiting")
             return
+
+        # Auto-launch Ring0 session if enabled
+        if self._ring0 and self._ring0.is_enabled:
+            logger.info("Ring0 enabled — auto-launching session (backend=%s)", self.default_backend)
+            await self._ring0.ensure_session(self._launcher, self._bridge, backend_type=self.default_backend)
 
         # Connect tunnel with auto-reconnect
         try:
@@ -132,10 +138,13 @@ class NodeAgent:
         finally:
             await self._shutdown()
 
+    def _hub_http_url(self) -> str:
+        """Hub URL with the http(s) scheme (input is ws:// or wss://)."""
+        return self.hub_url.replace("wss://", "https://").replace("ws://", "http://")
+
     async def _register(self) -> bool:
         """Register this node with the hub via REST API."""
-        # Convert hub WS URL to HTTP
-        http_url = self.hub_url.replace("wss://", "https://").replace("ws://", "http://")
+        http_url = self._hub_http_url()
         url = f"{http_url}/api/nodes/register"
 
         capabilities = {
@@ -162,6 +171,14 @@ class NodeAgent:
                         return False
                     data = await resp.json()
                     self.node_id = data.get("nodeId", "")
+                    self.hub_service_token = data.get("serviceToken", "")
+                    # Update Ring0 with the hub HTTP URL + token so its MCP
+                    # tools can reach the hub. Safe to call multiple times
+                    # on reconnect (just updates the in-memory pointers).
+                    if self._ring0:
+                        self._ring0.set_hub_endpoint(
+                            self._hub_http_url(), self.hub_service_token,
+                        )
                     logger.info("Registered as node %s (id=%s)", self.name, self.node_id[:8])
                     return True
         except Exception:

@@ -2696,7 +2696,14 @@ def create_routes(
             node = node_registry.register(name, api_key, capabilities)
         except PermissionError as e:
             return web.json_response({"error": str(e)}, status=403)
-        return web.json_response({"ok": True, "nodeId": node.id})
+        # Issue a service token so the node's Ring0 MCP can hit hub-side
+        # client / second-screen / artifact endpoints over HTTP. Hub auth
+        # accepts svc: tokens as a valid Bearer credential. When auth is
+        # disabled on the hub there's nothing to issue and nothing to check.
+        resp: dict[str, Any] = {"ok": True, "nodeId": node.id}
+        if auth_manager and auth_manager.enabled:
+            resp["serviceToken"] = auth_manager.create_service_token(f"node-{node.id}")
+        return web.json_response(resp)
 
     @routes.get("/api/nodes")
     async def list_nodes(request: web.Request) -> web.Response:

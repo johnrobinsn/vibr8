@@ -396,6 +396,12 @@ class Ring0Manager:
         self._cli_session_id: Optional[str] = None
         self._model: Optional[str] = None
         self._backend_type: str = "claude"
+        # When set, Ring0 MCP tools that touch browser clients, second
+        # screens, or artifacts forward to this hub instead of calling the
+        # local API. Populated on remote nodes by NodeAgent after the hub
+        # issues a service token; left blank on the hub itself.
+        self._hub_url: Optional[str] = None
+        self._hub_token: Optional[str] = None
         self._load_state()
 
     # ── Properties ────────────────────────────────────────────────────────
@@ -432,6 +438,17 @@ class Ring0Manager:
             self._cli_session_id = None
         self._backend_type = backend_type
         self._save_state()
+
+    def set_hub_endpoint(self, hub_http_url: Optional[str], hub_token: Optional[str]) -> None:
+        """Tell Ring0's MCP server where the hub lives.
+
+        Call this on remote nodes after registration succeeds; the resulting
+        VIBR8_HUB_URL / VIBR8_HUB_TOKEN env vars get baked into the MCP
+        config on the next Ring0 launch. The hub itself never calls this —
+        Ring0 there only talks to its local API.
+        """
+        self._hub_url = hub_http_url.rstrip("/") if hub_http_url else None
+        self._hub_token = hub_token or None
 
     def _get_service_token(self) -> Optional[str]:
         """Get or create a service token for Ring0 MCP API calls."""
@@ -573,15 +590,9 @@ class Ring0Manager:
         uv_bin = shutil.which("uv") or "uv"
         codex_bin = shutil.which("codex") or "codex"
 
-        env_args: list[str] = [
-            "--env", f"VIBR8_PORT={self._port}",
-            "--env", f"VIBR8_SCHEME={'https' if (server_dir / 'certs' / 'cert.pem').exists() else 'http'}",
-        ]
-        token = self._get_service_token()
-        if token:
-            env_args.extend(["--env", f"VIBR8_TOKEN={token}"])
-        if self._model:
-            env_args.extend(["--env", f"RING0_MODEL={self._model}"])
+        env_args: list[str] = []
+        for k, v in self._get_mcp_env().items():
+            env_args.extend(["--env", f"{k}={v}"])
 
         # Remove existing entry first (idempotent), then add fresh
         subprocess.run(
@@ -603,17 +614,7 @@ class Ring0Manager:
         server_dir = Path(__file__).parent.parent.resolve()
         mcp_script = str(server_dir / "server" / "ring0_mcp.py")
         uv_bin = shutil.which("uv") or "uv"
-        scheme = "https" if (server_dir / "certs" / "cert.pem").exists() else "http"
-        token = self._get_service_token()
-
-        env: dict[str, str] = {
-            "VIBR8_PORT": str(self._port),
-            "VIBR8_SCHEME": scheme,
-        }
-        if token:
-            env["VIBR8_TOKEN"] = token
-        if self._model:
-            env["RING0_MODEL"] = self._model
+        env = self._get_mcp_env()
 
         config: dict[str, Any] = {}
         config_path = work_dir / "opencode.jsonc"
@@ -655,6 +656,11 @@ class Ring0Manager:
             env["VIBR8_TOKEN"] = token
         if self._model:
             env["RING0_MODEL"] = self._model
+        # Remote-node Ring0: forward client/screen/artifact tools to the hub.
+        if self._hub_url:
+            env["VIBR8_HUB_URL"] = self._hub_url
+        if self._hub_token:
+            env["VIBR8_HUB_TOKEN"] = self._hub_token
         return env
 
     def _build_acp_mcp_servers(self) -> list[dict[str, Any]]:
@@ -692,12 +698,7 @@ class Ring0Manager:
                     "type": "stdio",
                     "command": uv_bin,
                     "args": ["run", "--project", str(server_dir), "--no-sync", "python", mcp_script],
-                    "env": {
-                        "VIBR8_PORT": str(self._port),
-                        "VIBR8_SCHEME": "https" if (server_dir / "certs" / "cert.pem").exists() else "http",
-                        **({} if not self._get_service_token() else {"VIBR8_TOKEN": self._get_service_token()}),
-                        **({"RING0_MODEL": self._model} if self._model else {}),
-                    },
+                    "env": self._get_mcp_env(),
                 }
             }
         }
