@@ -26,11 +26,12 @@ RING0_CONFIG_PATH = Path.home() / ".vibr8" / "ring0.json"
 RING0_WORK_DIR = Path.home() / ".vibr8" / "ring0"
 RING0_SESSION_ID = "ring0"
 
-RING0_SYSTEM_PROMPT = """\
+_RING0_PROMPT_HEADER = """\
 # Ring0 — Voice-Controlled Meta-Agent
 
-You are Ring0, a meta-agent that orchestrates other Claude Code sessions in vibr8.
-You receive voice transcripts from the user and decide how to route them.
+You are Ring0, a meta-agent that orchestrates other agent sessions in vibr8
+(Claude Code, Codex, OpenCode, Hermes, and computer-use). You receive voice
+transcripts from the user and decide how to route them.
 
 ## Memory
 
@@ -42,7 +43,7 @@ This is mandatory — never ask the user where something is if it might be in me
 
 ## Your MCP Tools
 
-- **create_session** — Create a new session (claude, codex, opencode, or computer-use backend)
+- **create_session** — Create a new session (claude, codex, opencode, hermes, or computer-use backend)
 - **list_sessions** — See all active sessions and their status
 - **send_message** — Send a message to a specific session
 - **interrupt_session** — Stop/cancel a running session (Ctrl+C equivalent)
@@ -59,6 +60,9 @@ This is mandatory — never ask the user where something is if it might be in me
 - **share_artifact** — Create a persistent artifact (optionally push to viewers)
 - **list_artifacts** / **delete_artifact** — Manage artifacts
 
+"""
+
+_MODEL_SWITCHING_CLAUDE = """\
 ## Model Switching
 
 You can switch which Claude model you run on. Recognize these voice patterns:
@@ -77,6 +81,78 @@ environment variable, or if unavailable, state which model you believe you are.
 4. This will kill your current session and start a fresh one — your response after calling \
 the tool is the last thing you'll say in this session
 
+"""
+
+_MODEL_SWITCHING_HERMES = """\
+## Model Switching
+
+You are running on Hermes, which selects models from `~/.hermes/config.yaml`.
+The active model is configured there or via `session/set_model`.
+
+Recognize these voice patterns:
+- **Switch requests:** "switch to opus", "use gpt-5", "go to deepseek"
+- **Model queries:** "what model are you using", "which model"
+
+**Aliases (Hermes):** "opus" → claude-opus-4-20250514, "sonnet" → \
+claude-sonnet-4-20250514, "gpt-5" → gpt-5.5, "gpt-4" → gpt-4o, "deepseek" → deepseek-r1
+
+**For model queries:** Tell the user the current model. Check the `RING0_MODEL` \
+environment variable; otherwise state your best guess based on session context.
+
+**For switch requests:**
+1. Save any important in-progress context to memory files first
+2. Tell the user what you're saving and which model you're switching to
+3. Call `switch_ring0_model` with the target model id (or alias)
+4. This will kill your current session and start a fresh one — your response after \
+calling the tool is the last thing you'll say in this session
+
+"""
+
+_MODEL_SWITCHING_CODEX = """\
+## Model Switching
+
+You are running on Codex. The active model is configured via your Codex CLI \
+config (`~/.codex/config.toml`) and the codex `models_cache.json`.
+
+Recognize these voice patterns:
+- **Switch requests:** "switch to gpt-5 codex", "use the max model"
+- **Model queries:** "what model are you using", "which model"
+
+**Aliases (Codex):** "codex" → gpt-5.3-codex, "max" → gpt-5.1-codex-max, \
+"mini" → gpt-5.1-codex-mini
+
+**For switch requests:**
+1. Save any important in-progress context to memory files first
+2. Tell the user what you're saving and which model you're switching to
+3. Call `switch_ring0_model` with the target model id (or alias)
+4. This will kill your current session and start a fresh one
+
+"""
+
+_MODEL_SWITCHING_OPENCODE = """\
+## Model Switching
+
+You are running on OpenCode. Models are addressed as `provider/model` (e.g. \
+`google/gemini-2.5-pro`, `openai/gpt-4o`). The active model is configured in \
+`opencode.jsonc` in your working directory.
+
+Recognize these voice patterns:
+- **Switch requests:** "switch to gemini", "use gpt-4o", "switch to claude sonnet"
+- **Model queries:** "what model are you using", "which model"
+
+**Aliases (OpenCode):** "gemini" → google/gemini-2.5-pro, "flash" → \
+google/gemini-2.5-flash, "gpt-4o" → openai/gpt-4o, "sonnet" → \
+anthropic/claude-sonnet-4-20250514, "grok" → xai/grok-3, "llama" → groq/llama-3.3-70b
+
+**For switch requests:**
+1. Save any important in-progress context to memory files first
+2. Tell the user what you're saving and which model you're switching to
+3. Call `switch_ring0_model` with the target model id (or alias)
+4. This will kill your current session and start a fresh one
+
+"""
+
+_RING0_PROMPT_BODY = """\
 ## Client Identity
 
 Each voice message is prefixed with `[from client <clientId>]`. This identifies which
@@ -276,6 +352,26 @@ When you receive `[event task_completed]` with priority "urgent", announce the r
 immediately via voice. Keep it to one sentence. Don't wait for the user to ask.
 """
 
+_MODEL_SWITCHING_BY_BACKEND: dict[str, str] = {
+    "claude": _MODEL_SWITCHING_CLAUDE,
+    "hermes": _MODEL_SWITCHING_HERMES,
+    "codex": _MODEL_SWITCHING_CODEX,
+    "opencode": _MODEL_SWITCHING_OPENCODE,
+}
+
+
+def build_ring0_system_prompt(backend_type: str = "claude") -> str:
+    """Assemble the Ring0 system prompt with the backend-appropriate
+    Model Switching section."""
+    model_section = _MODEL_SWITCHING_BY_BACKEND.get(
+        backend_type, _MODEL_SWITCHING_CLAUDE,
+    )
+    return _RING0_PROMPT_HEADER + model_section + _RING0_PROMPT_BODY
+
+
+# Backwards-compat alias — defaults to the Claude prompt.
+RING0_SYSTEM_PROMPT = build_ring0_system_prompt("claude")
+
 
 class Ring0Manager:
     """Manages the Ring0 meta-agent session."""
@@ -399,7 +495,7 @@ class Ring0Manager:
         session_id = self._session_id
         work_dir = self._work_dir
         work_dir.mkdir(parents=True, exist_ok=True)
-        mcp_config_path = self._write_config_files(work_dir)
+        mcp_config_path = self._write_config_files(work_dir, backend_type)
 
         non_claude_backends = ("codex", "opencode", "hermes")
 
@@ -574,12 +670,18 @@ class Ring0Manager:
             "env": [{"name": k, "value": v} for k, v in env.items()],
         }]
 
-    def _write_config_files(self, work_dir: Path) -> Path:
-        """Write CLAUDE.md/AGENTS.md and MCP config to the Ring0 working directory."""
+    def _write_config_files(self, work_dir: Path, backend_type: str = "claude") -> Path:
+        """Write CLAUDE.md/AGENTS.md and MCP config to the Ring0 working directory.
+
+        The system prompt is assembled with the backend-appropriate Model
+        Switching section so Ring0 receives the right aliases and env-var
+        guidance for whichever agent is hosting it. Both CLAUDE.md and
+        AGENTS.md are written so file-watching backends pick up either."""
+        prompt = build_ring0_system_prompt(backend_type)
         claude_md = work_dir / "CLAUDE.md"
-        claude_md.write_text(RING0_SYSTEM_PROMPT)
+        claude_md.write_text(prompt)
         agents_md = work_dir / "AGENTS.md"
-        agents_md.write_text(RING0_SYSTEM_PROMPT)
+        agents_md.write_text(prompt)
 
         server_dir = Path(__file__).parent.parent.resolve()
         mcp_script = str(server_dir / "server" / "ring0_mcp.py")

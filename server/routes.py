@@ -1632,12 +1632,40 @@ def create_routes(
         if not model:
             return web.json_response({"error": "model is required"}, status=400)
 
-        # Resolve friendly aliases
-        aliases = {
-            "haiku": "claude-haiku-4-5-20251001",
-            "sonnet": "claude-sonnet-4-6",
-            "opus": "claude-opus-4-6",
+        # Resolve friendly aliases per-backend. Each backend has its own
+        # model namespace (Claude IDs, OpenAI/Hermes IDs, provider/model for
+        # OpenCode, codex slugs). Unknown aliases fall through unchanged so
+        # the user can always pass a full model id.
+        backend_aliases: dict[str, dict[str, str]] = {
+            "claude": {
+                "haiku": "claude-haiku-4-5-20251001",
+                "sonnet": "claude-sonnet-4-6",
+                "opus": "claude-opus-4-6",
+            },
+            "hermes": {
+                "opus": "claude-opus-4-20250514",
+                "sonnet": "claude-sonnet-4-20250514",
+                "gpt-5": "gpt-5.5",
+                "gpt5": "gpt-5.5",
+                "gpt-4": "gpt-4o",
+                "gpt4": "gpt-4o",
+                "deepseek": "deepseek-r1",
+            },
+            "codex": {
+                "codex": "gpt-5.3-codex",
+                "max": "gpt-5.1-codex-max",
+                "mini": "gpt-5.1-codex-mini",
+            },
+            "opencode": {
+                "gemini": "google/gemini-2.5-pro",
+                "flash": "google/gemini-2.5-flash",
+                "gpt-4o": "openai/gpt-4o",
+                "sonnet": "anthropic/claude-sonnet-4-20250514",
+                "grok": "xai/grok-3",
+                "llama": "groq/llama-3.3-70b",
+            },
         }
+        aliases = backend_aliases.get(ring0_manager.backend_type, {})
         resolved = aliases.get(model.lower(), model)
 
         # Schedule the switch asynchronously so the HTTP response gets back
