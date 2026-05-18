@@ -550,25 +550,22 @@ async def switch_audio(target: str, client_id: str = "") -> str:
     Automatically resolves the correct device by scanning available audio devices
     and matching by label. Prefer this over raw query_client set_audio_input calls.
 
+    A client_id is REQUIRED — extract it from the `[from client <id>]` prefix
+    in the voice message, or use `get_active_clients`.
+
     Args:
         target: Device category — "bluetooth", "speaker", "handset", or "default".
             - bluetooth: Bluetooth headset/earbuds (prioritizes "Bluetooth" in label)
             - speaker: Phone speaker or external speaker (prioritizes "Speakerphone" or "Speaker")
             - handset: Phone earpiece (prioritizes "Earpiece" or "Handset earpiece")
             - default: Reset to system default device
-        client_id: Optional client ID, name, or prefix. If empty, auto-resolves to the
-            first online client.
+        client_id: Client ID, name, or prefix. Required.
     """
     target = target.lower().strip()
 
-    if client_id:
-        resolved, err = await _resolve_client(client_id)
-    else:
-        clients = await _get("/clients")
-        online = [c for c in (clients or []) if c.get("online")]
-        if not online:
-            return "Error: no online clients."
-        resolved, err = online[0]["clientId"], None
+    if not client_id or client_id == "self":
+        return "Error: client_id is required — specify which client to switch audio for. Extract it from the [from client <id>] prefix in the voice message, or call get_active_clients."
+    resolved, err = await _resolve_client(client_id)
     if err:
         return err
 
@@ -830,7 +827,7 @@ async def show_on_second_screen(
     targets_primary: list[str] = []
     targets_screens: list[dict[str, Any]] = []
     if client_id == "self":
-        targets_primary = primary_ids
+        return "Error: 'self' is not a valid client_id. Extract the real client ID from the [from client <id>] prefix in the voice message."
     elif client_id:
         resolved, err = await _resolve_client(client_id)
         if not err:
