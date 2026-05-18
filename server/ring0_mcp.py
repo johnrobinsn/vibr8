@@ -209,14 +209,21 @@ async def interrupt_session(session_id: str) -> str:
 
 
 @mcp.tool()
-async def send_message(session_id: str, message: str) -> str:
+async def send_message(session_id: str, message: str, on_behalf_of_client: str = "") -> str:
     """Send a message to a specific session.
 
     Args:
         session_id: The session ID (full or prefix) to send the message to.
         message: The message text to send.
+        on_behalf_of_client: Optional client ID whose context should be carried
+            to the target session. When relaying a user request to another Ring0,
+            pass the originating client ID so that Ring0's MCP tools (switch_ui,
+            switch_audio, etc.) can target the correct browser.
     """
-    result = await _post("/ring0/send-message", {"sessionId": session_id, "message": message})
+    body: dict[str, Any] = {"sessionId": session_id, "message": message}
+    if on_behalf_of_client:
+        body["onBehalfOfClient"] = on_behalf_of_client
+    result = await _post("/ring0/send-message", body)
     if result.get("error"):
         return f"Error: {result['error']}. The user is currently working in this session. Wait for them to finish or check back later."
     return f"Message sent to session {session_id[:8]}."
@@ -226,21 +233,21 @@ async def send_message(session_id: str, message: str) -> str:
 async def switch_ui(session_id: str, client_id: str = "") -> str:
     """Switch the browser UI to show a specific session.
 
-    A client_id is REQUIRED — you must specify which browser to switch.
-    Extract the client ID from the `[from client <id>]` prefix in voice
-    messages, or use `get_active_clients` to find the right client.
+    If you know the target client, pass client_id. Otherwise omit it and the
+    server will use the client from the current prompt context.
 
     Args:
         session_id: The session ID to switch to.
-        client_id: Client ID, name, or prefix to target. Required.
+        client_id: Client ID, name, or prefix. If empty, uses prompt context.
     """
-    if not client_id or client_id == "self":
-        return "Error: client_id is required — specify which client to switch. Extract it from the [from client <id>] prefix in the voice message, or call get_active_clients to find connected clients."
+    if client_id == "self":
+        return "Error: 'self' is not a valid client_id. Use get_active_clients to find connected clients."
     body: dict[str, str] = {"sessionId": session_id}
-    resolved, err = await _resolve_client(client_id)
-    if err:
-        return err
-    body["clientId"] = resolved
+    if client_id:
+        resolved, err = await _resolve_client(client_id)
+        if err:
+            return err
+        body["clientId"] = resolved
     result = await _post("/ring0/switch-ui", body)
     if result.get("error"):
         return f"Error: {result['error']}"
@@ -550,8 +557,8 @@ async def switch_audio(target: str, client_id: str = "") -> str:
     Automatically resolves the correct device by scanning available audio devices
     and matching by label. Prefer this over raw query_client set_audio_input calls.
 
-    A client_id is REQUIRED — extract it from the `[from client <id>]` prefix
-    in the voice message, or use `get_active_clients`.
+    If you know the target client, pass client_id. Otherwise omit it and the
+    server will use the client from the current prompt context.
 
     Args:
         target: Device category — "bluetooth", "speaker", "handset", or "default".
@@ -559,12 +566,17 @@ async def switch_audio(target: str, client_id: str = "") -> str:
             - speaker: Phone speaker or external speaker (prioritizes "Speakerphone" or "Speaker")
             - handset: Phone earpiece (prioritizes "Earpiece" or "Handset earpiece")
             - default: Reset to system default device
-        client_id: Client ID, name, or prefix. Required.
+        client_id: Client ID, name, or prefix. If empty, uses prompt context.
     """
     target = target.lower().strip()
 
-    if not client_id or client_id == "self":
-        return "Error: client_id is required — specify which client to switch audio for. Extract it from the [from client <id>] prefix in the voice message, or call get_active_clients."
+    if client_id == "self":
+        return "Error: 'self' is not a valid client_id. Use get_active_clients to find connected clients."
+    if not client_id:
+        ctx = await _get("/ring0/prompt-context")
+        client_id = ctx.get("clientId", "")
+    if not client_id:
+        return "Error: client_id is required — no prompt context available. Use get_active_clients to find connected clients."
     resolved, err = await _resolve_client(client_id)
     if err:
         return err

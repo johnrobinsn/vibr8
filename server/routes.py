@@ -1715,19 +1715,20 @@ def create_routes(
         message = body.get("message")
         if not session_id or not message:
             return web.json_response({"error": "sessionId and message required"}, status=400)
+        on_behalf_of = body.get("onBehalfOfClient", "")
         if session_registry:
             entry = session_registry.resolve(session_id)
             if not entry:
                 return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
             router = session_registry.get_router(entry)
-            err = await router.send_message(message)
+            err = await router.send_message(message, source_client_id=on_behalf_of)
             if err:
                 return web.json_response({"error": err, "controlledBy": "user"}, status=409)
             return web.json_response({"ok": True, "sessionId": entry.qualified_id})
         resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-        err = await ws_bridge.submit_user_message(resolved, message)
+        err = await ws_bridge.submit_user_message(resolved, message, source_client_id=on_behalf_of)
         if err:
             return web.json_response({"error": err, "controlledBy": "user"}, status=409)
         return web.json_response({"ok": True, "sessionId": resolved})
@@ -1752,11 +1753,18 @@ def create_routes(
                 return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         client_id = body.get("clientId", "")
         if not client_id:
+            client_id = ws_bridge.get_ring0_prompt_client()
+        if not client_id:
             return web.json_response({"error": "clientId required — specify which client to switch"}, status=400)
         sent = await ws_bridge.broadcast_ring0_switch_ui(resolved, client_id=client_id)
         if not sent:
             return web.json_response({"error": f"Client {client_id} not connected"}, status=400)
         return web.json_response({"ok": True, "sessionId": resolved})
+
+    @routes.get("/api/ring0/prompt-context")
+    async def ring0_prompt_context(request: web.Request) -> web.Response:
+        client_id = ws_bridge.get_ring0_prompt_client()
+        return web.json_response({"clientId": client_id})
 
     # ── Client metadata ────────────────────────────────────────────────
 

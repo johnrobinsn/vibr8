@@ -78,6 +78,7 @@ class Session:
     _pen_timeout: Any = None  # asyncio.TimerHandle for auto-release
     last_prompted_at: float = 0  # ms since epoch, updated on every user prompt
     associated_node_id: str = ""  # For sessions running on host but targeting an Android node
+    prompt_source_client_id: str = ""  # client that sent the current prompt (for Ring0 context)
 
 
 # ── Bridge ───────────────────────────────────────────────────────────────────
@@ -330,6 +331,14 @@ class WsBridge:
 
     def set_session_registry(self, registry: Any) -> None:
         self._session_registry = registry
+
+    def get_ring0_prompt_client(self) -> str:
+        """Return the client ID from the current Ring0 prompt context."""
+        ring0 = self._ring0_manager
+        if not ring0 or not ring0.session_id:
+            return ""
+        session = self._sessions.get(ring0.session_id)
+        return session.prompt_source_client_id if session else ""
 
     # ── Remote node session management ────────────────────────────────────
     # Node identity is embedded in the session ID: "{node_id}:{raw_id}" for remote.
@@ -1752,10 +1761,15 @@ class WsBridge:
         session.message_history.append(history_entry)
 
         # If this session is Ring0, prepend client context to message content
+        # and store as prompt context so MCP tools can resolve the client
         raw_content = msg.get("content", "")
         ring0 = self._ring0_manager
-        if ring0 and ring0.session_id == session.id and source_client_id:
-            raw_content = f"[from client {source_client_id}]\n{raw_content}"
+        if ring0 and ring0.session_id == session.id:
+            if source_client_id:
+                session.prompt_source_client_id = source_client_id
+                raw_content = f"[from client {source_client_id}]\n{raw_content}"
+            else:
+                session.prompt_source_client_id = ""
 
         images = msg.get("images")
         if images:
