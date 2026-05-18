@@ -226,22 +226,25 @@ async def send_message(session_id: str, message: str) -> str:
 async def switch_ui(session_id: str, client_id: str = "") -> str:
     """Switch the browser UI to show a specific session.
 
+    A client_id is REQUIRED — you must specify which browser to switch.
+    Extract the client ID from the `[from client <id>]` prefix in voice
+    messages, or use `get_active_clients` to find the right client.
+
     Args:
         session_id: The session ID to switch to.
-        client_id: Optional client ID, name, or prefix to target. If provided, only that browser instance switches.
-                   If omitted, all connected browsers switch.
+        client_id: Client ID, name, or prefix to target. Required.
     """
+    if not client_id or client_id == "self":
+        return "Error: client_id is required — specify which client to switch. Extract it from the [from client <id>] prefix in the voice message, or call get_active_clients to find connected clients."
     body: dict[str, str] = {"sessionId": session_id}
-    if client_id:
-        resolved, err = await _resolve_client(client_id)
-        if err:
-            return err
-        body["clientId"] = resolved
+    resolved, err = await _resolve_client(client_id)
+    if err:
+        return err
+    body["clientId"] = resolved
     result = await _post("/ring0/switch-ui", body)
     if result.get("error"):
         return f"Error: {result['error']}"
-    target = f"client {client_id[:8]}" if client_id else "all clients"
-    return f"Switched {target} to session {session_id[:8]}."
+    return f"Switched client {resolved[:8]} to session {session_id[:8]}."
 
 
 def _extract_assistant_text(message: Any) -> tuple[str, bool]:

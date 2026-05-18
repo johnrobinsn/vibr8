@@ -1751,8 +1751,10 @@ def create_routes(
             if not resolved:
                 return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         client_id = body.get("clientId", "")
+        if not client_id:
+            return web.json_response({"error": "clientId required — specify which client to switch"}, status=400)
         sent = await ws_bridge.broadcast_ring0_switch_ui(resolved, client_id=client_id)
-        if client_id and not sent:
+        if not sent:
             return web.json_response({"error": f"Client {client_id} not connected"}, status=400)
         return web.json_response({"ok": True, "sessionId": resolved})
 
