@@ -118,6 +118,7 @@ class WsBridge:
         # User re-engagement tracking for scheduled tasks
         self._last_user_interaction: float = 0.0  # time.time() of last user-originated message to Ring0
         self._task_scheduler: Any = None  # TaskScheduler (set via setter)
+        self._session_registry: Any = None  # SessionRegistry (set via setter)
 
     # ── Native WebSocket (Android foreground service) ───────────────────
 
@@ -326,6 +327,9 @@ class WsBridge:
 
     def set_task_scheduler(self, scheduler: Any) -> None:
         self._task_scheduler = scheduler
+
+    def set_session_registry(self, registry: Any) -> None:
+        self._session_registry = registry
 
     # ── Remote node session management ────────────────────────────────────
     # Node identity is embedded in the session ID: "{node_id}:{raw_id}" for remote.
@@ -2315,16 +2319,16 @@ class WsBridge:
     async def broadcast_ring0_switch_ui(self, target_session_id: str, *, client_id: str = "") -> bool:
         """Send ring0_switch_ui to a specific client or broadcast to all browsers.
 
-        For tunneled sessions (nodeId:rawId), sends a node_switch first so
-        the browser loads that node's session list before switching.
+        The browser extracts the node ID from the qualified session ID
+        (nodeId:rawId) and switches node automatically.
 
         Returns True if the message was sent successfully, False if the target client was not found.
         """
-        messages: list[str] = []
         node_id, _ = self.parse_qualified_id(target_session_id)
+        msg_data: dict[str, Any] = {"type": "ring0_switch_ui", "sessionId": target_session_id}
         if node_id:
-            messages.append(json.dumps({"type": "node_switch", "nodeId": node_id}))
-        messages.append(json.dumps({"type": "ring0_switch_ui", "sessionId": target_session_id}))
+            msg_data["nodeId"] = node_id
+        messages = [json.dumps(msg_data)]
 
         # Target a specific client if provided
         if client_id:

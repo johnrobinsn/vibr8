@@ -35,6 +35,7 @@ from server.ring0_scheduler import TaskScheduler
 from server.ring0_events import Ring0EventRouter
 from server.node_registry import NodeRegistry
 from server.node_tunnel import NodeTunnel
+from server.session_registry import SessionRegistry
 import json as _json
 from server.auth import AuthManager, auth_middleware
 
@@ -326,24 +327,23 @@ async def handle_node_ws(request: web.Request) -> web.WebSocketResponse:
         elif msg_type == "sessions_update":
             sessions = msg.get("sessions", [])
             # Qualify session IDs at the hub boundary
-            from server.ws_bridge import WsBridge
             for s in sessions:
                 raw_id = s.get("sessionId", s.get("id", ""))
                 if raw_id:
-                    qualified = WsBridge.qualify_session_id(nid, raw_id)
+                    qualified = SessionRegistry.qualify(nid, raw_id)
                     s["sessionId"] = qualified
                     if "id" in s:
                         s["id"] = qualified
             session_ids = [s.get("sessionId", s.get("id", "")) for s in sessions]
             registry.update_sessions(nid, session_ids)
             bridge.update_remote_sessions(nid, sessions)
+            session_registry.sync_remote_sessions(nid, msg.get("sessions", []))
         elif msg_type == "session_message":
             # Forward CLI output from remote session to browser clients
             raw_session_id = msg.get("sessionId", "")
             message = msg.get("message", {})
             if raw_session_id and message:
-                from server.ws_bridge import WsBridge
-                qualified_id = WsBridge.qualify_session_id(nid, raw_session_id)
+                qualified_id = SessionRegistry.qualify(nid, raw_session_id)
                 await bridge.handle_remote_session_message(qualified_id, message)
         elif msg_type == "ring0_state":
             n = registry.get_node(nid)
@@ -367,8 +367,9 @@ async def handle_node_ws(request: web.Request) -> web.WebSocketResponse:
         logger.info("[nodes] WS tunnel closed for node %r (%s)", node.name, node_id[:8])
         tunnel.close()
         registry.set_offline(node_id)
-        # Clean up remote sessions from WsBridge
+        # Clean up remote sessions from WsBridge and SessionRegistry
         bridge.remove_remote_node_sessions(node_id)
+        session_registry.remove_node_sessions(node_id)
 
     return ws
 
@@ -402,6 +403,7 @@ def create_app() -> web.Application:
     ring0_manager = Ring0Manager(PORT, auth_manager=auth_manager)
     task_scheduler = TaskScheduler()
     node_registry = NodeRegistry()
+    session_registry = SessionRegistry(ws_bridge, launcher, node_registry)
 
     try:
         from server.android_registry import AndroidRegistry
@@ -427,6 +429,7 @@ def create_app() -> web.Application:
     ws_bridge.set_ring0_event_router(Ring0EventRouter())
     ws_bridge.set_node_registry(node_registry)
     ws_bridge.set_task_scheduler(task_scheduler)
+    ws_bridge.set_session_registry(session_registry)
     task_scheduler.set_dependencies(launcher, ws_bridge)
     if webrtc_manager:
         webrtc_manager.set_ws_bridge(ws_bridge)
@@ -665,7 +668,7 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/node/{node_id}", handle_node_ws)
 
     # REST API
-    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager, node_registry)
+    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager, node_registry, session_registry)
     app.router.add_routes(api_routes)
 
     # Production static file serving
@@ -697,6 +700,7 @@ def create_app() -> web.Application:
     app["ring0_manager"] = ring0_manager
     app["task_scheduler"] = task_scheduler
     app["node_registry"] = node_registry
+    app["session_registry"] = session_registry
     app["android_registry"] = android_registry
     app["request_restart"] = request_restart
 
@@ -768,6 +772,10 @@ def create_app() -> web.Application:
                     await launcher.relaunch(info.sessionId)
 
             spawn(_watchdog())
+
+        # Populate session registry from launcher's restored sessions
+        r0_id = ring0_manager.session_id if ring0_manager else ""
+        session_registry.sync_from_launcher(r0_id)
 
         # Periodic heartbeat checker for remote nodes
         async def _heartbeat_checker() -> None:

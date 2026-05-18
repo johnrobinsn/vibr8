@@ -400,30 +400,14 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
     }
 
     case "ring0_switch_ui": {
-      // Ring0 requests switching to a specific session
-      const targetId = data.sessionId;
-      if (targetId && targetId !== store.currentSessionId) {
-        // Disconnect from old session
-        if (store.currentSessionId) {
-          const oldSdk = store.sdkSessions.find((x) => x.sessionId === store.currentSessionId);
-          if (oldSdk?.backendType !== "terminal") {
-            disconnectSession(store.currentSessionId);
-          }
-        }
-        store.setCurrentSession(targetId);
-        const newSdk = store.sdkSessions.find((x) => x.sessionId === targetId);
-        if (newSdk?.backendType !== "terminal") {
-          connectSession(targetId);
-        }
-      }
-      break;
-    }
+      // Ring0 requests switching to a specific session.
+      // For remote sessions the nodeId is either in the message or
+      // extracted from the qualified session ID ("nodeId:rawId").
+      const targetId = data.sessionId as string;
+      if (!targetId || targetId === store.currentSessionId) break;
 
-    case "node_switch": {
-      // Hub notifies that the active node changed (e.g., via voice command)
-      const newNodeId = data.nodeId as string;
-      if (newNodeId && newNodeId !== store.activeNodeId) {
-        // Save current session for this node before switching
+      const nodeId = (data.nodeId as string) || (targetId.includes(":") ? targetId.split(":")[0] : "");
+      if (nodeId && nodeId !== store.activeNodeId) {
         if (store.currentSessionId) {
           localStorage.setItem(`cc-node-session-${store.activeNodeId}`, store.currentSessionId);
           const oldSdk = store.sdkSessions.find((x) => x.sessionId === store.currentSessionId);
@@ -431,8 +415,17 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
             disconnectSession(store.currentSessionId);
           }
         }
-        store.setCurrentSession(null);
-        store.setActiveNode(newNodeId);
+        store.setActiveNode(nodeId);
+      } else if (store.currentSessionId) {
+        const oldSdk = store.sdkSessions.find((x) => x.sessionId === store.currentSessionId);
+        if (oldSdk?.backendType !== "terminal") {
+          disconnectSession(store.currentSessionId);
+        }
+      }
+      store.setCurrentSession(targetId);
+      const newSdk = store.sdkSessions.find((x) => x.sessionId === targetId);
+      if (newSdk?.backendType !== "terminal") {
+        connectSession(targetId);
       }
       break;
     }

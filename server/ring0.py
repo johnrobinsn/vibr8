@@ -656,11 +656,6 @@ class Ring0Manager:
             env["VIBR8_TOKEN"] = token
         if self._model:
             env["RING0_MODEL"] = self._model
-        # Remote-node Ring0: forward client/screen/artifact tools to the hub.
-        if self._hub_url:
-            env["VIBR8_HUB_URL"] = self._hub_url
-        if self._hub_token:
-            env["VIBR8_HUB_TOKEN"] = self._hub_token
         return env
 
     def _build_acp_mcp_servers(self) -> list[dict[str, Any]]:

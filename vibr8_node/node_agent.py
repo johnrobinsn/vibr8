@@ -558,9 +558,69 @@ class NodeAgent:
 
     # ── Local server ──────────────────────────────────────────────────────
 
+    def _make_hub_proxy_middleware(self):
+        """Create aiohttp middleware that proxies hub-only routes to the hub.
+
+        Routes like /api/clients, /api/ring0/query-client, /api/ring0/switch-ui,
+        /api/second-screen/*, and /api/artifacts* operate on browser-side state
+        that only exists on the hub. On a node, these are forwarded.
+        """
+        hub_http_url = self._hub_http_url()
+        hub_token = self.hub_service_token
+        hub_verify_ssl = not (hub_http_url.startswith("https://localhost") or hub_http_url.startswith("https://127.0.0.1"))
+
+        _HUB_ONLY_PREFIXES = (
+            "/api/clients",
+            "/api/ring0/query-client",
+            "/api/ring0/switch-ui",
+            "/api/ring0/clients",
+            "/api/second-screen/",
+            "/api/artifacts",
+        )
+
+        @web.middleware
+        async def hub_proxy(request: web.Request, handler):
+            path = request.path
+            if not any(path.startswith(p) or path == p.rstrip("/") for p in _HUB_ONLY_PREFIXES):
+                return await handler(request)
+
+            target_url = f"{hub_http_url}{path}"
+            headers = {}
+            if hub_token:
+                headers["Authorization"] = f"Bearer {hub_token}"
+            if request.content_type:
+                headers["Content-Type"] = request.content_type
+
+            try:
+                body = await request.read() if request.can_read_body else None
+                ssl_ctx = False if not hub_verify_ssl else None
+                async with aiohttp.ClientSession() as session:
+                    async with session.request(
+                        request.method, target_url,
+                        headers=headers,
+                        data=body,
+                        params=request.query,
+                        ssl=ssl_ctx,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        resp_body = await resp.read()
+                        return web.Response(
+                            status=resp.status,
+                            body=resp_body,
+                            content_type=resp.content_type,
+                        )
+            except Exception as e:
+                logger.error("[node] Hub proxy error for %s: %s", path, e)
+                return web.json_response({"error": f"Hub proxy failed: {e}"}, status=502)
+
+        return hub_proxy
+
     async def _start_local_server(self) -> None:
         """Start a minimal aiohttp server for CLI WebSocket + Ring0 MCP."""
-        app = web.Application()
+        middlewares = []
+        if self.hub_service_token:
+            middlewares.append(self._make_hub_proxy_middleware())
+        app = web.Application(middlewares=middlewares)
         bridge = self._bridge
         launcher = self._launcher
 

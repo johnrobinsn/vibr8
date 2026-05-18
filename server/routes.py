@@ -241,6 +241,7 @@ def create_routes(
     auth_manager: AuthManager | None = None,
     ring0_manager: Ring0Manager | None = None,
     node_registry: Any | None = None,
+    session_registry: Any | None = None,
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
 
@@ -1481,6 +1482,30 @@ def create_routes(
     @routes.get("/api/ring0/sessions")
     async def ring0_sessions(request: web.Request) -> web.Response:
         """List sessions — proxied for Ring0 MCP server (auth-exempt)."""
+        if session_registry:
+            r0_id = ring0_manager.session_id if ring0_manager else None
+            session_registry.sync_from_launcher(r0_id or "")
+            sessions = []
+            for se in session_registry.list_all():
+                name = session_names.get_name(se.qualified_id) or se.name or "unnamed"
+                bridge_session = ws_bridge._sessions.get(se.qualified_id)
+                entry = {
+                    "sessionId": se.qualified_id,
+                    "name": name,
+                    "state": se.state,
+                    "cwd": se.cwd,
+                    "backendType": se.backend_type,
+                    "archived": se.archived,
+                    "nodeId": se.node_id,
+                    "pendingPermissionCount": ws_bridge.get_pending_permission_count(se.qualified_id),
+                    "pendingPermissions": ws_bridge.get_pending_permissions(se.qualified_id),
+                    "controlledBy": bridge_session.controlled_by if bridge_session else "ring0",
+                }
+                if se.is_ring0:
+                    entry["isRing0"] = True
+                sessions.append(entry)
+            return web.json_response(sessions)
+        # Fallback: no registry (shouldn't happen in practice)
         r0_id = ring0_manager.session_id if ring0_manager else None
         sessions = []
         for sid in launcher.get_all_session_ids():
@@ -1690,7 +1715,15 @@ def create_routes(
         message = body.get("message")
         if not session_id or not message:
             return web.json_response({"error": "sessionId and message required"}, status=400)
-        # Resolve short session ID prefix
+        if session_registry:
+            entry = session_registry.resolve(session_id)
+            if not entry:
+                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+            router = session_registry.get_router(entry)
+            err = await router.send_message(message)
+            if err:
+                return web.json_response({"error": err, "controlledBy": "user"}, status=409)
+            return web.json_response({"ok": True, "sessionId": entry.qualified_id})
         resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
@@ -1708,10 +1741,10 @@ def create_routes(
         session_id = body.get("sessionId")
         if not session_id:
             return web.json_response({"error": "sessionId required"}, status=400)
-        # For tunneled sessions (nodeId:rawId), accept without local resolution —
-        # the hub may not have a proxy session object yet, but the browser can
-        # still switch to it and fetch data on demand via the node tunnel.
-        if ":" in session_id:
+        if session_registry:
+            entry = session_registry.resolve(session_id)
+            resolved = entry.qualified_id if entry else session_id
+        elif ":" in session_id:
             resolved = session_id
         else:
             resolved = _resolve_session_id(session_id, launcher, ws_bridge)
@@ -1773,6 +1806,15 @@ def create_routes(
     @routes.get("/api/ring0/session-output/{id}")
     async def ring0_session_output(request: web.Request) -> web.Response:
         session_id = request.match_info["id"]
+        if session_registry:
+            entry = session_registry.resolve(session_id)
+            if not entry:
+                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+            router = session_registry.get_router(entry)
+            messages = router.get_message_history()
+            pending = router.get_pending_permissions()
+            formatted = _format_session_output(messages, pending)
+            return web.json_response({"messages": messages, "pendingPermissions": pending, "formatted": formatted})
         resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
@@ -1825,6 +1867,15 @@ def create_routes(
             return web.json_response(
                 {"error": "sessionId, requestId, and behavior (allow/deny) required"}, status=400
             )
+        if session_registry:
+            entry = session_registry.resolve(session_id)
+            if not entry:
+                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+            router = session_registry.get_router(entry)
+            ok = await router.respond_permission(request_id, behavior, message)
+            if not ok:
+                return web.json_response({"error": f"Permission {request_id} not found"}, status=404)
+            return web.json_response({"ok": True})
         resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
@@ -1843,6 +1894,15 @@ def create_routes(
         session_id = body.get("sessionId", "")
         if not session_id:
             return web.json_response({"error": "sessionId required"}, status=400)
+        if session_registry:
+            entry = session_registry.resolve(session_id)
+            if not entry:
+                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+            router = session_registry.get_router(entry)
+            ok = router.interrupt()
+            if not ok:
+                return web.json_response({"error": f"Session {session_id} not interruptible"}, status=404)
+            return web.json_response({"ok": True, "sessionId": entry.qualified_id})
         resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
@@ -1895,7 +1955,8 @@ def create_routes(
         name = body.get("name", "").strip()
         if not sid or not name:
             return web.json_response({"error": "sessionId and name are required"}, status=400)
-        resolved = _resolve_session_id(sid, launcher, ws_bridge)
+        _entry = session_registry.resolve(sid) if session_registry else None
+        resolved = _entry.qualified_id if _entry else _resolve_session_id(sid, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session {sid} not found"}, status=404)
         session_names.set_name(resolved, name, unique=False)
@@ -1917,7 +1978,8 @@ def create_routes(
             return web.json_response({"error": "sessionId required"}, status=400)
         if mode not in _ALLOWED_SESSION_MODES:
             return web.json_response({"error": f"mode must be one of: {', '.join(sorted(_ALLOWED_SESSION_MODES))}"}, status=400)
-        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
+        _entry = session_registry.resolve(session_id) if session_registry else None
+        resolved = _entry.qualified_id if _entry else _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         session = ws_bridge.get_session(resolved)
@@ -1936,7 +1998,8 @@ def create_routes(
         session_id = request.query.get("sessionId", "")
         if not session_id:
             return web.json_response({"error": "sessionId query param required"}, status=400)
-        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
+        _entry = session_registry.resolve(session_id) if session_registry else None
+        resolved = _entry.qualified_id if _entry else _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         session = ws_bridge.get_session(resolved)

@@ -24,44 +24,12 @@ BASE_URL = f"{_SCHEME}://localhost:{PORT}/api"
 _TOKEN = os.environ.get("VIBR8_TOKEN")
 _VERIFY_SSL = _SCHEME != "https"  # Disable for self-signed certs
 
-# Hub forwarding (set when Ring0 runs on a remote node). When unset, the
-# _hub_* helpers fall back to local — so the hub's own Ring0 is unaffected.
-_HUB_URL = os.environ.get("VIBR8_HUB_URL", "").rstrip("/")
-_HUB_TOKEN = os.environ.get("VIBR8_HUB_TOKEN")
-HUB_BASE_URL = f"{_HUB_URL}/api" if _HUB_URL else ""
-# Hub may use a self-signed cert; same defense as the local connection.
-_HUB_VERIFY_SSL = not _HUB_URL.startswith("https://localhost") and not _HUB_URL.startswith("https://127.0.0.1")
-
-# Extract node ID from service token (format: "svc:node-{nodeId}:ts:hmac")
-_NODE_ID = ""
-if _HUB_TOKEN and _HUB_TOKEN.startswith("svc:node-"):
-    parts = _HUB_TOKEN.split(":")
-    if len(parts) >= 3:
-        _NODE_ID = parts[1].removeprefix("node-")
-
-
-def _qualify_session_id(session_id: str) -> str:
-    """Prefix a local session ID with the node ID for the hub.
-
-    On a node, local sessions are known to the hub as 'nodeId:sessionId'.
-    If already qualified or not on a node, returns unchanged.
-    """
-    if not _NODE_ID or ":" in session_id:
-        return session_id
-    return f"{_NODE_ID}:{session_id}"
-
 mcp = FastMCP("vibr8")
 
 
 def _auth_headers() -> dict[str, str]:
     if _TOKEN:
         return {"Authorization": f"Bearer {_TOKEN}"}
-    return {}
-
-
-def _hub_auth_headers() -> dict[str, str]:
-    if _HUB_TOKEN:
-        return {"Authorization": f"Bearer {_HUB_TOKEN}"}
     return {}
 
 
@@ -104,64 +72,6 @@ async def _delete(path: str) -> dict[str, Any]:
                 return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
         return r.json()
 
-
-# ── Hub-forwarding helpers ───────────────────────────────────────────────────
-# Used by tools that interact with browser clients, second screens, or
-# artifacts. On a remote node, browsers are connected to the hub — not the
-# node — so these calls must go to the hub. On the hub itself, _HUB_URL is
-# unset and the helpers fall through to the local _get/_post/_put/_delete.
-
-
-async def _hub_get(path: str) -> Any:
-    if not HUB_BASE_URL:
-        return await _get(path)
-    async with httpx.AsyncClient(verify=_HUB_VERIFY_SSL) as client:
-        r = await client.get(f"{HUB_BASE_URL}{path}", headers=_hub_auth_headers(), timeout=10)
-        if r.status_code >= 400:
-            try:
-                return r.json()
-            except Exception:
-                return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
-        return r.json()
-
-
-async def _hub_post(path: str, body: dict | None = None) -> dict[str, Any]:
-    if not HUB_BASE_URL:
-        return await _post(path, body)
-    async with httpx.AsyncClient(verify=_HUB_VERIFY_SSL) as client:
-        r = await client.post(f"{HUB_BASE_URL}{path}", json=body, headers=_hub_auth_headers(), timeout=30)
-        if r.status_code >= 400:
-            try:
-                return r.json()
-            except Exception:
-                return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
-        return r.json()
-
-
-async def _hub_put(path: str, body: dict | None = None) -> dict[str, Any]:
-    if not HUB_BASE_URL:
-        return await _put(path, body)
-    async with httpx.AsyncClient(verify=_HUB_VERIFY_SSL) as client:
-        r = await client.put(f"{HUB_BASE_URL}{path}", json=body, headers=_hub_auth_headers(), timeout=10)
-        if r.status_code >= 400:
-            try:
-                return r.json()
-            except Exception:
-                return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
-        return r.json()
-
-
-async def _hub_delete(path: str) -> dict[str, Any]:
-    if not HUB_BASE_URL:
-        return await _delete(path)
-    async with httpx.AsyncClient(verify=_HUB_VERIFY_SSL) as client:
-        r = await client.delete(f"{HUB_BASE_URL}{path}", headers=_hub_auth_headers(), timeout=10)
-        if r.status_code >= 400:
-            try:
-                return r.json()
-            except Exception:
-                return {"error": f"HTTP {r.status_code}: {r.text[:200]}"}
-        return r.json()
 
 
 def _slugify(name: str) -> str:
@@ -321,14 +231,13 @@ async def switch_ui(session_id: str, client_id: str = "") -> str:
         client_id: Optional client ID, name, or prefix to target. If provided, only that browser instance switches.
                    If omitted, all connected browsers switch.
     """
-    qualified = _qualify_session_id(session_id)
-    body: dict[str, str] = {"sessionId": qualified}
+    body: dict[str, str] = {"sessionId": session_id}
     if client_id:
         resolved, err = await _resolve_client(client_id)
         if err:
             return err
         body["clientId"] = resolved
-    result = await _hub_post("/ring0/switch-ui", body)
+    result = await _post("/ring0/switch-ui", body)
     if result.get("error"):
         return f"Error: {result['error']}"
     target = f"client {client_id[:8]}" if client_id else "all clients"
@@ -478,7 +387,7 @@ async def get_active_clients() -> str:
 
     Shows both online and offline clients with their metadata.
     """
-    clients = await _hub_get("/clients")
+    clients = await _get("/clients")
     if not clients:
         return "No clients known."
     lines = []
@@ -528,7 +437,7 @@ async def _resolve_client(identifier: str) -> tuple[str, str | None]:
     Returns (resolved_client_id, error_message).
     If ambiguous or not found, error_message describes the issue.
     """
-    clients = await _hub_get("/clients")
+    clients = await _get("/clients")
     if not clients:
         return "", "No clients known."
 
@@ -625,7 +534,7 @@ async def query_client(client_id: str, method: str, params: str = "") -> str:
             body["params"] = json.loads(params)
         except json.JSONDecodeError:
             return f"Error: invalid params JSON: {params}"
-    result = await _hub_post("/ring0/query-client", body)
+    result = await _post("/ring0/query-client", body)
     if result.get("error"):
         return f"Error: {result['error']}"
     return json.dumps(result.get("result", {}), indent=2)
@@ -652,7 +561,7 @@ async def switch_audio(target: str, client_id: str = "") -> str:
     if client_id:
         resolved, err = await _resolve_client(client_id)
     else:
-        clients = await _hub_get("/clients")
+        clients = await _get("/clients")
         online = [c for c in (clients or []) if c.get("online")]
         if not online:
             return "Error: no online clients."
@@ -660,7 +569,7 @@ async def switch_audio(target: str, client_id: str = "") -> str:
     if err:
         return err
 
-    devices_result = await _hub_post("/ring0/query-client", {
+    devices_result = await _post("/ring0/query-client", {
         "clientId": resolved, "method": "list_audio_devices",
     })
     if devices_result.get("error"):
@@ -699,7 +608,7 @@ async def switch_audio(target: str, client_id: str = "") -> str:
 
     results = []
     if input_dev:
-        r = await _hub_post("/ring0/query-client", {
+        r = await _post("/ring0/query-client", {
             "clientId": resolved, "method": "set_audio_input",
             "params": {"label": input_dev["label"]},
         })
@@ -712,7 +621,7 @@ async def switch_audio(target: str, client_id: str = "") -> str:
         results.append(f"No {target} input found (available: {labels})")
 
     if output_dev:
-        r = await _hub_post("/ring0/query-client", {
+        r = await _post("/ring0/query-client", {
             "clientId": resolved, "method": "set_audio_output",
             "params": {"deviceId": output_dev["deviceId"]},
         })
@@ -754,13 +663,13 @@ async def update_client_metadata(
         updates["role"] = role
     if not updates:
         return "Error: provide at least one of name, description, or role."
-    result = await _hub_put(f"/clients/{resolved}", updates)
+    result = await _put(f"/clients/{resolved}", updates)
     if result.get("error"):
         return f"Error: {result['error']}"
     new_name = result.get("name", "")
     # Push name update to the client via RPC so its UI reflects the change
     if "name" in updates:
-        await _hub_post("/ring0/query-client", {
+        await _post("/ring0/query-client", {
             "clientId": resolved,
             "method": "set_name",
             "params": {"name": updates["name"]},
@@ -785,7 +694,7 @@ async def launch_app(package: str = "", url: str = "") -> str:
         return "Error: provide either 'package' or 'url' (or both)."
 
     # Find a connected client to send the command to
-    clients = await _hub_get("/ring0/clients")
+    clients = await _get("/ring0/clients")
     if not clients:
         return "Error: no clients connected."
 
@@ -805,7 +714,7 @@ async def launch_app(package: str = "", url: str = "") -> str:
     if url:
         params["url"] = url
 
-    result = await _hub_post("/ring0/query-client", {
+    result = await _post("/ring0/query-client", {
         "clientId": target_id,
         "method": "launch_app",
         "params": params,
@@ -831,7 +740,7 @@ async def pair_second_screen(code: str, username: str = "") -> str:
     if username:
         body["username"] = username
 
-    result = await _hub_post("/second-screen/pair", body)
+    result = await _post("/second-screen/pair", body)
     if result.get("error"):
         return f"Error: {result['error']}"
     return f"Paired successfully. Second screen {result.get('secondScreenClientId', '?')[:8]}... is now connected."
@@ -844,7 +753,7 @@ async def list_second_screens() -> str:
     Returns information about each paired second screen including which user
     it's paired to and whether it's currently online.
     """
-    screens = await _hub_get("/second-screen/list")
+    screens = await _get("/second-screen/list")
     if not screens:
         return "No second screens paired."
     lines = []
@@ -904,14 +813,14 @@ async def show_on_second_screen(
         display_content = f"data:application/pdf;base64,{pdf_data}"
 
     # Get primary clients (integrated viewer panes)
-    all_clients = await _hub_get("/ring0/clients") or {}
+    all_clients = await _get("/ring0/clients") or {}
     primary_ids = [
         cid for cid, info in all_clients.items()
         if isinstance(info, dict) and info.get("role") == "primary"
     ]
 
     # Get external second screens
-    screens = await _hub_get("/second-screen/list")
+    screens = await _get("/second-screen/list")
     online_screens = [s for s in screens if s.get("online") and s.get("enabled", True)]
 
     # Route based on client_id
@@ -958,13 +867,13 @@ async def show_on_second_screen(
 
     results = []
     for cid in targets_primary:
-        result = await _hub_post("/ring0/query-client", {"clientId": cid, "method": method, "params": rpc_params})
+        result = await _post("/ring0/query-client", {"clientId": cid, "method": method, "params": rpc_params})
         label = "viewer"
         results.append(f"Sent to {label}" if not result.get("error") else f"Error ({label}): {result['error']}")
 
     for screen in targets_screens:
         body: dict[str, Any] = {"clientId": screen["clientId"], "method": method, "params": rpc_params}
-        result = await _hub_post("/ring0/query-client", body)
+        result = await _post("/ring0/query-client", body)
         if result.get("error"):
             results.append(f"Error sending to {screen['clientId'][:8]}: {result['error']}")
         else:
@@ -1045,7 +954,7 @@ async def push_file_to_second_screen(
         return f"Error reading {path}: {e}"
 
     # Get all online, enabled second screens
-    screens = await _hub_get("/second-screen/list")
+    screens = await _get("/second-screen/list")
     online_screens = [s for s in screens if s.get("online") and s.get("enabled", True)]
 
     if not online_screens:
@@ -1061,7 +970,7 @@ async def push_file_to_second_screen(
             "method": "show_content",
             "params": params,
         }
-        result = await _hub_post("/ring0/query-client", body)
+        result = await _post("/ring0/query-client", body)
         if result.get("error"):
             results.append(f"Error sending to {screen['clientId'][:8]}: {result['error']}")
         else:
@@ -1136,7 +1045,7 @@ async def share_artifact(
         body["sourceFilePath"] = file_path
     else:
         body["content"] = content
-    result = await _hub_post("/artifacts", body)
+    result = await _post("/artifacts", body)
     if result.get("error"):
         return f"Error: {result['error']}"
     artifact_id = result.get("id", "")
@@ -1170,7 +1079,7 @@ async def list_artifacts(session_id: str = "") -> str:
         session_id: If provided, only list artifacts from this session.
     """
     qs = f"?sessionId={session_id}" if session_id else ""
-    artifacts = await _hub_get(f"/artifacts{qs}")
+    artifacts = await _get(f"/artifacts{qs}")
     if not artifacts:
         return "No artifacts."
     lines = []
@@ -1188,7 +1097,7 @@ async def delete_artifact(artifact_id: str) -> str:
         artifact_id: The artifact ID or a prefix of it.
     """
     # Try exact match first, then prefix match
-    artifacts = await _hub_get("/artifacts")
+    artifacts = await _get("/artifacts")
     match = None
     for a in (artifacts or []):
         if a["id"] == artifact_id or a["id"].startswith(artifact_id):
@@ -1196,7 +1105,7 @@ async def delete_artifact(artifact_id: str) -> str:
             break
     if not match:
         return f"No artifact matching '{artifact_id}'."
-    result = await _hub_delete(f"/artifacts/{match['id']}")
+    result = await _delete(f"/artifacts/{match['id']}")
     if result.get("error"):
         return f"Error: {result['error']}"
     return f"Deleted artifact '{match['title']}'."
@@ -1210,7 +1119,7 @@ async def query_second_screen(client_id: str = "") -> str:
         client_id: Optional specific second screen client ID. If omitted,
                    queries all connected second screens.
     """
-    screens = await _hub_get("/second-screen/list")
+    screens = await _get("/second-screen/list")
     online_screens = [s for s in screens if s.get("online")]
 
     if not online_screens:
@@ -1228,7 +1137,7 @@ async def query_second_screen(client_id: str = "") -> str:
             "clientId": screen["clientId"],
             "method": "get_device_info",
         }
-        result = await _hub_post("/ring0/query-client", body)
+        result = await _post("/ring0/query-client", body)
         if result.get("error"):
             results.append(f"Screen {screen['clientId'][:8]}: error — {result['error']}")
         else:
@@ -1262,7 +1171,7 @@ async def set_second_screen_scale(
     if scale == 0 and delta == 0:
         return "Error: provide either 'scale' (absolute) or 'delta' (relative adjustment)."
 
-    screens = await _hub_get("/second-screen/list")
+    screens = await _get("/second-screen/list")
     online_screens = [s for s in screens if s.get("online")]
     if not online_screens:
         return "No second screens are online."
@@ -1290,7 +1199,7 @@ async def set_second_screen_scale(
             "method": "set_scale",
             "params": params,
         }
-        result = await _hub_post("/ring0/query-client", body)
+        result = await _post("/ring0/query-client", body)
         if result.get("error"):
             results.append(f"Screen {screen['clientId'][:8]}: error — {result['error']}")
         else:
@@ -1317,7 +1226,7 @@ async def set_tv_safe(
                          without specifying this, the current value is kept (default 2.5%).
         client_id: Target specific second screen (name, prefix, or full ID). Omit for all screens.
     """
-    screens = await _hub_get("/second-screen/list")
+    screens = await _get("/second-screen/list")
     online_screens = [s for s in screens if s.get("online")]
     if not online_screens:
         return "No second screens are online."
@@ -1343,7 +1252,7 @@ async def set_tv_safe(
             "method": "set_tv_safe",
             "params": params,
         }
-        result = await _hub_post("/ring0/query-client", body)
+        result = await _post("/ring0/query-client", body)
         if result.get("error"):
             results.append(f"Screen {screen['clientId'][:8]}: error — {result['error']}")
         else:
@@ -1369,7 +1278,7 @@ async def set_dark_mode(
         enabled: True for dark mode, False for light mode.
         client_id: Target specific second screen (name, prefix, or full ID). Omit for all screens.
     """
-    screens = await _hub_get("/second-screen/list")
+    screens = await _get("/second-screen/list")
     online_screens = [s for s in screens if s.get("online")]
     if not online_screens:
         return "No second screens are online."
@@ -1391,7 +1300,7 @@ async def set_dark_mode(
             "method": "set_dark_mode",
             "params": {"enabled": enabled},
         }
-        result = await _hub_post("/ring0/query-client", body)
+        result = await _post("/ring0/query-client", body)
         if result.get("error"):
             results.append(f"Screen {screen['clientId'][:8]}: error — {result['error']}")
         else:
@@ -1411,7 +1320,7 @@ async def toggle_second_screen(client_id: str, enabled: bool = True) -> str:
         enabled: True to enable, False to disable.
     """
     # Resolve prefix to full client ID
-    screens = await _hub_get("/second-screen/list")
+    screens = await _get("/second-screen/list")
     matches = [s for s in screens if s["clientId"].startswith(client_id)]
     if not matches:
         return f"No second screen matching '{client_id}'."
@@ -1419,7 +1328,7 @@ async def toggle_second_screen(client_id: str, enabled: bool = True) -> str:
         return f"Ambiguous prefix '{client_id}' matches {len(matches)} screens."
 
     full_id = matches[0]["clientId"]
-    result = await _hub_post("/second-screen/toggle", {"clientId": full_id, "enabled": enabled})
+    result = await _post("/second-screen/toggle", {"clientId": full_id, "enabled": enabled})
     if result.get("error"):
         return f"Error: {result['error']}"
     state = "enabled" if result.get("enabled") else "disabled"
@@ -1447,7 +1356,7 @@ async def capture_screen(
 
     # Resolve client ID
     if not client_id:
-        clients = await _hub_get("/clients")
+        clients = await _get("/clients")
         online = [c for c in clients if c.get("online")]
         if not online:
             return "Error: no clients connected."
@@ -1463,7 +1372,7 @@ async def capture_screen(
         "method": "capture_screenshot",
         "params": {"format": format, "quality": quality},
     }
-    result = await _hub_post("/ring0/query-client", body)
+    result = await _post("/ring0/query-client", body)
     if result.get("error"):
         return f"Error: {result['error']}"
 
