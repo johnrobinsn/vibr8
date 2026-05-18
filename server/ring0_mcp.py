@@ -32,6 +32,24 @@ HUB_BASE_URL = f"{_HUB_URL}/api" if _HUB_URL else ""
 # Hub may use a self-signed cert; same defense as the local connection.
 _HUB_VERIFY_SSL = not _HUB_URL.startswith("https://localhost") and not _HUB_URL.startswith("https://127.0.0.1")
 
+# Extract node ID from service token (format: "svc:node-{nodeId}:ts:hmac")
+_NODE_ID = ""
+if _HUB_TOKEN and _HUB_TOKEN.startswith("svc:node-"):
+    parts = _HUB_TOKEN.split(":")
+    if len(parts) >= 3:
+        _NODE_ID = parts[1].removeprefix("node-")
+
+
+def _qualify_session_id(session_id: str) -> str:
+    """Prefix a local session ID with the node ID for the hub.
+
+    On a node, local sessions are known to the hub as 'nodeId:sessionId'.
+    If already qualified or not on a node, returns unchanged.
+    """
+    if not _NODE_ID or ":" in session_id:
+        return session_id
+    return f"{_NODE_ID}:{session_id}"
+
 mcp = FastMCP("vibr8")
 
 
@@ -303,7 +321,8 @@ async def switch_ui(session_id: str, client_id: str = "") -> str:
         client_id: Optional client ID, name, or prefix to target. If provided, only that browser instance switches.
                    If omitted, all connected browsers switch.
     """
-    body: dict[str, str] = {"sessionId": session_id}
+    qualified = _qualify_session_id(session_id)
+    body: dict[str, str] = {"sessionId": qualified}
     if client_id:
         resolved, err = await _resolve_client(client_id)
         if err:

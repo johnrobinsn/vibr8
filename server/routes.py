@@ -1708,9 +1708,15 @@ def create_routes(
         session_id = body.get("sessionId")
         if not session_id:
             return web.json_response({"error": "sessionId required"}, status=400)
-        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
-        if not resolved:
-            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+        # For tunneled sessions (nodeId:rawId), accept without local resolution —
+        # the hub may not have a proxy session object yet, but the browser can
+        # still switch to it and fetch data on demand via the node tunnel.
+        if ":" in session_id:
+            resolved = session_id
+        else:
+            resolved = _resolve_session_id(session_id, launcher, ws_bridge)
+            if not resolved:
+                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         client_id = body.get("clientId", "")
         sent = await ws_bridge.broadcast_ring0_switch_ui(resolved, client_id=client_id)
         if client_id and not sent:
