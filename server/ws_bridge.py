@@ -2315,10 +2315,16 @@ class WsBridge:
     async def broadcast_ring0_switch_ui(self, target_session_id: str, *, client_id: str = "") -> bool:
         """Send ring0_switch_ui to a specific client or broadcast to all browsers.
 
+        For tunneled sessions (nodeId:rawId), sends a node_switch first so
+        the browser loads that node's session list before switching.
+
         Returns True if the message was sent successfully, False if the target client was not found.
         """
-        msg = {"type": "ring0_switch_ui", "sessionId": target_session_id}
-        data = json.dumps(msg)
+        messages: list[str] = []
+        node_id, _ = self.parse_qualified_id(target_session_id)
+        if node_id:
+            messages.append(json.dumps({"type": "node_switch", "nodeId": node_id}))
+        messages.append(json.dumps({"type": "ring0_switch_ui", "sessionId": target_session_id}))
 
         # Target a specific client if provided
         if client_id:
@@ -2331,7 +2337,8 @@ class WsBridge:
                         break
             if ws and not ws.closed:
                 try:
-                    await ws.send_str(data)
+                    for m in messages:
+                        await ws.send_str(m)
                     return True
                 except Exception:
                     pass
@@ -2342,7 +2349,8 @@ class WsBridge:
             dead: list[web.WebSocketResponse] = []
             for ws in session.browser_sockets:
                 try:
-                    await ws.send_str(data)
+                    for m in messages:
+                        await ws.send_str(m)
                 except Exception:
                     dead.append(ws)
             for ws in dead:
