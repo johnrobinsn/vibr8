@@ -1691,7 +1691,7 @@ def create_routes(
         if not session_id or not message:
             return web.json_response({"error": "sessionId and message required"}, status=400)
         # Resolve short session ID prefix
-        resolved = _resolve_session_id(session_id, launcher)
+        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         err = await ws_bridge.submit_user_message(resolved, message)
@@ -1708,7 +1708,7 @@ def create_routes(
         session_id = body.get("sessionId")
         if not session_id:
             return web.json_response({"error": "sessionId required"}, status=400)
-        resolved = _resolve_session_id(session_id, launcher)
+        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         client_id = body.get("clientId", "")
@@ -1767,7 +1767,7 @@ def create_routes(
     @routes.get("/api/ring0/session-output/{id}")
     async def ring0_session_output(request: web.Request) -> web.Response:
         session_id = request.match_info["id"]
-        resolved = _resolve_session_id(session_id, launcher)
+        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         messages = ws_bridge.get_message_history(resolved)
@@ -1819,7 +1819,7 @@ def create_routes(
             return web.json_response(
                 {"error": "sessionId, requestId, and behavior (allow/deny) required"}, status=400
             )
-        resolved = _resolve_session_id(session_id, launcher)
+        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         ok = await ws_bridge.respond_to_permission(resolved, request_id, behavior, message)
@@ -1837,7 +1837,7 @@ def create_routes(
         session_id = body.get("sessionId", "")
         if not session_id:
             return web.json_response({"error": "sessionId required"}, status=400)
-        resolved = _resolve_session_id(session_id, launcher)
+        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         ok = ws_bridge.interrupt_session(resolved)
@@ -1889,7 +1889,7 @@ def create_routes(
         name = body.get("name", "").strip()
         if not sid or not name:
             return web.json_response({"error": "sessionId and name are required"}, status=400)
-        resolved = _resolve_session_id(sid, launcher)
+        resolved = _resolve_session_id(sid, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session {sid} not found"}, status=404)
         session_names.set_name(resolved, name, unique=False)
@@ -1911,7 +1911,7 @@ def create_routes(
             return web.json_response({"error": "sessionId required"}, status=400)
         if mode not in _ALLOWED_SESSION_MODES:
             return web.json_response({"error": f"mode must be one of: {', '.join(sorted(_ALLOWED_SESSION_MODES))}"}, status=400)
-        resolved = _resolve_session_id(session_id, launcher)
+        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         session = ws_bridge.get_session(resolved)
@@ -1930,7 +1930,7 @@ def create_routes(
         session_id = request.query.get("sessionId", "")
         if not session_id:
             return web.json_response({"error": "sessionId query param required"}, status=400)
-        resolved = _resolve_session_id(session_id, launcher)
+        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
         if not resolved:
             return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
         session = ws_bridge.get_session(resolved)
@@ -3039,15 +3039,26 @@ def create_routes(
     return routes
 
 
-def _resolve_session_id(session_id: str, launcher: CliLauncher) -> str | None:
-    """Resolve a full or prefix session ID to a full session ID."""
+def _resolve_session_id(session_id: str, launcher: CliLauncher, ws_bridge: WsBridge | None = None) -> str | None:
+    """Resolve a full or prefix session ID to a full session ID.
+
+    Checks the local launcher first, then WsBridge sessions (which includes
+    tunneled sessions from remote nodes with qualified IDs like 'nodeId:rawId').
+    """
     info = launcher.get_session(session_id)
     if info:
         return session_id
-    # Try prefix match
+    # Try prefix match in launcher
     for sid in launcher.get_all_session_ids():
         if sid.startswith(session_id):
             return sid
+    # Check WsBridge sessions (tunneled/proxy sessions from remote nodes)
+    if ws_bridge:
+        if ws_bridge.get_session(session_id):
+            return session_id
+        for sid in list(ws_bridge._sessions.keys()):
+            if sid.startswith(session_id):
+                return sid
     return None
 
 
