@@ -19,6 +19,7 @@ from server import artifacts, env_manager, git_utils, session_names
 from server import speaker_fingerprints, voice_profiles, voice_logger
 from server.usage_limits import get_usage_limits
 from server.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
+from server.session_registry import LOCAL_NODE_ID
 from server.worktree_tracker import WorktreeTracker, WorktreeMapping
 
 if TYPE_CHECKING:
@@ -242,6 +243,7 @@ def create_routes(
     ring0_manager: Ring0Manager | None = None,
     node_registry: Any | None = None,
     session_registry: Any | None = None,
+    self_node_name: str = "",
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
 
@@ -1533,8 +1535,14 @@ def create_routes(
     @routes.get("/api/ring0/node-environment")
     async def ring0_node_environment(request: web.Request) -> web.Response:
         """Return environment metadata for the node this Ring0 runs on."""
+        if self_node_name:
+            node_name = self_node_name
+        elif node_registry:
+            node_name = node_registry.hub_name
+        else:
+            node_name = "local"
         info = {
-            "nodeName": node_registry.hub_name if node_registry else "local",
+            "nodeName": node_name,
             "platform": plat.system().lower(),
             "arch": plat.machine(),
             "hostname": plat.node(),
@@ -1742,9 +1750,22 @@ def create_routes(
         session_id = body.get("sessionId")
         if not session_id:
             return web.json_response({"error": "sessionId required"}, status=400)
+        # Scope resolution to the calling Ring0's node. Node-issued service
+        # tokens are named "node-{nodeId}"; any other caller (local Ring0,
+        # UI, etc.) is treated as the hub itself.
+        auth_user = request.get("auth_user", "") or ""
+        if auth_user.startswith("node-"):
+            source_node_id = auth_user[len("node-"):]
+        else:
+            source_node_id = LOCAL_NODE_ID
         if session_registry:
-            entry = session_registry.resolve(session_id)
-            resolved = entry.qualified_id if entry else session_id
+            entry = session_registry.resolve(session_id, node_id=source_node_id)
+            if not entry:
+                return web.json_response(
+                    {"error": f"Session not found on this node: {session_id}"},
+                    status=404,
+                )
+            resolved = entry.qualified_id
         elif ":" in session_id:
             resolved = session_id
         else:
@@ -2811,7 +2832,12 @@ def create_routes(
 
     @routes.post("/api/nodes/{node_id}/activate")
     async def activate_node(request: web.Request) -> web.Response:
-        """Switch the active node."""
+        """Switch the active node.
+
+        When called by Ring0 (with a clientId in the body or in the local
+        Ring0 prompt context), broadcasts ring0_switch_node so the target
+        browser flips its UI to match.
+        """
         if node_registry is None:
             return web.json_response({"error": "Node registry not available"}, status=503)
         node_id = request.match_info["node_id"]
@@ -2822,6 +2848,18 @@ def create_routes(
         node = node_registry.get_node(node_id)
         name = node.name if node else node_id
         logger.info("[nodes] Active node switched to %r (%s)", name, node_id[:8])
+
+        # Notify the relevant browser so its UI flips active-node selection.
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        client_id = (body.get("clientId") if isinstance(body, dict) else "") or ""
+        if not client_id:
+            client_id = ws_bridge.get_ring0_prompt_client()
+        if client_id:
+            await ws_bridge.broadcast_ring0_switch_node(node_id, client_id=client_id)
+
         return web.json_response({"ok": True, "nodeId": node_id, "name": name})
 
     @routes.get("/api/nodes/active")

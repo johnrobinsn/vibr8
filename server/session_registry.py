@@ -226,24 +226,28 @@ class SessionRegistry:
 
     # ── Resolution ───────────────────────────────────────────────────────
 
-    def resolve(self, id_or_prefix: str) -> SessionEntry | None:
+    def resolve(self, id_or_prefix: str, *, node_id: str | None = None) -> SessionEntry | None:
         """Resolve a full or prefix session ID to a SessionEntry.
 
         Lookup order:
         1. Exact match on qualified_id
         2. Prefix match on qualified_id
         3. Prefix match on raw_id (catches bare UUIDs for remote sessions)
+
+        If `node_id` is provided, all matches are constrained to entries
+        whose `node_id` equals it. Used to scope switch_ui to the caller's
+        own node.
         """
         entry = self._entries.get(id_or_prefix)
-        if entry:
+        if entry and (node_id is None or entry.node_id == node_id):
             return entry
 
         for qid, entry in self._entries.items():
-            if qid.startswith(id_or_prefix):
+            if qid.startswith(id_or_prefix) and (node_id is None or entry.node_id == node_id):
                 return entry
 
         for entry in self._entries.values():
-            if entry.raw_id.startswith(id_or_prefix):
+            if entry.raw_id.startswith(id_or_prefix) and (node_id is None or entry.node_id == node_id):
                 return entry
 
         return None

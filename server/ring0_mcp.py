@@ -243,6 +243,7 @@ async def switch_ui(session_id: str, client_id: str = "") -> str:
     if client_id == "self":
         return "Error: 'self' is not a valid client_id. Use get_active_clients to find connected clients."
     body: dict[str, str] = {"sessionId": session_id}
+    resolved = ""
     if client_id:
         resolved, err = await _resolve_client(client_id)
         if err:
@@ -251,7 +252,8 @@ async def switch_ui(session_id: str, client_id: str = "") -> str:
     result = await _post("/ring0/switch-ui", body)
     if result.get("error"):
         return f"Error: {result['error']}"
-    return f"Switched client {resolved[:8]} to session {session_id[:8]}."
+    target = resolved[:8] if resolved else "(prompt context)"
+    return f"Switched client {target} to session {session_id[:8]}."
 
 
 def _extract_assistant_text(message: Any) -> tuple[str, bool]:
@@ -1486,6 +1488,88 @@ async def get_node_environment() -> str:
         f"Display: {'available' if info['display'] else 'headless'}",
     ]
     return "\n".join(lines)
+
+
+@mcp.tool()
+async def list_nodes() -> str:
+    """List all registered vibr8 nodes (the hub plus any remote nodes).
+
+    Shows each node's name, status (online/offline), platform, and whether
+    Ring0 is enabled there. Use this to see what nodes the user can switch to.
+    """
+    nodes = await _get("/nodes")
+    if not nodes:
+        return "No nodes registered."
+    lines = []
+    for n in nodes:
+        nid = n.get("id", "?")
+        name = n.get("name", "unnamed")
+        status = n.get("status", "?")
+        platform = n.get("platform", "?")
+        ring0 = "ring0" if n.get("ring0Enabled") else "no-ring0"
+        sessions = n.get("sessionCount", 0)
+        lines.append(
+            f"- {name} (id={nid[:8]}, status={status}, platform={platform}, "
+            f"sessions={sessions}, {ring0})"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def switch_node(node_name: str, client_id: str = "") -> str:
+    """Switch the active vibr8 node.
+
+    Voice transcripts, new session creation, and Ring0 input route to the
+    active node. The browser's active-node selector also flips to match.
+    Use list_nodes to see available nodes.
+
+    If you know the target client, pass client_id. Otherwise omit it and
+    the server will use the client from the current prompt context.
+
+    Args:
+        node_name: Node name, id, or unique prefix (case-insensitive).
+                   E.g. "Hermes", "neo", or "ac40b09b".
+        client_id: Client ID, name, or prefix. If empty, uses prompt context.
+    """
+    target = node_name.strip()
+    if not target:
+        return "Error: node_name is required."
+    nodes = await _get("/nodes")
+    if not nodes:
+        return "No nodes registered."
+
+    lower = target.lower()
+    by_name = [n for n in nodes if n.get("name", "").lower() == lower]
+    if len(by_name) == 1:
+        match = by_name[0]
+    elif len(by_name) > 1:
+        return (
+            f"Multiple nodes named '{target}': "
+            + ", ".join(f"{n.get('name')} ({n.get('id', '?')[:8]})" for n in by_name)
+            + ". Specify by id or prefix."
+        )
+    else:
+        by_id = [n for n in nodes if n.get("id", "").startswith(target)]
+        if len(by_id) == 1:
+            match = by_id[0]
+        elif len(by_id) > 1:
+            return f"Multiple nodes match prefix '{target}'. Be more specific."
+        else:
+            available = ", ".join(n.get("name", "?") for n in nodes)
+            return f"Node not found: {target}. Available: {available}."
+
+    body: dict[str, Any] = {}
+    if client_id:
+        resolved, err = await _resolve_client(client_id)
+        if err:
+            return err
+        body["clientId"] = resolved
+
+    node_id = match["id"]
+    result = await _post(f"/nodes/{node_id}/activate", body)
+    if result.get("error"):
+        return f"Error: {result['error']}"
+    return f"Switched to node {match.get('name', node_id[:8])}."
 
 
 @mcp.tool()

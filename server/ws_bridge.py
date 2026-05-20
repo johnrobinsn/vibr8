@@ -340,6 +340,27 @@ class WsBridge:
         session = self._sessions.get(ring0.session_id)
         return session.prompt_source_client_id if session else ""
 
+    def _apply_ring0_prompt_context(
+        self, session: Session, content: Any, source_client_id: str,
+    ) -> Any:
+        """If `session` is the Ring0 session, set prompt context for MCP
+        tools and prepend `[from client …]` to string content.
+
+        Returns content unchanged for non-Ring0 sessions or non-string
+        content. Both `_route_browser_message` (adapter branch) and
+        `_handle_user_message` call this so the two paths stay in sync.
+        """
+        ring0 = self._ring0_manager
+        if not (ring0 and ring0.session_id == session.id):
+            return content
+        if source_client_id:
+            session.prompt_source_client_id = source_client_id
+            if isinstance(content, str):
+                return f"[from client {source_client_id}]\n{content}"
+            return content
+        session.prompt_source_client_id = ""
+        return content
+
     # ── Remote node session management ────────────────────────────────────
     # Node identity is embedded in the session ID: "{node_id}:{raw_id}" for remote.
 
@@ -958,23 +979,25 @@ class WsBridge:
 
     # ── CLI WebSocket handlers ───────────────────────────────────────────
 
-    def handle_cli_open(self, ws: web.WebSocketResponse, session_id: str) -> None:
+    async def handle_cli_open(self, ws: web.WebSocketResponse, session_id: str) -> None:
         session = self.get_or_create_session(session_id)
         session.cli_socket = ws
         session._awaiting_replay = True
         session._replay_archived = False
         logger.info(f"[ws-bridge] CLI connected for session {session_id} (awaiting replay)")
-        import asyncio
         asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
         asyncio.ensure_future(self._push_to_native_clients(session.id, "cli_connected"))
         asyncio.ensure_future(self._push_to_all_native_clients("sessions_changed"))
 
-        # Flush queued messages
+        # Flush queued messages. Snapshot + clear before awaiting so that if a
+        # write fails and _send_to_cli re-queues into pending_messages, the
+        # re-queued entry survives (vs. being wiped by a trailing .clear()).
         if session.pending_messages:
-            logger.info(f"[ws-bridge] Flushing {len(session.pending_messages)} queued message(s) for session {session_id}")
-            for ndjson in session.pending_messages:
-                self._send_to_cli(session, ndjson)
+            queued = session.pending_messages[:]
             session.pending_messages.clear()
+            logger.info(f"[ws-bridge] Flushing {len(queued)} queued message(s) for session {session_id}")
+            for ndjson in queued:
+                await self._send_to_cli(session, ndjson)
 
     async def handle_cli_message(self, ws: web.WebSocketResponse, raw: str) -> None:
         session_id = None
@@ -1623,14 +1646,14 @@ class WsBridge:
 
     # ── Browser message routing ──────────────────────────────────────────
 
-    async def _route_browser_message(self, session: Session, msg: dict[str, Any], ws: web.WebSocketResponse | None = None) -> None:
+    async def _route_browser_message(self, session: Session, msg: dict[str, Any], ws: web.WebSocketResponse | None = None, source_client_id: str = "") -> None:
         # Remote session — forward to node via tunnel
         if self._is_remote_session(session.id):
             node_id, raw_id = self.parse_qualified_id(session.id)
             if self._node_registry:
                 node = self._node_registry.get_node(node_id)
                 if node and node.tunnel and node.tunnel.connected:
-                    source_client_id = session.browser_sockets.get(ws, "") if ws else ""
+                    source_client_id = source_client_id or (session.browser_sockets.get(ws, "") if ws else "")
                     await node.tunnel.send_fire_and_forget({
                         "type": "browser_message",
                         "sessionId": raw_id,
@@ -1651,7 +1674,7 @@ class WsBridge:
             if msg_type == "user_message":
                 content = msg.get("content", "")
                 import time
-                source_client_id = session.browser_sockets.get(ws, "") if ws else ""
+                source_client_id = source_client_id or (session.browser_sockets.get(ws, "") if ws else "")
                 history_entry: dict[str, Any] = {
                     "type": "user_message",
                     "content": content,
@@ -1689,9 +1712,10 @@ class WsBridge:
 
         # For adapter-based sessions (Codex / OpenCode / Hermes), delegate to the adapter
         if session.backend_type in ("codex", "opencode", "hermes"):
-            if msg.get("type") == "user_message":
+            msg_type = msg.get("type")
+            if msg_type == "user_message":
                 import time
-                source_client_id = session.browser_sockets.get(ws, "") if ws else ""
+                source_client_id = source_client_id or (session.browser_sockets.get(ws, "") if ws else "")
                 history_entry: dict[str, Any] = {
                     "type": "user_message",
                     "content": msg.get("content", ""),
@@ -1701,7 +1725,13 @@ class WsBridge:
                     history_entry["sourceClientId"] = source_client_id
                 session.message_history.append(history_entry)
                 self._persist_session(session)
-            if msg.get("type") == "permission_response":
+                new_content = self._apply_ring0_prompt_context(
+                    session, msg.get("content", ""), source_client_id,
+                )
+                if new_content is not msg.get("content"):
+                    msg = dict(msg)
+                    msg["content"] = new_content
+            elif msg_type == "permission_response":
                 session.pending_permissions.pop(msg.get("request_id", ""), None)
                 self._persist_session(session)
 
@@ -1713,7 +1743,7 @@ class WsBridge:
             return
 
         # Claude Code path — look up which client sent this message
-        source_client_id = session.browser_sockets.get(ws, "") if ws else ""
+        source_client_id = source_client_id or (session.browser_sockets.get(ws, "") if ws else "")
         msg_type = msg.get("type")
         if msg_type == "user_message":
             await self._handle_user_message(session, msg, source_client_id=source_client_id)
@@ -1760,16 +1790,9 @@ class WsBridge:
             history_entry["eventMeta"] = msg["eventMeta"]
         session.message_history.append(history_entry)
 
-        # If this session is Ring0, prepend client context to message content
-        # and store as prompt context so MCP tools can resolve the client
-        raw_content = msg.get("content", "")
-        ring0 = self._ring0_manager
-        if ring0 and ring0.session_id == session.id:
-            if source_client_id:
-                session.prompt_source_client_id = source_client_id
-                raw_content = f"[from client {source_client_id}]\n{raw_content}"
-            else:
-                session.prompt_source_client_id = ""
+        raw_content = self._apply_ring0_prompt_context(
+            session, msg.get("content", ""), source_client_id,
+        )
 
         images = msg.get("images")
         if images:
@@ -1793,7 +1816,7 @@ class WsBridge:
         if source_client_id:
             ndjson_msg["sourceClientId"] = source_client_id
         ndjson = json.dumps(ndjson_msg)
-        self._send_to_cli(session, ndjson)
+        await self._send_to_cli(session, ndjson)
         self._persist_session(session)
 
     async def _handle_permission_response(self, session: Session, msg: dict[str, Any]) -> None:
@@ -1828,7 +1851,7 @@ class WsBridge:
                     },
                 },
             })
-        self._send_to_cli(session, ndjson)
+        await self._send_to_cli(session, ndjson)
         # Fire state transition based on permission response
         if session.state.get("is_waiting_for_permission"):
             if session.pending_permissions:
@@ -1888,7 +1911,7 @@ class WsBridge:
             "request_id": str(uuid.uuid4()),
             "request": {"subtype": "interrupt"},
         })
-        self._send_to_cli(session, ndjson)
+        asyncio.ensure_future(self._send_to_cli(session, ndjson))
         return True
 
     def _handle_set_model(self, session: Session, model: str) -> None:
@@ -1897,7 +1920,7 @@ class WsBridge:
             "request_id": str(uuid.uuid4()),
             "request": {"subtype": "set_model", "model": model},
         })
-        self._send_to_cli(session, ndjson)
+        asyncio.ensure_future(self._send_to_cli(session, ndjson))
 
     def _handle_set_permission_mode(self, session: Session, mode: str) -> None:
         ndjson = json.dumps({
@@ -1905,7 +1928,7 @@ class WsBridge:
             "request_id": str(uuid.uuid4()),
             "request": {"subtype": "set_permission_mode", "mode": mode},
         })
-        self._send_to_cli(session, ndjson)
+        asyncio.ensure_future(self._send_to_cli(session, ndjson))
 
     # ── Public API for submitting messages programmatically ────────────
 
@@ -2237,7 +2260,7 @@ class WsBridge:
 
     # ── Transport helpers ────────────────────────────────────────────────
 
-    def _send_to_cli(self, session: Session, ndjson: str) -> None:
+    async def _send_to_cli(self, session: Session, ndjson: str) -> None:
         # Remote session — forward through node tunnel
         if self._is_remote_session(session.id):
             node_id, raw_id = self.parse_qualified_id(session.id)
@@ -2275,8 +2298,21 @@ class WsBridge:
             if self._on_cli_relaunch_needed:
                 self._on_cli_relaunch_needed(session.id)
             return
-        import asyncio
-        asyncio.ensure_future(session.cli_socket.send_str(ndjson + "\n"))
+        # Local Claude CLI: write directly and surface failures by re-queueing.
+        # Pre-fix this was fire-and-forget (asyncio.ensure_future), which dropped
+        # messages silently when the WS closed between the cli_socket check and
+        # the actual write — leaving the MCP caller thinking the send succeeded.
+        try:
+            await session.cli_socket.send_str(ndjson + "\n")
+        except Exception as e:
+            logger.warning(
+                "[ws-bridge] CLI write failed for session %s (%s) — re-queueing and requesting relaunch",
+                session.id, e,
+            )
+            session.cli_socket = None
+            session.pending_messages.append(ndjson)
+            if self._on_cli_relaunch_needed:
+                self._on_cli_relaunch_needed(session.id)
 
     @staticmethod
     def _ndjson_to_browser_msg(ndjson: str) -> dict[str, Any] | None:
@@ -2378,6 +2414,46 @@ class WsBridge:
                     self._ws_by_client.pop(cid, None)
         return True
 
+    async def broadcast_ring0_switch_node(self, node_id: str, *, client_id: str = "") -> bool:
+        """Send ring0_switch_node to a specific client or broadcast to all browsers.
+
+        The browser updates its active-node selection in response. Mirrors
+        broadcast_ring0_switch_ui for the standalone node-switch case.
+
+        Returns True if sent successfully, False if the target client was not found.
+        """
+        msg = json.dumps({"type": "ring0_switch_node", "nodeId": node_id})
+
+        if client_id:
+            ws = self._ws_by_client.get(client_id)
+            if not ws:
+                for cid, w in self._ws_by_client.items():
+                    if cid.startswith(client_id):
+                        ws = w
+                        break
+            if ws and not ws.closed:
+                try:
+                    await ws.send_str(msg)
+                    return True
+                except Exception:
+                    pass
+            return False
+
+        # Broadcast to all browsers
+        for session in self._sessions.values():
+            dead: list[web.WebSocketResponse] = []
+            for ws in session.browser_sockets:
+                try:
+                    await ws.send_str(msg)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                cid = session.browser_sockets.pop(ws, "")
+                if cid:
+                    self._client_sessions.pop(cid, None)
+                    self._ws_by_client.pop(cid, None)
+        return True
+
     def get_message_history(self, session_id: str) -> list[dict[str, Any]]:
         """Get message history for a session (used by Ring0 MCP)."""
         session = self._sessions.get(session_id)
@@ -2445,7 +2521,7 @@ class WsBridge:
                     },
                 },
             })
-        self._send_to_cli(session, ndjson)
+        await self._send_to_cli(session, ndjson)
         # Fire state transition based on permission response
         if session.state.get("is_waiting_for_permission"):
             if session.pending_permissions:

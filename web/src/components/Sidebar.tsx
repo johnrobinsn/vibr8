@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
-import { connectSession, disconnectSession } from "../ws.js";
+import { connectSession, disconnectSession, applyLocalNodeSwitch } from "../ws.js";
 import { startWebRTC, stopWebRTC, stopDesktopStream } from "../webrtc.js";
 import { destroyTerminal } from "./TerminalView.js";
 import { EnvManager } from "./EnvManager.js";
@@ -210,21 +210,13 @@ export function Sidebar() {
   }
 
   async function handleNodeSwitch(nodeId: string) {
-    if (nodeId === activeNodeId) return;
-    // Disconnect current session
-    const s = useStore.getState();
-    if (s.currentSessionId) {
-      // Save current session for this node before switching
-      localStorage.setItem(`cc-node-session-${activeNodeId}`, s.currentSessionId);
-      const oldSdk = s.sdkSessions.find((x) => x.sessionId === s.currentSessionId);
-      if (oldSdk?.backendType !== "terminal") {
-        disconnectSession(s.currentSessionId);
-      }
-    }
-    s.setCurrentSession(null);
-    s.clearSessionState();
-    s.setActiveNode(nodeId);
-    // Notify hub of active node change (for voice routing)
+    // Live-read activeNodeId so a stale closure can't slip past this guard
+    // (e.g., when the dropdown's onChange races with a ring0_switch_node
+    // broadcast that already updated the store).
+    if (nodeId === useStore.getState().activeNodeId) return;
+    const changed = applyLocalNodeSwitch(nodeId);
+    if (!changed) return;
+    // User-initiated: tell the hub so voice/Ring0 routing follows.
     api.activateNode(nodeId).catch((err) => {
       console.warn("[sidebar] Failed to activate node:", err);
     });

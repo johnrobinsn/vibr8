@@ -116,19 +116,21 @@ class NodeAgent:
         self._launcher.restore_from_disk()
         self._bridge.restore_from_disk()
 
-        # Start minimal local aiohttp server for CLI WebSocket + Ring0 MCP
-        await self._start_local_server()
-
-        # Register first — _register sets the hub endpoint on Ring0 so its
-        # MCP subprocess (spawned by the auto-launch below) starts with
-        # VIBR8_HUB_URL / VIBR8_HUB_TOKEN already in its env.
+        # Register first — _register sets hub_service_token, which the hub
+        # proxy middleware needs at app-construction time, and the hub
+        # endpoint on Ring0 so its MCP subprocess (spawned by the auto-launch
+        # below) starts with VIBR8_HUB_URL / VIBR8_HUB_TOKEN already in env.
         registered = await self._register()
         if not registered:
             logger.error("Failed to register with hub — exiting")
             return
 
+        # Start minimal local aiohttp server for CLI WebSocket + Ring0 MCP
+        await self._start_local_server()
+
         # Auto-launch Ring0 session if enabled
         if self._ring0 and self._ring0.is_enabled:
+            self._bridge.set_ring0_manager(self._ring0)
             logger.info("Ring0 enabled — auto-launching session (backend=%s)", self.default_backend)
             await self._ring0.ensure_session(self._launcher, self._bridge, backend_type=self.default_backend)
 
@@ -396,7 +398,7 @@ class NodeAgent:
         if not session:
             return {"error": f"Session {session_id} not found"}
         ndjson = json.dumps(message)
-        self._bridge._send_to_cli(session, ndjson)
+        await self._bridge._send_to_cli(session, ndjson)
         return {"ok": True}
 
     async def _cmd_interrupt(self, msg: dict) -> dict:
@@ -417,7 +419,7 @@ class NodeAgent:
         if not session:
             return {"error": f"Session {session_id} not found"}
         # Route as if it came from a local browser
-        await self._bridge._route_browser_message(session, message, ws=None)
+        await self._bridge._route_browser_message(session, message, ws=None, source_client_id=source_client_id)
         return {"ok": True}
 
     async def _cmd_get_session_output(self, msg: dict) -> dict:
@@ -571,12 +573,16 @@ class NodeAgent:
 
         _HUB_ONLY_PREFIXES = (
             "/api/clients",
+            "/api/nodes",
             "/api/ring0/query-client",
             "/api/ring0/switch-ui",
+            "/api/ring0/switch-audio",
             "/api/ring0/clients",
             "/api/second-screen/",
             "/api/artifacts",
         )
+
+        node_bridge = self._bridge
 
         @web.middleware
         async def hub_proxy(request: web.Request, handler):
@@ -593,6 +599,21 @@ class NodeAgent:
 
             try:
                 body = await request.read() if request.can_read_body else None
+                _wants_client_id = (
+                    path in ("/api/ring0/switch-ui", "/api/ring0/switch-audio")
+                    or (path.startswith("/api/nodes/") and path.endswith("/activate"))
+                )
+                if body and _wants_client_id and node_bridge:
+                    import json as _json
+                    try:
+                        body_dict = _json.loads(body)
+                        if not body_dict.get("clientId"):
+                            prompt_client = node_bridge.get_ring0_prompt_client()
+                            if prompt_client:
+                                body_dict["clientId"] = prompt_client
+                                body = _json.dumps(body_dict).encode()
+                    except (ValueError, KeyError):
+                        pass
                 ssl_ctx = False if not hub_verify_ssl else None
                 async with aiohttp.ClientSession() as session:
                     async with session.request(
@@ -629,7 +650,7 @@ class NodeAgent:
             await ws.prepare(request)
             session_id = request.match_info["session_id"]
 
-            bridge.handle_cli_open(ws, session_id)
+            await bridge.handle_cli_open(ws, session_id)
             launcher.mark_connected(session_id)
 
             try:
@@ -652,6 +673,7 @@ class NodeAgent:
             launcher, bridge, self._store,
             worktree_tracker=WorktreeTracker(),
             ring0_manager=ring0,
+            self_node_name=self.name,
         )
         app.router.add_routes(api_routes)
 

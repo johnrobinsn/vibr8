@@ -430,6 +430,13 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
       break;
     }
 
+    case "ring0_switch_node": {
+      // Hub initiated this — local state only, NO api.activateNode POST.
+      console.log(`[ws] ring0_switch_node → applying local switch to ${(data.nodeId as string).slice(0, 8)}`);
+      applyLocalNodeSwitch(data.nodeId as string);
+      break;
+    }
+
     case "rpc_request": {
       const rpcId = data.id as string;
       const method = data.method as string;
@@ -1168,6 +1175,30 @@ export function disconnectSession(sessionId: string) {
   }
   processedToolUseIds.delete(sessionId);
   taskCounters.delete(sessionId);
+}
+
+/**
+ * Apply a node-switch to local state only — does NOT POST to the hub.
+ *
+ * Saves the current session for the outgoing node, disconnects it (unless
+ * terminal), clears session state, and sets the new active node. Shared
+ * between the user-initiated dropdown switch (Sidebar) and the hub-initiated
+ * ring0_switch_node broadcast (this file).
+ */
+export function applyLocalNodeSwitch(nodeId: string): boolean {
+  const store = useStore.getState();
+  if (!nodeId || nodeId === store.activeNodeId) return false;
+  if (store.currentSessionId) {
+    localStorage.setItem(`cc-node-session-${store.activeNodeId}`, store.currentSessionId);
+    const oldSdk = store.sdkSessions.find((x) => x.sessionId === store.currentSessionId);
+    if (oldSdk?.backendType !== "terminal") {
+      disconnectSession(store.currentSessionId);
+    }
+  }
+  store.setCurrentSession(null);
+  store.clearSessionState();
+  store.setActiveNode(nodeId);
+  return true;
 }
 
 export function disconnectAll() {

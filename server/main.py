@@ -95,7 +95,7 @@ async def handle_cli_ws(request: web.Request) -> web.WebSocketResponse:
     bridge: WsBridge = request.app["bridge"]
     launcher: CliLauncher = request.app["launcher"]
 
-    bridge.handle_cli_open(ws, session_id)
+    await bridge.handle_cli_open(ws, session_id)
     launcher.mark_connected(session_id)
 
     try:
@@ -296,6 +296,7 @@ async def handle_node_ws(request: web.Request) -> web.WebSocketResponse:
 
     registry: NodeRegistry = request.app["node_registry"]
     bridge: WsBridge = request.app["bridge"]
+    session_registry: SessionRegistry = request.app["session_registry"]
 
     # Authenticate via query param API key
     api_key = request.rel_url.query.get("apiKey", "")
