@@ -474,11 +474,21 @@ def create_app() -> web.Application:
         webrtc_manager.set_node_registry(node_registry)
     launcher.set_store(session_store)
 
-    # Restore persisted state
-    launcher.restore_from_disk()
-    ws_bridge.restore_from_disk()
-
-    logger.info(f"[server] Session persistence: {session_store.directory}")
+    # Restore persisted state — UNLESS the self-node will own ~/.vibr8/
+    # (VIBR8_USE_SELF_NODE=1). In that mode the self-node subprocess is
+    # the sole owner of the on-disk session/ring0 state; the hub's
+    # in-process managers stay empty and route through the loopback.
+    _use_self_node = os.environ.get("VIBR8_USE_SELF_NODE") == "1"
+    if not _use_self_node:
+        launcher.restore_from_disk()
+        ws_bridge.restore_from_disk()
+        logger.info(f"[server] Session persistence: {session_store.directory}")
+    else:
+        logger.info(
+            "[server] VIBR8_USE_SELF_NODE=1 — skipping hub restore_from_disk; "
+            "self-node will own %s",
+            session_store.directory,
+        )
 
     # ── Callbacks ─────────────────────────────────────────────────────────
 
@@ -837,8 +847,10 @@ def create_app() -> web.Application:
         if mdns.available:
             await mdns.start()
 
-        # Auto-launch ring0 session if it was previously enabled
-        if ring0_manager.is_enabled:
+        # Auto-launch ring0 session if it was previously enabled — but
+        # only when the hub is the session owner. When VIBR8_USE_SELF_NODE=1
+        # the self-node handles Ring0 auto-launch itself.
+        if ring0_manager.is_enabled and not _use_self_node:
             logger.info("[server] Ring0 was enabled — auto-launching session")
             spawn(ring0_manager.ensure_session(launcher, ws_bridge))
 
@@ -889,6 +901,12 @@ def create_app() -> web.Application:
         hub_ws_url = f"{ws_scheme_local}://127.0.0.1:{PORT}"
 
         env = dict(os.environ)
+        # When VIBR8_USE_SELF_NODE=1 we're committed to the keystone path:
+        # the self-node owns ~/.vibr8/ exclusively (hub side skips
+        # restore_from_disk below). Default mode keeps ~/.vibr8-self/ so
+        # Phase 4b's coexistence pattern still works.
+        if os.environ.get("VIBR8_USE_SELF_NODE") == "1":
+            env["VIBR8_SELF_NODE_DATA_DIR"] = str(Path.home() / ".vibr8")
         cmd = [
             sys.executable, "-m", "vibr8_node",
             "--hub", hub_ws_url,
