@@ -249,6 +249,18 @@ def create_routes(
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
 
+    # If the caller didn't pre-build a NodeOperations, derive one from the
+    # in-process managers we already have. Lets older callers (and tests)
+    # keep working without explicit wiring.
+    if local_node_ops is None:
+        from vibr8_core.node_operations import NodeOperations
+        local_node_ops = NodeOperations(
+            launcher=launcher,
+            bridge=ws_bridge,
+            store=session_store,
+            ring0=ring0_manager,
+        )
+
     def _resolve_client(session_id: str):
         """Return (client, raw_sid, is_remote) for a (possibly prefixed) session id.
 
@@ -1609,27 +1621,26 @@ def create_routes(
                     entry["isRing0"] = True
                 sessions.append(entry)
             return web.json_response(sessions)
-        # Fallback: no registry (shouldn't happen in practice)
-        r0_id = ring0_manager.session_id if ring0_manager else None
+        # Fallback (no session_registry): pull via NodeClient. Local-only
+        # since this code path predates remote-node support.
+        list_result = await local_node_ops.list_sessions()
         sessions = []
-        for sid in launcher.get_all_session_ids():
-            info = launcher.get_session(sid)
-            if not info:
-                continue
-            name = session_names.get_name(sid) or info.name or "unnamed"
-            bridge_session = ws_bridge._sessions.get(sid)
+        for s in list_result.get("sessions", []):
+            sid = s.get("sessionId", "")
+            perm_count = (await local_node_ops.get_pending_permission_count(session_id=sid)).get("count", 0)
+            perms = (await local_node_ops.get_pending_permissions(session_id=sid)).get("permissions", [])
             entry = {
                 "sessionId": sid,
-                "name": name,
-                "state": info.state,
-                "cwd": info.cwd,
-                "backendType": info.backendType,
-                "archived": info.archived,
-                "pendingPermissionCount": ws_bridge.get_pending_permission_count(sid),
-                "pendingPermissions": ws_bridge.get_pending_permissions(sid),
-                "controlledBy": bridge_session.controlled_by if bridge_session else "ring0",
+                "name": s.get("name") or "unnamed",
+                "state": s.get("state"),
+                "cwd": s.get("cwd"),
+                "backendType": s.get("backendType"),
+                "archived": s.get("archived"),
+                "pendingPermissionCount": perm_count,
+                "pendingPermissions": perms,
+                "controlledBy": s.get("controlledBy", "ring0"),
             }
-            if r0_id and sid == r0_id:
+            if s.get("isRing0"):
                 entry["isRing0"] = True
             sessions.append(entry)
         return web.json_response(sessions)
@@ -2917,13 +2928,16 @@ def create_routes(
     @routes.get("/api/nodes")
     async def list_nodes(request: web.Request) -> web.Response:
         """List all registered nodes (including the local node)."""
+        # Pull the hub-local session list through NodeClient so we don't
+        # depend on the in-process launcher directly.
+        local_sessions = (await local_node_ops.list_sessions()).get("sessions", []) if local_node_ops else []
+        local_session_ids = [s.get("sessionId", "") for s in local_sessions if s.get("sessionId")]
         if node_registry is None:
             import platform as _platform
             hub_name = _platform.node() or "Local"
-            return web.json_response([{"id": "local", "name": hub_name, "status": "online", "platform": "", "hostname": "", "sessionCount": len(launcher.list_sessions()), "ring0Enabled": ring0_manager.is_enabled if ring0_manager else False}])
-        # Update local node's dynamic fields before serializing
+            return web.json_response([{"id": "local", "name": hub_name, "status": "online", "platform": "", "hostname": "", "sessionCount": len(local_session_ids), "ring0Enabled": ring0_manager.is_enabled if ring0_manager else False}])
         local = node_registry.local_node
-        local.session_ids = [s.sessionId for s in launcher.list_sessions()]
+        local.session_ids = local_session_ids
         local.ring0_enabled = ring0_manager.is_enabled if ring0_manager else False
         nodes = [n.to_api_dict() for n in node_registry.get_all_nodes()]
         return web.json_response(nodes)

@@ -527,6 +527,22 @@ class TestSessionListEndpoints:
         ring0_info.cwd = "/tmp"
         ring0_info.backendType = "claude"
         ring0_info.archived = False
+        ring0_info.to_dict.return_value = {
+            "sessionId": "ring0",
+            "name": "Ring0",
+            "state": "connected",
+            "cwd": "/tmp",
+            "backendType": "claude",
+        }
+        other_info = MagicMock()
+        other_info.to_dict.return_value = {
+            "sessionId": "other",
+            "name": "Other",
+            "state": "connected",
+            "cwd": "/code",
+            "backendType": "claude",
+        }
+        mock_launcher.list_sessions.return_value = [ring0_info, other_info]
         mock_launcher.get_session.side_effect = lambda sid: ring0_info if sid == "ring0" else None
 
         async with TestClient(TestServer(app)) as client:
