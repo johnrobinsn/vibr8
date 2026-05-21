@@ -20,6 +20,7 @@ from vibr8_core.cli_launcher import CliLauncher, LaunchOptions
 from vibr8_core.ws_bridge import WsBridge
 from vibr8_core.session_store import SessionStore
 from vibr8_core.ring0 import Ring0Manager
+from vibr8_core.node_operations import NodeOperations, payload_to_kwargs
 from vibr8_core import session_names
 from vibr8_node.desktop_webrtc import DesktopWebRTCManager
 
@@ -64,6 +65,7 @@ class NodeAgent:
         self._store: SessionStore | None = None
         self._ring0: Ring0Manager | None = None
         self._desktop_webrtc = DesktopWebRTCManager()
+        self._ops: NodeOperations | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
@@ -111,6 +113,21 @@ class NodeAgent:
 
         # Set broadcast hook so CLI output goes to the hub tunnel
         self._bridge._broadcast_hook = self._forward_to_hub
+
+        async def _on_sessions_changed() -> None:
+            if self._ws and not self._ws.closed:
+                await self._send_sessions_update(self._ws)
+
+        self._ops = NodeOperations(
+            launcher=self._launcher,
+            bridge=self._bridge,
+            store=self._store,
+            ring0=self._ring0,
+            desktop_webrtc=self._desktop_webrtc,
+            default_backend=self.default_backend,
+            work_dir=self.work_dir,
+            on_sessions_changed=_on_sessions_changed,
+        )
 
         # Restore persisted state
         self._launcher.restore_from_disk()
@@ -304,248 +321,19 @@ class NodeAgent:
                     }) + "\n")
 
     async def _dispatch_command(self, cmd_type: str, msg: dict) -> dict:
-        """Handle a specific hub command."""
-        if cmd_type == "list_sessions":
-            return await self._cmd_list_sessions()
-        elif cmd_type == "create_session":
-            return await self._cmd_create_session(msg.get("options", {}))
-        elif cmd_type == "submit_message":
-            return await self._cmd_submit_message(msg)
-        elif cmd_type == "cli_input":
-            return await self._cmd_cli_input(msg)
-        elif cmd_type == "interrupt":
-            return await self._cmd_interrupt(msg)
-        elif cmd_type == "browser_message":
-            return await self._cmd_browser_message(msg)
-        elif cmd_type == "get_session_output":
-            return await self._cmd_get_session_output(msg)
-        elif cmd_type == "set_permission_mode":
-            return await self._cmd_set_permission_mode(msg)
-        elif cmd_type == "respond_permission":
-            return await self._cmd_respond_permission(msg)
-        elif cmd_type == "ring0_input":
-            return await self._cmd_ring0_input(msg)
-        elif cmd_type == "kill_session":
-            return await self._cmd_kill_session(msg)
-        elif cmd_type == "relaunch_session":
-            return await self._cmd_relaunch_session(msg)
-        elif cmd_type == "delete_session":
-            return await self._cmd_delete_session(msg)
-        elif cmd_type == "archive_session":
-            return await self._cmd_archive_session(msg)
-        elif cmd_type == "unarchive_session":
-            return await self._cmd_unarchive_session(msg)
-        elif cmd_type == "rename_session":
-            return await self._cmd_rename_session(msg)
-        elif cmd_type == "webrtc_offer":
-            return await self._cmd_webrtc_offer(msg)
-        else:
+        """Generic dispatch: look up the operation by name on NodeOperations."""
+        if not self._ops:
+            return {"error": "Node not ready"}
+        method = getattr(self._ops, cmd_type, None)
+        if method is None or not callable(method) or cmd_type.startswith("_"):
             logger.warning("Unknown hub command: %s", cmd_type)
             return {"error": f"Unknown command: {cmd_type}"}
-
-    async def _cmd_list_sessions(self) -> dict:
-        if not self._launcher:
-            return {"sessions": []}
-        sessions = []
-        names = session_names.get_all_names()
-        for s in self._launcher.list_sessions():
-            s_dict = s.to_dict() if hasattr(s, "to_dict") else s.__dict__
-            sid = s_dict.get("sessionId", "")
-            s_dict["name"] = names.get(sid, s_dict.get("name"))
-            if self._bridge:
-                lpa = self._bridge.get_last_prompted_at(sid)
-                if lpa:
-                    s_dict["lastPromptedAt"] = lpa
-            if self._ring0 and sid == self._ring0.session_id:
-                s_dict["isRing0"] = True
-            sessions.append(s_dict)
-        return {"sessions": sessions}
-
-    async def _cmd_create_session(self, options: dict) -> dict:
-        if not self._launcher:
-            return {"error": "Launcher not available"}
-        opts = LaunchOptions(
-            model=options.get("model"),
-            permissionMode=options.get("permissionMode"),
-            cwd=options.get("cwd") or self.work_dir or None,
-            backendType=options.get("backend", self.default_backend),
-        )
-        info = self._launcher.launch(opts)
-        result = info.to_dict() if hasattr(info, "to_dict") else info.__dict__
-        # Notify hub of updated session list
-        if self._ws:
-            await self._send_sessions_update(self._ws)
-        return result
-
-    async def _cmd_submit_message(self, msg: dict) -> dict:
-        if not self._bridge:
-            return {"error": "Bridge not available"}
-        session_id = msg.get("sessionId", "")
-        content = msg.get("content", "")
-        source = msg.get("sourceClientId", "")
-        err = await self._bridge.submit_user_message(session_id, content, source_client_id=source)
-        if err:
-            return {"error": err}
-        return {"ok": True}
-
-    async def _cmd_cli_input(self, msg: dict) -> dict:
-        """Forward raw CLI input (NDJSON message) to local session."""
-        if not self._bridge:
-            return {"error": "Bridge not available"}
-        session_id = msg.get("sessionId", "")
-        message = msg.get("message", {})
-        session = self._bridge._sessions.get(session_id)
-        if not session:
-            return {"error": f"Session {session_id} not found"}
-        ndjson = json.dumps(message)
-        await self._bridge._send_to_cli(session, ndjson)
-        return {"ok": True}
-
-    async def _cmd_interrupt(self, msg: dict) -> dict:
-        if not self._bridge:
-            return {"error": "Bridge not available"}
-        session_id = msg.get("sessionId", "")
-        ok = self._bridge.interrupt_session(session_id)
-        return {"ok": ok}
-
-    async def _cmd_browser_message(self, msg: dict) -> dict:
-        """Handle a browser message forwarded via the hub."""
-        if not self._bridge:
-            return {"error": "Bridge not available"}
-        session_id = msg.get("sessionId", "")
-        message = msg.get("message", {})
-        source_client_id = msg.get("sourceClientId", "")
-        session = self._bridge._sessions.get(session_id)
-        if not session:
-            return {"error": f"Session {session_id} not found"}
-        # Route as if it came from a local browser
-        await self._bridge._route_browser_message(session, message, ws=None, source_client_id=source_client_id)
-        return {"ok": True}
-
-    async def _cmd_get_session_output(self, msg: dict) -> dict:
-        if not self._bridge:
-            return {"error": "Bridge not available"}
-        session_id = msg.get("sessionId", "")
-        session = self._bridge._sessions.get(session_id)
-        if not session:
-            return {"error": f"Session {session_id} not found"}
-        return {"messages": session.message_history[-500:]}
-
-    async def _cmd_kill_session(self, msg: dict) -> dict:
-        if not self._launcher:
-            return {"error": "Launcher not available"}
-        sid = msg.get("sessionId", "")
-        killed = await self._launcher.kill(sid)
-        if self._ws:
-            await self._send_sessions_update(self._ws)
-        return {"ok": killed}
-
-    async def _cmd_relaunch_session(self, msg: dict) -> dict:
-        if not self._launcher:
-            return {"error": "Launcher not available"}
-        sid = msg.get("sessionId", "")
-        ok = await self._launcher.relaunch(sid)
-        if self._ws:
-            await self._send_sessions_update(self._ws)
-        return {"ok": ok}
-
-    async def _cmd_delete_session(self, msg: dict) -> dict:
-        if not self._launcher:
-            return {"error": "Launcher not available"}
-        sid = msg.get("sessionId", "")
-        await self._launcher.kill(sid)
-        self._launcher.remove_session(sid)
-        if self._bridge:
-            await self._bridge.close_session(sid)
-        if self._ws:
-            await self._send_sessions_update(self._ws)
-        return {"ok": True}
-
-    async def _cmd_archive_session(self, msg: dict) -> dict:
-        if not self._launcher:
-            return {"error": "Launcher not available"}
-        sid = msg.get("sessionId", "")
-        await self._launcher.kill(sid)
-        self._launcher.set_archived(sid, True)
-        if self._ws:
-            await self._send_sessions_update(self._ws)
-        return {"ok": True}
-
-    async def _cmd_unarchive_session(self, msg: dict) -> dict:
-        if not self._launcher:
-            return {"error": "Launcher not available"}
-        sid = msg.get("sessionId", "")
-        self._launcher.set_archived(sid, False)
-        if self._ws:
-            await self._send_sessions_update(self._ws)
-        return {"ok": True}
-
-    async def _cmd_rename_session(self, msg: dict) -> dict:
-        sid = msg.get("sessionId", "")
-        name = msg.get("name", "").strip()
-        if not name:
-            return {"error": "name is required"}
-        session_names.set_name(sid, name, unique=False)
-        if self._ws:
-            await self._send_sessions_update(self._ws)
-        return {"ok": True, "name": name}
-
-    async def _cmd_set_permission_mode(self, msg: dict) -> dict:
-        if not self._bridge:
-            return {"error": "Bridge not available"}
-        session_id = msg.get("sessionId", "")
-        mode = msg.get("mode", "")
-        session = self._bridge._sessions.get(session_id)
-        if not session:
-            return {"error": f"Session {session_id} not found"}
-        self._bridge._handle_set_permission_mode(session, mode)
-        return {"ok": True}
-
-    async def _cmd_respond_permission(self, msg: dict) -> dict:
-        if not self._bridge:
-            return {"error": "Bridge not available"}
-        session_id = msg.get("sessionId", "")
-        session = self._bridge._sessions.get(session_id)
-        if not session:
-            return {"error": f"Session {session_id} not found"}
-        await self._bridge._handle_permission_response(session, msg)
-        return {"ok": True}
-
-    async def _cmd_ring0_input(self, msg: dict) -> dict:
-        """Handle voice input forwarded from hub to this node's Ring0."""
-        if not self._ring0 or not self._ring0.is_enabled:
-            return {"error": "Ring0 not enabled on this node"}
-        text = msg.get("text", "")
-        if not text:
-            return {"error": "Empty text"}
-        r0sid = self._ring0.session_id
-        if not r0sid and self._launcher and self._bridge:
-            r0sid = await self._ring0.ensure_session(self._launcher, self._bridge, backend_type=self.default_backend)
-        if not r0sid:
-            return {"error": "Ring0 session not available"}
-        source_client_id = msg.get("sourceClientId", "")
-        await self._bridge.submit_user_message(r0sid, text, source_client_id=source_client_id)
-        return {"ok": True}
-
-    async def _cmd_webrtc_offer(self, msg: dict) -> dict:
-        """Handle a desktop WebRTC offer forwarded from the hub."""
-        client_id = msg.get("clientId", "")
-        sdp = msg.get("sdp", "")
-        sdp_type = msg.get("sdpType", "offer")
-        desktop_role = msg.get("desktopRole", "controller")
-        ice_servers = msg.get("iceServers")
-        if not client_id or not sdp:
-            return {"error": "clientId and sdp required"}
+        kwargs = payload_to_kwargs(msg)
         try:
-            answer = await self._desktop_webrtc.handle_offer(
-                client_id, sdp, sdp_type,
-                desktop_role=desktop_role,
-                ice_servers=ice_servers,
-            )
-            return answer
-        except Exception as e:
-            logger.error("[desktop-webrtc] Failed to handle offer: %s", e)
-            return {"error": str(e)}
+            return await method(**kwargs)
+        except TypeError as e:
+            logger.exception("Bad payload for %s", cmd_type)
+            return {"error": f"Bad payload for {cmd_type}: {e}"}
 
     # ── Broadcast hook ────────────────────────────────────────────────────
 
