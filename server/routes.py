@@ -1800,12 +1800,17 @@ def create_routes(
                     status=404,
                 )
             resolved = entry.qualified_id
-        elif ":" in session_id:
-            resolved = session_id
         else:
-            resolved = _resolve_session_id(session_id, launcher, ws_bridge)
-            if not resolved:
-                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+            # Fallback when session_registry is unavailable (minimal harness).
+            try:
+                _client, raw_sid, _ = _resolve_client(session_id)
+                # Confirm the session exists on the target node before broadcasting.
+                sess = await _client.get_session(session_id=raw_sid)
+                if "error" in sess:
+                    return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+                resolved = session_id if ":" in session_id else raw_sid
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=503)
         client_id = body.get("clientId", "")
         if not client_id:
             client_id = ws_bridge.get_ring0_prompt_client()
@@ -1880,11 +1885,18 @@ def create_routes(
             pending = router.get_pending_permissions()
             formatted = _format_session_output(messages, pending)
             return web.json_response({"messages": messages, "pendingPermissions": pending, "formatted": formatted})
-        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
-        if not resolved:
-            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-        messages = ws_bridge.get_message_history(resolved)
-        pending = ws_bridge.get_pending_permissions(resolved)
+        # Fallback path through NodeClient (used when session_registry is
+        # unavailable).
+        try:
+            client, raw_sid, _ = _resolve_client(session_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        msg_result = await client.get_message_history(session_id=raw_sid)
+        if "error" in msg_result:
+            return web.json_response({"error": msg_result["error"]}, status=404)
+        perm_result = await client.get_pending_permissions(session_id=raw_sid)
+        messages = msg_result.get("messages", [])
+        pending = perm_result.get("permissions", [])
         formatted = _format_session_output(messages, pending)
         return web.json_response({"messages": messages, "pendingPermissions": pending, "formatted": formatted})
 
@@ -2030,12 +2042,20 @@ def create_routes(
         name = body.get("name", "").strip()
         if not sid or not name:
             return web.json_response({"error": "sessionId and name are required"}, status=400)
-        _entry = session_registry.resolve(sid) if session_registry else None
-        resolved = _entry.qualified_id if _entry else _resolve_session_id(sid, launcher, ws_bridge)
-        if not resolved:
-            return web.json_response({"error": f"Session {sid} not found"}, status=404)
-        session_names.set_name(resolved, name, unique=False)
-        await ws_bridge.broadcast_name_update(resolved, name, user_renamed=True)
+        # Migrate via NodeClient; rename_session() updates the session-state
+        # half. The hub still drives the user-facing broadcast since the
+        # browsers connect here, not to the node (this comes apart cleanly
+        # in 4c-3 when the HubBrowserBridge split lands).
+        try:
+            client, raw_sid, is_remote = _resolve_client(sid)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.rename_session(session_id=raw_sid, name=name)
+        if "error" in result:
+            return web.json_response(result, status=_status_for_error(result["error"]))
+        resolved = sid  # qualified id stays as caller supplied it
+        if not is_remote:
+            await ws_bridge.broadcast_name_update(resolved, name, user_renamed=True)
         return web.json_response({"ok": True, "sessionId": resolved, "name": name})
 
     _ALLOWED_SESSION_MODES = {"plan", "acceptEdits"}
@@ -2053,19 +2073,23 @@ def create_routes(
             return web.json_response({"error": "sessionId required"}, status=400)
         if mode not in _ALLOWED_SESSION_MODES:
             return web.json_response({"error": f"mode must be one of: {', '.join(sorted(_ALLOWED_SESSION_MODES))}"}, status=400)
-        _entry = session_registry.resolve(session_id) if session_registry else None
-        resolved = _entry.qualified_id if _entry else _resolve_session_id(session_id, launcher, ws_bridge)
-        if not resolved:
-            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-        session = ws_bridge.get_session(resolved)
-        if not session:
-            return web.json_response({"error": f"Session not found in bridge: {session_id}"}, status=404)
-        # Forward to CLI
-        ws_bridge._handle_set_permission_mode(session, mode)
-        # Update state and broadcast to browsers immediately
-        session.state["permissionMode"] = mode
-        await ws_bridge._broadcast_to_browsers(session, {"type": "session_update", "session": {"permissionMode": mode}})
-        return web.json_response({"ok": True, "sessionId": resolved, "mode": mode})
+        try:
+            client, raw_sid, is_remote = _resolve_client(session_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.set_permission_mode(session_id=raw_sid, mode=mode)
+        if "error" in result:
+            return web.json_response(result, status=_status_for_error(result["error"]))
+        # Hub-side browser broadcast — for hub-local sessions only; remote
+        # nodes broadcast to their own bridge. (Will move to HubBrowserBridge
+        # in 4c-3.)
+        if not is_remote:
+            session = ws_bridge.get_session(raw_sid)
+            if session:
+                await ws_bridge._broadcast_to_browsers(
+                    session, {"type": "session_update", "session": {"permissionMode": mode}},
+                )
+        return web.json_response({"ok": True, "sessionId": session_id, "mode": mode})
 
     @routes.get("/api/ring0/get-session-mode")
     async def ring0_get_session_mode(request: web.Request) -> web.Response:
@@ -2073,14 +2097,17 @@ def create_routes(
         session_id = request.query.get("sessionId", "")
         if not session_id:
             return web.json_response({"error": "sessionId query param required"}, status=400)
-        _entry = session_registry.resolve(session_id) if session_registry else None
-        resolved = _entry.qualified_id if _entry else _resolve_session_id(session_id, launcher, ws_bridge)
-        if not resolved:
-            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-        session = ws_bridge.get_session(resolved)
-        if not session:
-            return web.json_response({"error": f"Session not found in bridge: {session_id}"}, status=404)
-        mode = session.state.get("permissionMode", "default")
+        try:
+            client, raw_sid, _ = _resolve_client(session_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        sess_result = await client.get_session(session_id=raw_sid)
+        if "error" in sess_result:
+            return web.json_response(
+                {"error": f"Session not found: {session_id}"}, status=404,
+            )
+        mode = sess_result.get("permissionMode", "default")
+        resolved = session_id
         return web.json_response({"sessionId": resolved, "mode": mode})
 
     @routes.post("/api/ring0/set-guard")
@@ -3236,29 +3263,6 @@ def create_routes(
         return web.json_response(result)
 
     return routes
-
-
-def _resolve_session_id(session_id: str, launcher: CliLauncher, ws_bridge: WsBridge | None = None) -> str | None:
-    """Resolve a full or prefix session ID to a full session ID.
-
-    Checks the local launcher first, then WsBridge sessions (which includes
-    tunneled sessions from remote nodes with qualified IDs like 'nodeId:rawId').
-    """
-    info = launcher.get_session(session_id)
-    if info:
-        return session_id
-    # Try prefix match in launcher
-    for sid in launcher.get_all_session_ids():
-        if sid.startswith(session_id):
-            return sid
-    # Check WsBridge sessions (tunneled/proxy sessions from remote nodes)
-    if ws_bridge:
-        if ws_bridge.get_session(session_id):
-            return session_id
-        for sid in list(ws_bridge._sessions.keys()):
-            if sid.startswith(session_id):
-                return sid
-    return None
 
 
 def _cleanup_worktree(
