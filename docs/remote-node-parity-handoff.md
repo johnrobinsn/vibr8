@@ -138,7 +138,48 @@ Expected: 230 tests pass, all imports succeed, `--self-mode` appears in help.
 
 **Goal**: flip the hub from using in-process `LocalNodeClient` to using `RemoteNodeClient` against the self-node subprocess. After Phase 4c the hub holds **zero** node-scoped state.
 
-### Phase 4c sub-steps (suggested ordering)
+### Phase 4c — audit summary (2026-05-21)
+
+Total in-process manager references across `server/` (excluding `vibr8_core/`, `vibr8_node/`):
+
+| Bucket | Count | Disposition |
+|---|---|---|
+| **SESSION-STATE** | ~38 | Migrate to NodeClient or remove |
+| **HUB-ONLY** | ~22 | Keep on hub (browser WS tracking, client metadata, broadcasts, WebRTC, auth, registry) |
+| **AMBIGUOUS / MIXED** | ~8 | Split (WsBridge split is the biggest single piece) |
+
+Key realizations:
+
+1. **`WsBridge` has two concerns** that must be separated:
+   - **Session state** (sessions dict, pen, permissions, message history, CLI session id tracking, ring0_event router) → moves to the self-node.
+   - **Hub-only browser/client tracking** (client metadata, Ring0 prompt-client tracking, browser broadcasts, computer-use agent registration, name-update broadcasts, switch-ui broadcasts) → stays on the hub.
+   The cleanest path is to extract a `HubBrowserBridge` (or similar) for the hub-only half, and let the existing `WsBridge` keep being the session-state half (which then only lives in the node).
+
+2. **`session_registry.py` already exists** with `LocalSessionRouter` and `TunneledSessionRouter` abstractions parallel to the newer `NodeClient` pattern. There's some duplication. Phase 4c should consolidate — keep `SessionRegistry` for hub-side ID-prefix mapping (qualified ↔ raw) and have routers/clients delegate to `NodeClient`/`NodeOperations`.
+
+3. **Routes still using in-process managers** (not yet migrated through `NodeClient`): `create_session`, the big `list_sessions` aggregator, `get_session`, all `/api/ring0/*` message-flow routes (`send-message`, `switch-ui`, `session-output`, `respond-permission`, `interrupt`), `session-history-archive`, the session-`upload`, and the `_resolve_session_id` legacy helper.
+
+4. **`webrtc.py` uses `launcher.set_launcher()`** to look up the active Ring0 session id. That coupling must move to a node-registry-aware lookup, or webrtc gets a thin client/proxy reference.
+
+### Phase 4c sub-phases (revised, safer staging)
+
+The all-at-once "big bang" is too big for one commit. Stage like this:
+
+**4c-1** — Migrate the remaining session-state route handlers to call `NodeClient` (still backed by in-process `local_node_ops`; no behavior change). Add any missing `NodeOperations` methods: `submit_message`, `respond_permission`, `interrupt`, `get_message_history`, `get_pending_permissions`, `get_session_archive`, `track_worktree`. The route layer becomes manager-reference-free; `routes.py` only knows about `NodeClient`.
+
+**4c-2** — Audit & migrate `webrtc.py`, `session_registry.py`, `main.py` event callbacks. Replace `launcher.*`/`ws_bridge._sessions[...]`/`ring0_manager.session_id` reads with `NodeClient` reads (or, where the lookup is genuinely cross-cutting, `node_registry`-based). Browser-broadcast calls (`ws_bridge.broadcast_*`, `set_client_metadata`, etc.) get carved out into a new `HubBrowserBridge`.
+
+**4c-3** — Extract `HubBrowserBridge` from `WsBridge`. Hub creates one (always). Routes/voice/webrtc call into it for browser concerns. `WsBridge` is now strictly session-state.
+
+**4c-4** — Spawn the self-node by default (drop `VIBR8_SPAWN_SELF_NODE` gate). Self-node uses `~/.vibr8/` (the hub's data dir). Hub stops instantiating `WsBridge`/`Ring0Manager`/`CliLauncher`/`SessionStore`. `local_node_ops` becomes `RemoteNodeClient(self_id, tunnel)`. One-shot migrator copies `~/.vibr8-self/` → `~/.vibr8/` if needed.
+
+**4c-5** — Migrate `/ws/browser/{id}` and `/ws/cli/{id}` to relay through the tunnel for all sessions (including self-node).
+
+**4c-6** — Restart-on-crash for the self-node subprocess (exponential backoff). Delete `LocalNodeClient` alias from `vibr8_core/node_client.py`.
+
+Each sub-phase is small enough to commit and verify independently. 4c-1 and 4c-2 are no-behavior-change refactors; 4c-3 is a real restructuring but still behavior-preserving; 4c-4 is the actual atomic flip; 4c-5/6 are cleanup that depends on 4c-4 being live.
+
+### Phase 4c — original sub-steps (kept for reference)
 
 1. **Wire `local_node_ops` to be the self-node client instead of in-process** when the self-node has registered.
    - In `server/main.py`, after `[server] Self-node registered: id=…` fires in `_spawn_self_node`, replace `local_node_ops` (or the `_resolve_node_client`/`_resolve_client` lookups) so an empty `nodeId` resolves to `RemoteNodeClient(self_id, self_node.tunnel)`.
