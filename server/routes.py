@@ -246,6 +246,7 @@ def create_routes(
     session_registry: Any | None = None,
     self_node_name: str = "",
     local_node_ops: Any | None = None,
+    hub_browser_bridge: Any | None = None,
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
 
@@ -260,6 +261,11 @@ def create_routes(
             store=session_store,
             ring0=ring0_manager,
         )
+
+    # Same lazy-build pattern for the hub-only browser/client surface.
+    if hub_browser_bridge is None:
+        from vibr8_core.hub_browser_bridge import HubBrowserBridge
+        hub_browser_bridge = HubBrowserBridge(ws_bridge)
 
     def _resolve_client(session_id: str):
         """Return (client, raw_sid, is_remote) for a (possibly prefixed) session id.
@@ -783,7 +789,7 @@ def create_routes(
         # Broadcast to all browsers so other tabs/devices see the rename
         # (hub-only side effect — remote nodes broadcast independently)
         if not is_remote:
-            await ws_bridge.broadcast_name_update(sid, name, user_renamed=True)
+            await hub_browser_bridge.broadcast_name_update(sid, name, user_renamed=True)
         return web.json_response(result)
 
     @routes.post("/api/sessions/{id}/kill")
@@ -1772,17 +1778,17 @@ def create_routes(
                 return web.json_response({"error": str(e)}, status=503)
         client_id = body.get("clientId", "")
         if not client_id:
-            client_id = ws_bridge.get_ring0_prompt_client()
+            client_id = hub_browser_bridge.get_ring0_prompt_client()
         if not client_id:
             return web.json_response({"error": "clientId required — specify which client to switch"}, status=400)
-        sent = await ws_bridge.broadcast_ring0_switch_ui(resolved, client_id=client_id)
+        sent = await hub_browser_bridge.broadcast_ring0_switch_ui(resolved, client_id=client_id)
         if not sent:
             return web.json_response({"error": f"Client {client_id} not connected"}, status=400)
         return web.json_response({"ok": True, "sessionId": resolved})
 
     @routes.get("/api/ring0/prompt-context")
     async def ring0_prompt_context(request: web.Request) -> web.Response:
-        client_id = ws_bridge.get_ring0_prompt_client()
+        client_id = hub_browser_bridge.get_ring0_prompt_client()
         return web.json_response({"clientId": client_id})
 
     # ── Client metadata ────────────────────────────────────────────────
@@ -1813,7 +1819,7 @@ def create_routes(
         updates = {k: v for k, v in body.items() if k in ("name", "description", "role")}
         if not updates:
             return web.json_response({"error": "No valid fields to update"}, status=400)
-        entry = ws_bridge.set_client_metadata(client_id, updates)
+        entry = hub_browser_bridge.set_client_metadata(client_id, updates)
         result = dict(entry)
         result["clientId"] = client_id
         return web.json_response(result)
@@ -1825,7 +1831,7 @@ def create_routes(
             device_info = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
-        entry = ws_bridge.register_device_info(client_id, device_info)
+        entry = hub_browser_bridge.register_device_info(client_id, device_info)
         result = dict(entry)
         result["clientId"] = client_id
         return web.json_response(result)
@@ -1861,7 +1867,7 @@ def create_routes(
 
     @routes.get("/api/ring0/clients")
     async def ring0_clients(request: web.Request) -> web.Response:
-        clients = ws_bridge.get_all_clients()
+        clients = hub_browser_bridge.get_all_clients()
         return web.json_response(clients)
 
     @routes.post("/api/ring0/query-client")
@@ -2010,7 +2016,7 @@ def create_routes(
             return web.json_response(result, status=_status_for_error(result["error"]))
         resolved = sid  # qualified id stays as caller supplied it
         if not is_remote:
-            await ws_bridge.broadcast_name_update(resolved, name, user_renamed=True)
+            await hub_browser_bridge.broadcast_name_update(resolved, name, user_renamed=True)
         return web.json_response({"ok": True, "sessionId": resolved, "name": name})
 
     _ALLOWED_SESSION_MODES = {"plan", "acceptEdits"}
@@ -2041,7 +2047,7 @@ def create_routes(
         if not is_remote:
             session = ws_bridge.get_session(raw_sid)
             if session:
-                await ws_bridge._broadcast_to_browsers(
+                await hub_browser_bridge._broadcast_to_browsers(
                     session, {"type": "session_update", "session": {"permissionMode": mode}},
                 )
         return web.json_response({"ok": True, "sessionId": session_id, "mode": mode})
@@ -2923,9 +2929,9 @@ def create_routes(
             body = {}
         client_id = (body.get("clientId") if isinstance(body, dict) else "") or ""
         if not client_id:
-            client_id = ws_bridge.get_ring0_prompt_client()
+            client_id = hub_browser_bridge.get_ring0_prompt_client()
         if client_id:
-            await ws_bridge.broadcast_ring0_switch_node(node_id, client_id=client_id)
+            await hub_browser_bridge.broadcast_ring0_switch_node(node_id, client_id=client_id)
 
         return web.json_response({"ok": True, "nodeId": node_id, "name": name})
 

@@ -34,6 +34,7 @@ from vibr8_core.ring0 import Ring0Manager
 from vibr8_core.ring0_scheduler import TaskScheduler
 from vibr8_core.ring0_events import Ring0EventRouter
 from vibr8_core.node_operations import NodeOperations
+from vibr8_core.hub_browser_bridge import HubBrowserBridge
 from server.node_registry import NodeRegistry
 from server.node_tunnel import NodeTunnel
 from server.session_registry import SessionRegistry
@@ -421,6 +422,11 @@ def create_app() -> web.Application:
     session_registry = SessionRegistry(
         ws_bridge, launcher, node_registry, local_node_ops=local_node_ops,
     )
+    # HubBrowserBridge wraps the hub-only methods (broadcasts, client
+    # metadata). Today it delegates to ws_bridge; Phase 4c-4 will replace
+    # the backing with standalone state once the in-process WsBridge goes
+    # away in favor of the self-node.
+    hub_browser_bridge = HubBrowserBridge(ws_bridge)
 
     # Phase 4b: self-node subprocess machinery (gated, OFF by default).
     # When VIBR8_SPAWN_SELF_NODE=1, the hub spawns its own vibr8_node child
@@ -457,6 +463,7 @@ def create_app() -> web.Application:
     task_scheduler.set_dependencies(launcher, ws_bridge)
     if webrtc_manager:
         webrtc_manager.set_ws_bridge(ws_bridge)
+        webrtc_manager.set_hub_browser_bridge(hub_browser_bridge)
         webrtc_manager.set_ring0_manager(ring0_manager)
         webrtc_manager.set_launcher(launcher)
         webrtc_manager.set_node_registry(node_registry)
@@ -692,7 +699,7 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/node/{node_id}", handle_node_ws)
 
     # REST API
-    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager, node_registry, session_registry, local_node_ops=local_node_ops)
+    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager, node_registry, session_registry, local_node_ops=local_node_ops, hub_browser_bridge=hub_browser_bridge)
     app.router.add_routes(api_routes)
 
     # Production static file serving

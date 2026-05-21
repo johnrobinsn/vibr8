@@ -215,6 +215,7 @@ class WebRTCManager:
         self._shared_capture_refs: Dict[str, set[str]] = {}  # display → {client_ids}
         self._desktop_viewers: set[str] = set()  # client_ids that are view-only
         self._ws_bridge = None
+        self._hub_browser_bridge = None  # Set by main.py; hub-only broadcasts
         self._ring0_manager = None
         self._launcher = None  # Set by main.py for Ring0 lazy-create
         self._node_registry = None  # Set by main.py for distributed nodes
@@ -226,6 +227,10 @@ class WebRTCManager:
     def set_ws_bridge(self, bridge) -> None:
         """Set a reference to WsBridge for submitting STT transcripts."""
         self._ws_bridge = bridge
+
+    def set_hub_browser_bridge(self, bridge) -> None:
+        """Set a reference to HubBrowserBridge for browser broadcasts."""
+        self._hub_browser_bridge = bridge
 
     def set_ring0_manager(self, manager) -> None:
         """Set a reference to Ring0Manager for voice routing."""
@@ -321,7 +326,7 @@ class WebRTCManager:
         # Broadcast to browser so UI stays in sync
         if self._ws_bridge:
             asyncio.ensure_future(
-                self._ws_bridge.broadcast_guard_state("", enabled, client_id=client_id)
+                self._hub_browser_bridge.broadcast_guard_state("", enabled, client_id=client_id)
             )
 
     def is_tts_muted(self, client_id: str) -> bool:
@@ -334,7 +339,7 @@ class WebRTCManager:
         logger.info("[webrtc] client %s: TTS %s", client_id, "muted" if muted else "unmuted")
         if self._ws_bridge:
             asyncio.ensure_future(
-                self._ws_bridge.broadcast_tts_muted("", muted, client_id=client_id)
+                self._hub_browser_bridge.broadcast_tts_muted("", muted, client_id=client_id)
             )
 
     def refresh_speaker_gates(self, username: str) -> None:
@@ -427,13 +432,13 @@ class WebRTCManager:
         if self._ws_bridge:
             mode_name = mode.name if mode else None
             asyncio.ensure_future(
-                self._ws_bridge.broadcast_voice_mode("", mode_name, client_id=client_id)
+                self._hub_browser_bridge.broadcast_voice_mode("", mode_name, client_id=client_id)
             )
             if self._ring0_manager and self._ring0_manager.is_enabled:
                 ring0_sid = self._ring0_manager.session_id
                 if ring0_sid:
                     asyncio.ensure_future(
-                        self._ws_bridge.broadcast_voice_mode(ring0_sid, mode_name)
+                        self._hub_browser_bridge.broadcast_voice_mode(ring0_sid, mode_name)
                     )
 
         # Mute/unmute Ring0 TTS during note mode so it doesn't talk over dictation
@@ -817,7 +822,7 @@ class WebRTCManager:
                                 target_session = _resolve_session()
                                 if target_session:
                                     asyncio.ensure_future(
-                                        self._ws_bridge.broadcast_audio_off(target_session)
+                                        self._hub_browser_bridge.broadcast_audio_off(target_session)
                                     )
                             return
                         if after_word.startswith("guard"):
@@ -1159,7 +1164,7 @@ class WebRTCManager:
             asyncio.ensure_future(self._speak_short(client_id, f"Switched to {hub_name}"))
             if self._ws_bridge:
                 asyncio.ensure_future(
-                    self._ws_bridge.broadcast_node_switch(local_node.id, hub_name)
+                    self._hub_browser_bridge.broadcast_node_switch(local_node.id, hub_name)
                 )
             return
 
@@ -1185,7 +1190,7 @@ class WebRTCManager:
         asyncio.ensure_future(self._speak_short(client_id, f"Switched to node {target.name}"))
         if self._ws_bridge:
             asyncio.ensure_future(
-                self._ws_bridge.broadcast_node_switch(target.id, target.name)
+                self._hub_browser_bridge.broadcast_node_switch(target.id, target.name)
             )
 
     async def _consume_audio(
