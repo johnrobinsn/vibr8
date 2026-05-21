@@ -924,6 +924,30 @@ def create_app() -> web.Application:
             if n:
                 self_node_state["node_id"] = n.id
                 logger.info("[server] Self-node registered: id=%s", n.id[:8])
+                # Phase 4c-4 step 2b: optionally swap local_node_ops to
+                # route everything through the loopback tunnel. Opt-in via
+                # VIBR8_USE_SELF_NODE=1 so the swap can be tested without
+                # affecting the default startup path.
+                if os.environ.get("VIBR8_USE_SELF_NODE") == "1":
+                    # Wait briefly for the node's tunnel handshake to settle
+                    # so node.tunnel is populated.
+                    for _w in range(25):
+                        await asyncio.sleep(0.2)
+                        if n.tunnel and getattr(n.tunnel, "connected", False):
+                            break
+                    if n.tunnel and getattr(n.tunnel, "connected", False):
+                        from vibr8_core.node_client import RemoteNodeClient
+                        remote = RemoteNodeClient(n.id, n.tunnel)
+                        local_node_ops.swap(remote)
+                        logger.info(
+                            "[server] local_node_ops swapped → RemoteNodeClient(self_id=%s)",
+                            n.id[:8],
+                        )
+                    else:
+                        logger.warning(
+                            "[server] Self-node registered but tunnel never connected; "
+                            "skipping local_node_ops swap"
+                        )
                 return
         logger.warning("[server] Self-node did not register within 10s")
 
