@@ -32,8 +32,9 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 4c-4 step 2a — `SwappableNodeClient` seam (no behavior change) | ✅ | `dcd3df0` |
 | 4c-4 step 2b — Swap `local_node_ops` to self-node when `VIBR8_USE_SELF_NODE=1` | ✅ | `1d1bf2b` |
 | 4c-4 step 2c — Data-dir consolidation (`~/.vibr8/`) + skip hub restore when full self-node mode | ✅ | `8866492` |
-| **4c-5 — Browser+CLI WS routing handles self-node sessions** (qualify IDs at hub boundary; existing tunnel relay then works) | ⏳ NEXT | — |
-| 4c-6 — Drop env-var gates; restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
+| 4c-5 — `QualifyingNodeClient` for session-id prefix at hub boundary | ✅ verified live | `448287f` + `c4a75df` |
+| 4c-6 step 1 — Self-node restart-on-crash w/ exp backoff | ✅ verified live | `ff1b7d2` |
+| **4c-6 step 2+ — Production flip** (drop env-var gates, extract `HubBrowserBridge` real state, remove in-process managers, delete `LocalNodeClient`) | ⏳ DEFERRED (see decision section below) | — |
 | 4c-6 — Restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
 | 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` and `speak` tunnel commands) | ⏳ | — |
 | 6b — Per-node scheduler (deferred from 3g) | ⏳ | — |
@@ -154,6 +155,98 @@ Once 4c-5 is solid:
 - Add subprocess restart-on-crash with exponential backoff.
 - Delete `LocalNodeClient` alias from `vibr8_core/node_client.py`.
 - Delete `_in_process_ops` and the `SwappableNodeClient` if no longer needed.
+
+### Phase 4c-6 step 1 landed (commit `ff1b7d2`)
+
+Self-node restart-on-crash. The hub now respawns the subprocess if it
+exits unexpectedly, with exponential backoff (2s → 4s → 8s → 16s → 30s
+cap). On respawn it reuses the same ephemeral API key (the
+`node_registry` already has its bcrypt hash). After re-registration the
+`local_node_ops.swap()` runs again to point at the fresh tunnel. Loop
+exits cleanly on hub shutdown via `_restart["requested"]`.
+
+Live-verified: killed the self-node child mid-flight with SIGKILL;
+hub logged `Self-node subprocess exited rc=-9; respawning in 2.0s`,
+then `Respawning self-node (attempt #2, backoff was 4.0s)`, then
+re-registered + swapped. Requests served continuously across the
+respawn.
+
+### Phase 4c-6 step 2+ — DEFERRED (decision pending)
+
+The remaining work to drop the in-process path entirely is real:
+
+1. **`HubBrowserBridge` needs standalone state.** Today it
+   `__getattr__`-delegates to `WsBridge`. To stand alone it needs:
+   - `session_id → set[browser_ws]` (currently in `Session.browser_sockets` —
+     coupled to session state)
+   - `client_id → metadata` (with `~/.vibr8/clients.json` persistence —
+     currently `WsBridge._client_metadata`)
+   - `client_id → ws / role / session` (`_ws_by_client`, `_client_roles`,
+     `_client_sessions`)
+   - `_native_ws_by_client` (Android foreground service WS)
+   - `_mirror_sockets` (passive mirror connections)
+   - Computer-use agent registry (`_computer_use_agents`)
+   - Plus the broadcast methods that iterate them.
+
+2. **Browser/native/playground/enrollment WS handlers in `main.py`**
+   currently call `ws_bridge.handle_browser_open/close/message`. These
+   would migrate to `hub_browser_bridge.*` equivalents. For self-node
+   sessions, browser messages still get forwarded to the self-node via
+   tunnel (existing `_route_browser_message` logic, but reimplemented in
+   `HubBrowserBridge`).
+
+3. **`webrtc.py` and computer-use agents** also touch session-state
+   on `ws_bridge` (e.g., reading `ring0_manager.session_id` for voice
+   routing). Each callsite needs to consult `local_node_ops` (which is
+   the self-node client) instead. Phase 6 (hub-side I/O bridging to
+   active node) already covers most of this; folding the two designs
+   together makes sense.
+
+4. **Drop the env-var gates**. Default startup becomes "spawn self-node,
+   swap `local_node_ops`, never load in-process state". Hub `main.py`
+   stops calling `WsBridge()`, `CliLauncher()`, `Ring0Manager()`,
+   `SessionStore()` entirely.
+
+5. **Delete `LocalNodeClient`** alias + `_in_process_ops` +
+   `SwappableNodeClient` (only one target ever; the wrapper isn't
+   needed if everything is the self-node client).
+
+Estimated 500-1000 LOC across `vibr8_core/hub_browser_bridge.py`,
+`server/main.py`, `server/webrtc.py`, `vibr8_core/ws_bridge.py`,
+plus tests.
+
+### Decision point: do we need the full keystone?
+
+The remote-node-parity *goal* — Hermes (and any remote node) is a
+first-class equivalent of the hub-host — is **already fully met** with
+the work landed through Phase 4c-6 step 1:
+
+- Every node-scoped operation has a tunnel command (`NodeOperations` →
+  `RemoteNodeClient`).
+- `routes.py` is manager-free; it calls `NodeClient` exclusively.
+- `LocalSessionRouter` routes through `NodeOperations`.
+- `local_node_ops` is swappable; with `VIBR8_USE_SELF_NODE=1` it
+  retargets at the self-node and the full loopback path works
+  end-to-end, including restart-on-crash.
+
+The remaining 4c-6 step 2+ work mainly buys **code purity** — single
+unambiguous path, no in-process fallback — not new user-visible
+capabilities. The cost is real: large refactor + the architectural
+commitment that the hub *always* spawns a subprocess on boot.
+
+**Two viable end-states**:
+
+- **Option A — Full keystone** (drop in-process path). Code purity;
+  one unambiguous default. Locks in subprocess dependency.
+- **Option B — Keep both modes** (current state). In-process by
+  default; opt-in `VIBR8_USE_SELF_NODE=1` for full loopback. Two paths
+  to maintain, but the in-process path has years of production
+  hardening and is zero-overhead.
+
+If the user wants Option A, the playbook above is the recipe. If
+Option B is acceptable, the refactor is essentially complete — Phase
+4c-6 step 2+ is permanently optional, and we move on to Phase 6/7/8
+(hub-side I/O bridging to active node, frontend node-scoping, cleanup).
 
 Verify the table against `git log --oneline main` — commits should be on `main` in the order above, after `7ff55c3`.
 
