@@ -1548,7 +1548,7 @@ def create_routes(
         """List sessions — proxied for Ring0 MCP server (auth-exempt)."""
         if session_registry:
             r0_id = ring0_manager.session_id if ring0_manager else None
-            session_registry.sync_from_launcher(r0_id or "")
+            await session_registry.sync_from_launcher(r0_id or "")
             sessions = []
             for se in session_registry.list_all():
                 name = session_names.get_name(se.qualified_id) or se.name or "unnamed"

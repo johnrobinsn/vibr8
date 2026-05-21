@@ -405,11 +405,11 @@ def create_app() -> web.Application:
     ring0_manager = Ring0Manager(PORT, auth_manager=auth_manager)
     task_scheduler = TaskScheduler()
     node_registry = NodeRegistry()
-    session_registry = SessionRegistry(ws_bridge, launcher, node_registry)
 
     # NodeOperations bound to the hub's in-process managers. This is the
     # hub's "LocalNodeClient" until Phase 4 spawns a self-node and the hub
-    # talks to itself over a loopback tunnel.
+    # talks to itself over a loopback tunnel. Constructed before
+    # SessionRegistry so the registry can route through it.
     local_node_ops = NodeOperations(
         launcher=launcher,
         bridge=ws_bridge,
@@ -417,6 +417,9 @@ def create_app() -> web.Application:
         ring0=ring0_manager,
         worktree_tracker=worktree_tracker,
         default_backend="claude",
+    )
+    session_registry = SessionRegistry(
+        ws_bridge, launcher, node_registry, local_node_ops=local_node_ops,
     )
 
     # Phase 4b: self-node subprocess machinery (gated, OFF by default).
@@ -796,7 +799,7 @@ def create_app() -> web.Application:
 
         # Populate session registry from launcher's restored sessions
         r0_id = ring0_manager.session_id if ring0_manager else ""
-        session_registry.sync_from_launcher(r0_id)
+        await session_registry.sync_from_launcher(r0_id)
 
         # Periodic heartbeat checker for remote nodes
         async def _heartbeat_checker() -> None:

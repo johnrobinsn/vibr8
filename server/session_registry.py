@@ -56,17 +56,27 @@ class SessionRouter(Protocol):
 
 
 class LocalSessionRouter:
-    """Routes operations to the local WsBridge and CliLauncher."""
+    """Routes operations through the hub's local NodeOperations.
 
-    def __init__(self, raw_id: str, ws_bridge: WsBridge, launcher: CliLauncher) -> None:
+    Writes (send_message, interrupt, kill, respond_permission) go via
+    NodeOperations methods. Sync reads (history, pending permissions)
+    still hit the bridge directly for low-latency UI; those move to
+    HubBrowserBridge in Phase 4c-3.
+    """
+
+    def __init__(self, raw_id: str, ops: Any, ws_bridge: WsBridge) -> None:
         self._raw_id = raw_id
+        self._ops = ops
         self._bridge = ws_bridge
-        self._launcher = launcher
 
     async def send_message(self, text: str, source_client_id: str = "") -> str | None:
-        return await self._bridge.submit_user_message(self._raw_id, text, source_client_id=source_client_id)
+        result = await self._ops.submit_message(
+            session_id=self._raw_id, content=text, source_client_id=source_client_id,
+        )
+        return result.get("error")
 
     def interrupt(self) -> bool:
+        # Interrupt is sync in the launcher API; route directly through bridge.
         return self._bridge.interrupt_session(self._raw_id)
 
     def get_message_history(self) -> list[dict[str, Any]]:
@@ -79,10 +89,14 @@ class LocalSessionRouter:
         return self._bridge.get_pending_permission_count(self._raw_id)
 
     async def respond_permission(self, request_id: str, behavior: str, message: str = "") -> bool:
-        return await self._bridge.respond_to_permission(self._raw_id, request_id, behavior, message)
+        result = await self._ops.respond_to_permission(
+            session_id=self._raw_id, request_id=request_id, behavior=behavior, message=message,
+        )
+        return "error" not in result
 
     async def kill(self) -> bool:
-        return await self._launcher.kill(self._raw_id)
+        result = await self._ops.kill_session(session_id=self._raw_id)
+        return result.get("ok", False)
 
 
 class TunneledSessionRouter:
@@ -184,11 +198,14 @@ class SessionRegistry:
         ws_bridge: WsBridge,
         launcher: CliLauncher,
         node_registry: NodeRegistry | None = None,
+        *,
+        local_node_ops: Any | None = None,
     ) -> None:
         self._entries: dict[str, SessionEntry] = {}
         self._bridge = ws_bridge
         self._launcher = launcher
         self._node_registry = node_registry
+        self._ops = local_node_ops
 
     # ── Qualified ID helpers ─────────────────────────────────────────────
 
@@ -261,7 +278,16 @@ class SessionRegistry:
 
     def get_router(self, entry: SessionEntry) -> SessionRouter:
         if entry.node_id == LOCAL_NODE_ID:
-            return LocalSessionRouter(entry.raw_id, self._bridge, self._launcher)
+            # Lazy-build local NodeOperations if the caller didn't supply one.
+            if self._ops is None:
+                from vibr8_core.node_operations import NodeOperations
+                self._ops = NodeOperations(
+                    launcher=self._launcher,
+                    bridge=self._bridge,
+                    store=None,  # type: ignore[arg-type]
+                    ring0=None,
+                )
+            return LocalSessionRouter(entry.raw_id, self._ops, self._bridge)
         if not self._node_registry:
             raise ValueError(f"No node registry for remote session {entry.qualified_id}")
         return TunneledSessionRouter(
@@ -269,35 +295,54 @@ class SessionRegistry:
             self._node_registry, self._bridge,
         )
 
-    # ── Sync from launcher (local sessions) ──────────────────────────────
+    # ── Sync from local node (replaces launcher direct access) ──────────
 
-    def sync_from_launcher(self, ring0_session_id: str = "") -> None:
-        """Refresh local entries from the CliLauncher's session list."""
-        launcher_ids = set(self._launcher.get_all_session_ids())
+    async def sync_from_launcher(self, ring0_session_id: str = "") -> None:
+        """Refresh local entries from the local node's session list.
 
-        for raw_id in launcher_ids:
-            qid = raw_id  # local sessions use raw UUID as key
-            info = self._launcher.get_session(raw_id)
-            if not info:
+        Method name kept for caller compatibility, but the data now comes
+        from local_node_ops.list_sessions() (which wraps the launcher).
+        """
+        if self._ops is None:
+            # No NodeOperations bound — caller didn't wire one up, so we
+            # fall back to direct launcher access. Tests rely on this path.
+            launcher_ids = set(self._launcher.get_all_session_ids())
+            session_dicts = []
+            for raw_id in launcher_ids:
+                info = self._launcher.get_session(raw_id)
+                if not info:
+                    continue
+                d = info.to_dict() if hasattr(info, "to_dict") else (info if isinstance(info, dict) else info.__dict__)
+                session_dicts.append(d)
+        else:
+            result = await self._ops.list_sessions()
+            session_dicts = result.get("sessions", [])
+
+        launcher_ids = set()
+        for s in session_dicts:
+            raw_id = s.get("sessionId", "")
+            if not raw_id:
                 continue
+            qid = raw_id  # local sessions use raw UUID as key
+            launcher_ids.add(qid)
             existing = self._entries.get(qid)
             if existing:
-                existing.state = info.state
-                existing.archived = info.archived or False
-                existing.name = info.name or existing.name
-                existing.model = info.model or existing.model
+                existing.state = s.get("state", existing.state)
+                existing.archived = bool(s.get("archived")) if s.get("archived") is not None else existing.archived
+                existing.name = s.get("name") or existing.name
+                existing.model = s.get("model") or existing.model
             else:
                 self.register(SessionEntry(
                     qualified_id=qid,
                     node_id=LOCAL_NODE_ID,
                     raw_id=raw_id,
-                    name=info.name or "",
-                    state=info.state,
-                    backend_type=info.backendType or "claude",
-                    cwd=info.cwd,
-                    is_ring0=(raw_id == ring0_session_id),
-                    model=info.model or "",
-                    archived=info.archived or False,
+                    name=s.get("name") or "",
+                    state=s.get("state", ""),
+                    backend_type=s.get("backendType") or "claude",
+                    cwd=s.get("cwd", ""),
+                    is_ring0=(raw_id == ring0_session_id) or bool(s.get("isRing0")),
+                    model=s.get("model") or "",
+                    archived=bool(s.get("archived")),
                 ))
 
         local_qids = [qid for qid, e in self._entries.items() if e.node_id == LOCAL_NODE_ID]
