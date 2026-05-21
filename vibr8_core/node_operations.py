@@ -484,6 +484,43 @@ class NodeOperations:
             return {"error": "Environment not found"}
         return {"ok": True}
 
+    # ── Artifacts ─────────────────────────────────────────────────────────
+    #
+    # Each node owns its own ~/.vibr8/artifacts/. The hub UI surfaces them
+    # per-node.
+
+    async def artifacts_list(self, session_id: str | None = None) -> dict:
+        from vibr8_core import artifacts
+        return {"artifacts": artifacts.list_artifacts(session_id)}
+
+    async def artifacts_create(self, username: str = "", data: dict | None = None) -> dict:
+        from vibr8_core import artifacts
+        artifact = artifacts.create_artifact(username, data or {})
+        await self._bridge.broadcast_to_all_browsers({"type": "artifacts_changed"})
+        return artifact
+
+    async def artifacts_delete(self, artifact_id: str = "") -> dict:
+        from vibr8_core import artifacts
+        deleted = artifacts.delete_artifact(artifact_id)
+        if not deleted:
+            return {"error": "Not found"}
+        await self._bridge.broadcast_to_all_browsers({"type": "artifacts_changed"})
+        return {"ok": True}
+
+    async def artifacts_read_content(self, artifact_id: str = "") -> dict:
+        """Read artifact bytes; encoded as base64 since the tunnel is JSON."""
+        from vibr8_core import artifacts
+        import base64
+        result = artifacts.read_content(artifact_id)
+        if result is None:
+            return {"error": "Not found"}
+        data, content_type, filename = result
+        return {
+            "contentBase64": base64.b64encode(data).decode("ascii"),
+            "contentType": content_type,
+            "filename": filename,
+        }
+
     # ── Ring0 control ─────────────────────────────────────────────────────
 
     async def ring0_status(self) -> dict:

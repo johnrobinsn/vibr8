@@ -2461,25 +2461,39 @@ def create_routes(
 
     @routes.get("/api/artifacts")
     async def artifacts_list(request: web.Request) -> web.Response:
+        node_id = request.query.get("nodeId", "")
         session_id = request.query.get("sessionId")
-        return web.json_response(artifacts.list_artifacts(session_id))
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.artifacts_list(session_id=session_id)
+        return web.json_response(result.get("artifacts", []))
 
     @routes.post("/api/artifacts")
     async def artifacts_create(request: web.Request) -> web.Response:
         username = _get_username(request)
         body = await request.json()
-        artifact = artifacts.create_artifact(username, body)
-        await ws_bridge.broadcast_to_all_browsers({"type": "artifacts_changed"})
+        node_id = body.get("nodeId", "")
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        artifact = await client.artifacts_create(username=username, data=body)
         return web.json_response(artifact)
 
     @routes.delete("/api/artifacts/{id}")
     async def artifacts_delete(request: web.Request) -> web.Response:
         artifact_id = request.match_info["id"]
-        deleted = artifacts.delete_artifact(artifact_id)
-        if not deleted:
-            return web.json_response({"error": "Not found"}, status=404)
-        await ws_bridge.broadcast_to_all_browsers({"type": "artifacts_changed"})
-        return web.json_response({"ok": True})
+        node_id = request.query.get("nodeId", "")
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.artifacts_delete(artifact_id=artifact_id)
+        if "error" in result:
+            return web.json_response(result, status=404)
+        return web.json_response(result)
 
     @routes.get("/api/artifacts/{id}/content")
     async def artifacts_get_content(request: web.Request) -> web.Response:
@@ -2491,6 +2505,30 @@ def create_routes(
         long-cached.
         """
         artifact_id = request.match_info["id"]
+        node_id = request.query.get("nodeId", "")
+
+        if node_id:
+            # Remote artifact — fetch bytes via tunnel (base64-encoded).
+            try:
+                client, _ = _resolve_node_client(node_id)
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=503)
+            result = await client.artifacts_read_content(artifact_id=artifact_id)
+            if "error" in result:
+                return web.Response(status=404, text="Not found")
+            import base64
+            body = base64.b64decode(result["contentBase64"])
+            mime = result.get("contentType", "application/octet-stream")
+            filename = result.get("filename")
+            headers = {
+                "Content-Type": mime,
+                "Cache-Control": "public, max-age=31536000, immutable",
+                "Content-Disposition": (
+                    f'inline; filename="{filename}"' if filename else "inline"
+                ),
+            }
+            return web.Response(body=body, headers=headers)
+
         result = artifacts.read_content(artifact_id)
         if result is None:
             return web.Response(status=404, text="Not found")
