@@ -864,7 +864,13 @@ def create_app() -> web.Application:
             spawn(_spawn_self_node())
 
     async def _spawn_self_node() -> None:
-        """Spawn the hub's self-node child process and wait for it to register.
+        """Self-node lifecycle loop: spawn → wait for crash → respawn.
+
+        The first attempt waits for the hub listener to bind, generates an
+        ephemeral API key, spawns the subprocess, waits for it to register,
+        and (if VIBR8_USE_SELF_NODE=1) swaps local_node_ops. Subsequent
+        attempts reuse the same API key and respawn with exponential
+        backoff (capped at 30s). Exits cleanly on hub shutdown.
 
         Today the subprocess uses ~/.vibr8-self/ (separate from the hub's
         ~/.vibr8/) so it can run safely alongside the hub's in-process
@@ -890,7 +896,14 @@ def create_app() -> web.Application:
             logger.warning("[server] Hub listener never came up; skipping self-node spawn")
             return
 
+        # Backoff state for the respawn loop.
+        backoff = 2.0
+        max_backoff = 30.0
+        attempt = 0
+
         # Issue an ephemeral API key the subprocess can use to register.
+        # On respawn we reuse this key — the node_registry already has
+        # the bcrypt hash from the first attempt.
         raw_key, _entry = node_registry.generate_api_key(name="self-node bootstrap")
         self_node_state["api_key"] = raw_key
 
@@ -918,68 +931,107 @@ def create_app() -> web.Application:
             "--port", str(self_port),
             "--self-mode",
         ]
-        logger.info("[server] Spawning self-node: port=%d hub=%s", self_port, hub_ws_url)
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        self_node_state["proc"] = proc
 
-        # Stream the child's stdout to our logs in the background.
-        async def _drain_child() -> None:
-            loop = asyncio.get_event_loop()
-            while True:
-                line = await loop.run_in_executor(None, proc.stdout.readline)
-                if not line:
-                    break
-                logger.info("[self-node] %s", line.decode(errors="replace").rstrip())
+        # Respawn loop with exponential backoff. Each iteration spawns a
+        # fresh subprocess, waits for registration, performs the swap (if
+        # configured), then blocks on proc.wait() — when the child exits
+        # for any reason, we loop and respawn.
+        while not _restart["requested"]:
+            attempt += 1
+            if attempt == 1:
+                logger.info("[server] Spawning self-node: port=%d hub=%s", self_port, hub_ws_url)
+            else:
+                logger.info(
+                    "[server] Respawning self-node (attempt #%d, backoff was %.1fs)",
+                    attempt, backoff,
+                )
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self_node_state["proc"] = proc
 
-        spawn(_drain_child())
+            # Stream the child's stdout to our logs in the background.
+            async def _drain_child(p: subprocess.Popen) -> None:
+                loop = asyncio.get_event_loop()
+                while True:
+                    line = await loop.run_in_executor(None, p.stdout.readline)
+                    if not line:
+                        break
+                    logger.info("[self-node] %s", line.decode(errors="replace").rstrip())
 
-        # Poll the registry for the new "self" node id (up to 10s).
-        for _ in range(50):
-            await asyncio.sleep(0.2)
-            n = node_registry.get_node_by_name("self")
-            if n:
-                self_node_state["node_id"] = n.id
-                logger.info("[server] Self-node registered: id=%s", n.id[:8])
-                # Phase 4c-4 step 2b: optionally swap local_node_ops to
-                # route everything through the loopback tunnel. Opt-in via
-                # VIBR8_USE_SELF_NODE=1 so the swap can be tested without
-                # affecting the default startup path.
-                if os.environ.get("VIBR8_USE_SELF_NODE") == "1":
-                    # Wait briefly for the node's tunnel handshake to settle
-                    # so node.tunnel is populated.
-                    for _w in range(25):
-                        await asyncio.sleep(0.2)
-                        if n.tunnel and getattr(n.tunnel, "connected", False):
-                            break
-                    if n.tunnel and getattr(n.tunnel, "connected", False):
-                        from vibr8_core.node_client import (
-                            RemoteNodeClient, QualifyingNodeClient,
-                        )
-                        # QualifyingNodeClient wraps the RemoteNodeClient so
-                        # sessionId fields get prefixed with {self_id}: at the
-                        # hub boundary. With prefixed IDs, the existing
-                        # browser-WS-forwarding code path in WsBridge picks
-                        # up self-node sessions automatically (it dispatches
-                        # via tunnel for anything containing `:`).
-                        remote = RemoteNodeClient(n.id, n.tunnel)
-                        qualified = QualifyingNodeClient(remote, n.id)
-                        local_node_ops.swap(qualified)
-                        logger.info(
-                            "[server] local_node_ops swapped → QualifyingNodeClient(RemoteNodeClient(self_id=%s))",
-                            n.id[:8],
-                        )
+            spawn(_drain_child(proc))
+
+            # Poll the registry for the new "self" node id (up to 10s).
+            registered = False
+            for _ in range(50):
+                await asyncio.sleep(0.2)
+                n = node_registry.get_node_by_name("self")
+                if n:
+                    self_node_state["node_id"] = n.id
+                    if attempt == 1:
+                        logger.info("[server] Self-node registered: id=%s", n.id[:8])
                     else:
-                        logger.warning(
-                            "[server] Self-node registered but tunnel never connected; "
-                            "skipping local_node_ops swap"
-                        )
+                        logger.info("[server] Self-node re-registered: id=%s (attempt #%d)", n.id[:8], attempt)
+                    # Phase 4c-4 step 2b: optionally swap local_node_ops to
+                    # route everything through the loopback tunnel. Opt-in
+                    # via VIBR8_USE_SELF_NODE=1.
+                    if os.environ.get("VIBR8_USE_SELF_NODE") == "1":
+                        # Wait briefly for the node's tunnel handshake to
+                        # settle so node.tunnel is populated.
+                        for _w in range(25):
+                            await asyncio.sleep(0.2)
+                            if n.tunnel and getattr(n.tunnel, "connected", False):
+                                break
+                        if n.tunnel and getattr(n.tunnel, "connected", False):
+                            from vibr8_core.node_client import (
+                                RemoteNodeClient, QualifyingNodeClient,
+                            )
+                            remote = RemoteNodeClient(n.id, n.tunnel)
+                            qualified = QualifyingNodeClient(remote, n.id)
+                            local_node_ops.swap(qualified)
+                            logger.info(
+                                "[server] local_node_ops swapped → QualifyingNodeClient(RemoteNodeClient(self_id=%s))",
+                                n.id[:8],
+                            )
+                        else:
+                            logger.warning(
+                                "[server] Self-node registered but tunnel never connected; "
+                                "skipping local_node_ops swap"
+                            )
+                    registered = True
+                    break
+
+            if not registered:
+                logger.warning(
+                    "[server] Self-node did not register within 10s (attempt #%d)",
+                    attempt,
+                )
+                # Tear down the proc so we don't leak it before backoff.
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+            # Reset backoff after a successful registration so a single
+            # crash doesn't accumulate prior failures' backoff.
+            if registered:
+                backoff = 2.0
+
+            # Block until the subprocess exits, then respawn after backoff.
+            loop = asyncio.get_event_loop()
+            rc = await loop.run_in_executor(None, proc.wait)
+            if _restart["requested"]:
+                logger.info("[server] Hub shutting down; not respawning self-node")
                 return
-        logger.warning("[server] Self-node did not register within 10s")
+            logger.warning(
+                "[server] Self-node subprocess exited rc=%s; respawning in %.1fs",
+                rc, backoff,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
 
     app.on_startup.append(on_startup)
 
