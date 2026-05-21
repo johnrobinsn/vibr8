@@ -16,8 +16,8 @@ import aiohttp
 from aiohttp import web
 
 if TYPE_CHECKING:
-    from server.session_store import SessionStore, PersistedSession
-    from server.adapter import CodexAdapter
+    from vibr8_core.session_store import SessionStore, PersistedSession
+    from vibr8_core.codex_adapter import CodexAdapter
     from server.webrtc import WebRTCManager
 
 logger = logging.getLogger(__name__)
@@ -515,7 +515,7 @@ class WsBridge:
     def restore_from_disk(self) -> int:
         if not self._store:
             return 0
-        from server import session_names
+        from vibr8_core import session_names
         persisted = self._store.load_all()
         count = 0
         for p in persisted:
@@ -566,8 +566,8 @@ class WsBridge:
     def _persist_session(self, session: Session) -> None:
         if not self._store:
             return
-        from server.session_store import PersistedSession
-        from server import session_names
+        from vibr8_core.session_store import PersistedSession
+        from vibr8_core import session_names
         self._store.save(PersistedSession(
             id=session.id,
             state=session.state,
@@ -607,8 +607,8 @@ class WsBridge:
         pending = self._store.has_pending_saves()
         if not pending:
             return
-        from server.session_store import PersistedSession
-        from server import session_names
+        from vibr8_core.session_store import PersistedSession
+        from vibr8_core import session_names
         for session_id in pending:
             session = self._sessions.get(session_id)
             if session:
@@ -1084,7 +1084,7 @@ class WsBridge:
 
             # Notify Ring0 when a paired second screen connects for the first time (not reconnects)
             if client_id and role == "secondscreen" and not was_already_connected:
-                from server.ring0_events import Ring0Event
+                from vibr8_core.ring0_events import Ring0Event
                 await self.emit_ring0_event(Ring0Event(
                     fields={"type": "second_screen_connected", "clientId": client_id[:8]},
                 ))
@@ -1210,7 +1210,7 @@ class WsBridge:
 
                     # Notify Ring0 when a paired second screen disconnects
                     if was_second_screen and client_id:
-                        from server.ring0_events import Ring0Event
+                        from vibr8_core.ring0_events import Ring0Event
                         await self.emit_ring0_event(Ring0Event(
                             fields={"type": "second_screen_disconnected", "clientId": client_id[:8]},
                         ))
@@ -2013,7 +2013,7 @@ class WsBridge:
         logger.info("[ws-bridge] User returned after %ds, %d pending task(s)",
                      int(away_seconds), pending_count)
 
-        from server.ring0_events import Ring0Event
+        from vibr8_core.ring0_events import Ring0Event
         await self.emit_ring0_event(Ring0Event(fields={
             "type": "user_returned",
             "away_seconds": str(int(away_seconds)),
@@ -2049,7 +2049,7 @@ class WsBridge:
             evt_type = event.fields.get("type", "unknown")
             rest = {k: v for k, v in event.fields.items() if k != "type"}
             processed_text = f"[event {evt_type}] {_json.dumps(rest)}"
-            from server.ring0_events import ProcessedEvent
+            from vibr8_core.ring0_events import ProcessedEvent
             processed = ProcessedEvent(
                 text=processed_text, summary=None, ui="visible",
                 send=True, event=event,
@@ -2103,8 +2103,8 @@ class WsBridge:
         # Don't notify hub Ring0 about remote node sessions (they handle their own)
         if self._is_remote_session(session.id):
             return
-        from server import session_names
-        from server.ring0_events import Ring0Event
+        from vibr8_core import session_names
+        from vibr8_core.ring0_events import Ring0Event
         name = session_names.get_name(session.id) or session.id[:8]
         # Keep event fields ASCII-clean
         transition = transition.replace("→", "->")

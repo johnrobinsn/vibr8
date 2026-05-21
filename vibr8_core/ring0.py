@@ -15,10 +15,10 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from server.auth import AuthManager
-    from server.cli_launcher import CliLauncher
-    from server.ws_bridge import WsBridge
+    from vibr8_core.cli_launcher import CliLauncher
+    from vibr8_core.ws_bridge import WsBridge
 
-from server import session_names
+from vibr8_core import session_names
 
 logger = logging.getLogger(__name__)
 
@@ -542,7 +542,7 @@ class Ring0Manager:
             return session_id
 
         # No session in launcher — fresh launch with fixed ID (+ resume if we have a CLI session)
-        from server.cli_launcher import LaunchOptions
+        from vibr8_core.cli_launcher import LaunchOptions
 
         agent_config: dict[str, Any] | None = None
         if backend_type == "hermes":

@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from server.hermes_adapter import (
+from vibr8_core.hermes_adapter import (
     HermesAdapter,
     HermesAdapterOptions,
     JsonRpcTransport,

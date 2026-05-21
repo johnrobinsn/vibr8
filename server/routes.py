@@ -15,21 +15,22 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
-from server import artifacts, env_manager, git_utils, session_names
+from vibr8_core import artifacts, env_manager, session_names
+from server import git_utils
 from server import speaker_fingerprints, voice_profiles, voice_logger
 from server.usage_limits import get_usage_limits
-from server.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
+from vibr8_core.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
 from server.session_registry import LOCAL_NODE_ID
-from server.worktree_tracker import WorktreeTracker, WorktreeMapping
+from vibr8_core.worktree_tracker import WorktreeTracker, WorktreeMapping
 
 if TYPE_CHECKING:
-    from server.ws_bridge import WsBridge
-    from server.session_store import SessionStore
+    from vibr8_core.ws_bridge import WsBridge
+    from vibr8_core.session_store import SessionStore
     from server.webrtc import WebRTCManager
     from server.terminal import TerminalManager
     from server.auth import AuthManager
 
-from server.ring0 import Ring0Manager
+from vibr8_core.ring0 import Ring0Manager
 
 logger = logging.getLogger(__name__)
 
@@ -419,7 +420,7 @@ def create_routes(
                 if device_token:
                     pair_msg["deviceToken"] = device_token
                 await ws.send_str(json.dumps(pair_msg))
-            from server.ring0_events import Ring0Event
+            from vibr8_core.ring0_events import Ring0Event
             await ws_bridge.emit_ring0_event(Ring0Event(fields={
                 "type": "second_screen_paired",
                 "clientId": client_id[:8], "user": username,
@@ -493,7 +494,7 @@ def create_routes(
                     return web.json_response({"error": result["error"]}, status=500)
                 raw_sid = result.get("sessionId")
                 if raw_sid:
-                    from server.ws_bridge import WsBridge
+                    from vibr8_core.ws_bridge import WsBridge
                     result["sessionId"] = WsBridge.qualify_session_id(node.id, raw_sid)
                 return web.json_response(result)
             elif node.tunnel is None:
@@ -682,7 +683,7 @@ def create_routes(
                 result = await node.tunnel.send_command({"type": "list_sessions"})
                 remote_sessions = result.get("sessions", [])
                 # Qualify session IDs at the hub boundary
-                from server.ws_bridge import WsBridge
+                from vibr8_core.ws_bridge import WsBridge
                 for s in remote_sessions:
                     raw_id = s.get("sessionId", "")
                     if raw_id:
@@ -2669,7 +2670,7 @@ def create_routes(
             if device_token:
                 pair_msg["deviceToken"] = device_token
             await ws.send_str(json.dumps(pair_msg))
-        from server.ring0_events import Ring0Event
+        from vibr8_core.ring0_events import Ring0Event
         await ws_bridge.emit_ring0_event(Ring0Event(fields={
             "type": "second_screen_paired",
             "clientId": client_id[:8], "user": username,
@@ -2726,7 +2727,7 @@ def create_routes(
             _save_pairings()
 
             # Notify Ring0
-            from server.ring0_events import Ring0Event
+            from vibr8_core.ring0_events import Ring0Event
             await ws_bridge.emit_ring0_event(Ring0Event(
                 fields={"type": "second_screen_unpaired", "clientId": client_id[:8]},
             ))
@@ -2770,7 +2771,7 @@ def create_routes(
         _save_pairings()
 
         # Notify Ring0
-        from server.ring0_events import Ring0Event
+        from vibr8_core.ring0_events import Ring0Event
         action = "enabled" if enabled else "disabled"
         await ws_bridge.emit_ring0_event(Ring0Event(
             fields={"type": f"second_screen_{action}", "clientId": client_id[:8]},

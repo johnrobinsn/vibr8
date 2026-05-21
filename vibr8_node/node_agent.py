@@ -16,11 +16,11 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-from server.cli_launcher import CliLauncher, LaunchOptions
-from server.ws_bridge import WsBridge
-from server.session_store import SessionStore
-from server.ring0 import Ring0Manager
-from server import session_names
+from vibr8_core.cli_launcher import CliLauncher, LaunchOptions
+from vibr8_core.ws_bridge import WsBridge
+from vibr8_core.session_store import SessionStore
+from vibr8_core.ring0 import Ring0Manager
+from vibr8_core import session_names
 from vibr8_node.desktop_webrtc import DesktopWebRTCManager
 
 logger = logging.getLogger("vibr8-node")
@@ -667,7 +667,7 @@ class NodeAgent:
 
         # Ring0 MCP routes (reuse from server.routes)
         from server.routes import create_routes
-        from server.worktree_tracker import WorktreeTracker
+        from vibr8_core.worktree_tracker import WorktreeTracker
         ring0 = self._ring0
         api_routes = create_routes(
             launcher, bridge, self._store,

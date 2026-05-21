@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from server.session_types import (
+from vibr8_core.session_types import (
     BrowserIncomingMessage,
     BrowserOutgoingMessage,
     CLIResultMessage,

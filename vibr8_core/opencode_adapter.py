@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from aiohttp import ClientSession, BasicAuth, ClientTimeout
 
-from server.session_types import (
+from vibr8_core.session_types import (
     BrowserOutgoingMessage,
     CLIResultMessage,
     PermissionRequest,

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from server.opencode_adapter import OpenCodeAdapter, OpenCodeAdapterOptions
+from vibr8_core.opencode_adapter import OpenCodeAdapter, OpenCodeAdapterOptions
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -28,7 +28,7 @@ def make_adapter(
     opencode_session_id: str | None = None,
 ) -> OpenCodeAdapter:
     """Create an adapter with init task cancelled (for unit testing)."""
-    with patch("server.opencode_adapter.asyncio.create_task") as mock_ct:
+    with patch("vibr8_core.opencode_adapter.asyncio.create_task") as mock_ct:
         mock_ct.return_value = MagicMock()
         a = OpenCodeAdapter(session_id, OpenCodeAdapterOptions(
             model=model,
@@ -690,7 +690,7 @@ class TestOpenCodeAdapterEmit:
     def test_emit_handles_async_callback(self, adapter):
         cb = AsyncMock()
         adapter.on_browser_message(cb)
-        with patch("server.opencode_adapter.asyncio.ensure_future") as mock_ef:
+        with patch("vibr8_core.opencode_adapter.asyncio.ensure_future") as mock_ef:
             adapter._emit({"type": "test"})
             mock_ef.assert_called_once()
 
@@ -709,7 +709,7 @@ class TestOpenCodeAdapterServerDisposed:
         return a
 
     def test_server_disposed_triggers_disconnect(self, adapter):
-        with patch("server.opencode_adapter.asyncio.create_task") as mock_ct:
+        with patch("vibr8_core.opencode_adapter.asyncio.create_task") as mock_ct:
             adapter._dispatch_sse_event({
                 "type": "server.instance.disposed",
                 "properties": {},

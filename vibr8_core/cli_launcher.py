@@ -19,10 +19,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional
 
 if TYPE_CHECKING:
-    from server.codex_adapter import CodexAdapter
-    from server.session_store import SessionStore
+    from vibr8_core.codex_adapter import CodexAdapter
+    from vibr8_core.session_store import SessionStore
 
-from server.session_types import BackendType
+from vibr8_core.session_types import BackendType
 
 logger = logging.getLogger(__name__)
 
@@ -560,7 +560,7 @@ class CliLauncher:
 
         # Log the chosen sandbox mode once per spawn so it's obvious in logs
         # which mode every session uses.
-        from server.codex_adapter import detect_codex_sandbox_mode, codex_sandbox_reason
+        from vibr8_core.codex_adapter import detect_codex_sandbox_mode, codex_sandbox_reason
         sandbox_mode = detect_codex_sandbox_mode()
 
         logger.info(
@@ -590,9 +590,9 @@ class CliLauncher:
 
         # Create the CodexAdapter which handles JSON-RPC and message translation.
         # Import at runtime to avoid circular imports.
-        from server.codex_adapter import CodexAdapter
+        from vibr8_core.codex_adapter import CodexAdapter
 
-        from server.codex_adapter import CodexAdapterOptions
+        from vibr8_core.codex_adapter import CodexAdapterOptions
         adapter = CodexAdapter(proc, session_id, CodexAdapterOptions(
             model=options.model,
             cwd=info.cwd,
@@ -692,7 +692,7 @@ class CliLauncher:
             )
             self._pipe_tasks.append(task)
 
-        from server.hermes_adapter import HermesAdapter, HermesAdapterOptions
+        from vibr8_core.hermes_adapter import HermesAdapter, HermesAdapterOptions
         mcp_servers = None
         if options.agentConfig and "mcpServers" in options.agentConfig:
             mcp_servers = options.agentConfig["mcpServers"]
@@ -845,7 +845,7 @@ class CliLauncher:
             return
 
         # Create the adapter
-        from server.opencode_adapter import OpenCodeAdapter, OpenCodeAdapterOptions
+        from vibr8_core.opencode_adapter import OpenCodeAdapter, OpenCodeAdapterOptions
 
         adapter = OpenCodeAdapter(session_id, OpenCodeAdapterOptions(
             model=options.model,

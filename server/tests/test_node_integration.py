@@ -18,7 +18,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from server.node_registry import NodeRegistry, RegisteredNode
 from server.node_tunnel import NodeTunnel
-from server.ws_bridge import WsBridge, Session
+from vibr8_core.ws_bridge import WsBridge, Session
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -376,7 +376,7 @@ class TestRing0EventIsolation:
         local_session = bridge.get_or_create_session("local-session")
         local_session.controlled_by = "ring0"
 
-        with patch("server.session_names.get_name", return_value="Test Session"):
+        with patch("vibr8_core.session_names.get_name", return_value="Test Session"):
             await bridge._notify_ring0_state_change(local_session, "idle->running")
         bridge.emit_ring0_event.assert_called_once()
 
@@ -475,8 +475,8 @@ class TestSessionListEndpoints:
     @pytest.fixture
     def app(self, mock_launcher, mock_ring0, bridge):
         from server.routes import create_routes
-        from server.session_store import SessionStore
-        from server.worktree_tracker import WorktreeTracker
+        from vibr8_core.session_store import SessionStore
+        from vibr8_core.worktree_tracker import WorktreeTracker
 
         store = SessionStore()
         routes = create_routes(

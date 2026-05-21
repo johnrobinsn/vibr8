@@ -18,9 +18,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from server.cli_launcher import CliLauncher, SdkSessionInfo
+    from vibr8_core.cli_launcher import CliLauncher, SdkSessionInfo
     from server.node_registry import NodeRegistry
-    from server.ws_bridge import WsBridge
+    from vibr8_core.ws_bridge import WsBridge
 
 logger = logging.getLogger(__name__)
 

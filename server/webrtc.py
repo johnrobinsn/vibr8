@@ -705,7 +705,7 @@ class WebRTCManager:
                     if self._node_registry:
                         active_nid = self._node_registry.active_node_id
                         if active_nid != "local":
-                            from server.ws_bridge import WsBridge
+                            from vibr8_core.ws_bridge import WsBridge
                             target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
                     if not target_sid:
                         target_sid = self._ring0_manager.session_id
@@ -799,7 +799,7 @@ class WebRTCManager:
                             if ring0_sid:
                                 await self._ws_bridge.submit_user_message(ring0_sid, result, source_client_id=client_id)
                                 if isinstance(mode, NoteMode):
-                                    from server.ring0_events import Ring0Event
+                                    from vibr8_core.ring0_events import Ring0Event
                                     await self._ws_bridge.emit_ring0_event(Ring0Event(fields={"type": "note_mode_ended"}))
                                 return
                         target_session = _resolve_session()
@@ -930,7 +930,7 @@ class WebRTCManager:
                     if self._node_registry:
                         active_nid = self._node_registry.active_node_id
                         if active_nid != "local":
-                            from server.ws_bridge import WsBridge
+                            from vibr8_core.ws_bridge import WsBridge
                             target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
                     if not target_sid:
                         target_sid = self._ring0_manager.session_id

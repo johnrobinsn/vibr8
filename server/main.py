@@ -15,12 +15,12 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
-from server.cli_launcher import CliLauncher
-from server.session_store import SessionStore
-from server.worktree_tracker import WorktreeTracker
-from server.ws_bridge import WsBridge
+from vibr8_core.cli_launcher import CliLauncher
+from vibr8_core.session_store import SessionStore
+from vibr8_core.worktree_tracker import WorktreeTracker
+from vibr8_core.ws_bridge import WsBridge
 from server.auto_namer import generate_session_title, AutoNamerOptions
-from server import session_names
+from vibr8_core import session_names
 from server.routes import create_routes
 from server.terminal import TerminalManager
 
@@ -30,9 +30,9 @@ try:
 except ImportError:
     WebRTCManager = None  # type: ignore[assignment,misc]
     HAS_WEBRTC = False
-from server.ring0 import Ring0Manager
-from server.ring0_scheduler import TaskScheduler
-from server.ring0_events import Ring0EventRouter
+from vibr8_core.ring0 import Ring0Manager
+from vibr8_core.ring0_scheduler import TaskScheduler
+from vibr8_core.ring0_events import Ring0EventRouter
 from server.node_registry import NodeRegistry
 from server.node_tunnel import NodeTunnel
 from server.session_registry import SessionRegistry

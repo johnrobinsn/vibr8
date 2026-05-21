@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from server.codex_adapter import CodexAdapter, CodexAdapterOptions, JsonRpcTransport
-from server.ws_bridge import WsBridge, Session
+from vibr8_core.codex_adapter import CodexAdapter, CodexAdapterOptions, JsonRpcTransport
+from vibr8_core.ws_bridge import WsBridge, Session
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

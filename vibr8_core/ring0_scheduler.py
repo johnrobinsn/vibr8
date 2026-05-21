@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
-    from server.cli_launcher import CliLauncher
-    from server.ws_bridge import WsBridge
+    from vibr8_core.cli_launcher import CliLauncher
+    from vibr8_core.ws_bridge import WsBridge
 
 logger = logging.getLogger(__name__)
 
@@ -539,7 +539,7 @@ class TaskScheduler:
             cwd = task.project_dir or str(VIBR8_DIR / "ring0")
 
             # Spawn a sandboxed Claude CLI session (no MCP tools)
-            from server.cli_launcher import LaunchOptions
+            from vibr8_core.cli_launcher import LaunchOptions
             options = LaunchOptions(
                 sessionId=session_id,
                 permissionMode="bypassPermissions",
@@ -705,7 +705,7 @@ class TaskScheduler:
         if not self._ws_bridge:
             return
         try:
-            from server.ring0_events import Ring0Event
+            from vibr8_core.ring0_events import Ring0Event
             await self._ws_bridge.emit_ring0_event(Ring0Event(fields={
                 "type": "task_completed",
                 "task": task.name,
