@@ -469,6 +469,7 @@ def create_app() -> web.Application:
     if webrtc_manager:
         webrtc_manager.set_ws_bridge(ws_bridge)
         webrtc_manager.set_hub_browser_bridge(hub_browser_bridge)
+        webrtc_manager.set_local_node_ops(local_node_ops)
         webrtc_manager.set_ring0_manager(ring0_manager)
         webrtc_manager.set_launcher(launcher)
         webrtc_manager.set_node_registry(node_registry)

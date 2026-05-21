@@ -219,6 +219,7 @@ class WebRTCManager:
         self._ring0_manager = None
         self._launcher = None  # Set by main.py for Ring0 lazy-create
         self._node_registry = None  # Set by main.py for distributed nodes
+        self._local_node_ops = None  # Set by main.py; routes through self-node tunnel
 
     def get_client_ice_servers(self) -> list[dict]:
         """Return ICE servers in the format the browser RTCPeerConnection expects."""
@@ -231,6 +232,15 @@ class WebRTCManager:
     def set_hub_browser_bridge(self, bridge) -> None:
         """Set a reference to HubBrowserBridge for browser broadcasts."""
         self._hub_browser_bridge = bridge
+
+    def set_local_node_ops(self, ops) -> None:
+        """Set a reference to the hub's local NodeClient.
+
+        In Option A self-node mode this is QualifyingNodeClient(
+        RemoteNodeClient(self_id, tunnel)) — voice routing forwards
+        transcripts to the self-node's Ring0 via tunnel.
+        """
+        self._local_node_ops = ops
 
     def set_ring0_manager(self, manager) -> None:
         """Set a reference to Ring0Manager for voice routing."""
@@ -743,32 +753,38 @@ class WebRTCManager:
                 async def _submit_text(text: str) -> None:
                     logger.info("[stt] SUBMIT to model: client=%s text=%r eou=%.4f",
                                 client_id, text, data.get("eouProb", -1))
-                    if self._ring0_manager and self._ring0_manager.is_enabled:
-                        # Check if a remote node is active — route to its Ring0
-                        if self._node_registry:
-                            active_nid = self._node_registry.active_node_id
-                            node = self._node_registry.get_node(active_nid)
-                            if node and node.id != "local":
-                                if node.tunnel and node.status == "online":
-                                    logger.info("[stt] Routing to remote node %r (id=%s)", node.name, node.id[:8])
-                                    await node.tunnel.send_fire_and_forget({
-                                        "type": "ring0_input",
-                                        "text": text,
-                                        "sourceClientId": client_id,
-                                    })
-                                    return
-                                else:
-                                    logger.warning("[stt] Active node %r not routable: tunnel=%s status=%s — falling through to local",
-                                                   node.name, bool(node.tunnel), node.status)
-                        # Local Ring0
-                        r0sid = self._ring0_manager.session_id
-                        if not r0sid and self._launcher and self._ws_bridge:
-                            r0sid = await self._ring0_manager.ensure_session(self._launcher, self._ws_bridge)
-                        if r0sid:
-                            await self._ws_bridge.submit_user_message(r0sid, text, source_client_id=client_id)
-                            return
+
+                    # Check if a remote node is active — route to its Ring0 via its tunnel.
+                    if self._node_registry:
+                        active_nid = self._node_registry.active_node_id
+                        node = self._node_registry.get_node(active_nid)
+                        if node and node.id != "local":
+                            if node.tunnel and node.status == "online":
+                                logger.info("[stt] Routing to remote node %r (id=%s)", node.name, node.id[:8])
+                                await node.tunnel.send_fire_and_forget({
+                                    "type": "ring0_input",
+                                    "text": text,
+                                    "sourceClientId": client_id,
+                                })
+                                return
+                            else:
+                                logger.warning("[stt] Active node %r not routable: tunnel=%s status=%s — falling through to local",
+                                               node.name, bool(node.tunnel), node.status)
+
+                    # Local Ring0 — in Option A this is the self-node, reached via local_node_ops.
+                    # In legacy in-process mode (VIBR8_DISABLE_SELF_NODE=1) this falls through
+                    # to the ws_bridge path below.
+                    if self._local_node_ops:
+                        try:
+                            result = await self._local_node_ops.ring0_input(text=text, source_client_id=client_id)
+                            if "error" not in result:
+                                return
+                            # Ring0 disabled / unavailable — fall through to active-session path.
+                        except Exception:
+                            logger.exception("[stt] local_node_ops.ring0_input failed; falling through")
+
                     target_session = _resolve_session()
-                    if target_session:
+                    if target_session and self._ws_bridge:
                         await self._ws_bridge.submit_user_message(target_session, text, source_client_id=client_id)
 
                 transcript_lower = transcript.lower()
