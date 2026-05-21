@@ -75,8 +75,32 @@ class NodeOperations:
                 s_dict["lastPromptedAt"] = lpa
             if self._ring0 and sid == self._ring0.session_id:
                 s_dict["isRing0"] = True
+            # Surface pen state so the UI can show the indicator for sessions
+            # on remote nodes too.
+            bridge_session = self._bridge._sessions.get(sid)
+            if bridge_session is not None:
+                s_dict["controlledBy"] = bridge_session.controlled_by
             sessions.append(s_dict)
         return {"sessions": sessions}
+
+    async def set_pen(self, session_id: str = "", controlled_by: str = "ring0") -> dict:
+        if controlled_by not in ("ring0", "user"):
+            return {"error": "controlledBy must be 'ring0' or 'user'"}
+        session = self._bridge._sessions.get(session_id)
+        if not session:
+            return {"error": "Session not found"}
+        if controlled_by == "ring0":
+            asyncio.ensure_future(self._bridge._release_pen(session))
+        else:
+            import time as _time
+            session.controlled_by = "user"
+            session.pen_taken_at = _time.time()
+            session.state["controlledBy"] = "user"
+            self._bridge._schedule_pen_release(session)
+            asyncio.ensure_future(self._bridge._broadcast_to_browsers(
+                session, {"type": "session_update", "session": {"controlledBy": "user"}},
+            ))
+        return {"ok": True, "controlledBy": controlled_by}
 
     async def create_session(self, options: dict | None = None) -> dict:
         options = options or {}

@@ -1476,22 +1476,16 @@ def create_routes(
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
         controlled_by = body.get("controlledBy", "ring0")
-        if controlled_by not in ("ring0", "user"):
-            return web.json_response({"error": "controlledBy must be 'ring0' or 'user'"}, status=400)
-        session = ws_bridge._sessions.get(sid)
-        if not session:
-            return web.json_response({"error": "Session not found"}, status=404)
-        if controlled_by == "ring0":
-            import asyncio
-            asyncio.ensure_future(ws_bridge._release_pen(session))
-        else:
-            import time as _time
-            session.controlled_by = "user"
-            session.pen_taken_at = _time.time()
-            session.state["controlledBy"] = "user"
-            ws_bridge._schedule_pen_release(session)
-            asyncio.ensure_future(ws_bridge._broadcast_to_browsers(session, {"type": "session_update", "session": {"controlledBy": "user"}}))
-        return web.json_response({"ok": True, "controlledBy": controlled_by})
+        try:
+            client, raw_sid, _ = _resolve_client(sid)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.set_pen(session_id=raw_sid, controlled_by=controlled_by)
+        if "error" in result:
+            err = result["error"].lower()
+            status = 404 if "not found" in err else (400 if "must be" in err else 500)
+            return web.json_response(result, status=status)
+        return web.json_response(result)
 
     @routes.get("/api/webrtc/ice-servers")
     async def get_ice_servers(request: web.Request) -> web.Response:
