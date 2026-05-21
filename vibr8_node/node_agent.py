@@ -39,6 +39,7 @@ class NodeAgent:
         work_dir: str = "",
         ring0_config: dict | None = None,
         default_backend: str = "claude",
+        self_mode: bool = False,
     ) -> None:
         self.hub_url = hub_url.rstrip("/")
         self.api_key = api_key
@@ -47,6 +48,7 @@ class NodeAgent:
         self.work_dir = work_dir
         self.ring0_config = ring0_config or {}
         self.default_backend = default_backend
+        self.self_mode = self_mode
         self.node_id: str = ""
         # Service token issued by the hub at registration. Used by Ring0 MCP
         # to authenticate against hub-side client / second-screen / artifact
@@ -73,17 +75,28 @@ class NodeAgent:
 
     async def run(self) -> None:
         """Main entry point — register, start local server, connect tunnel."""
-        # Use an isolated session directory per node to avoid sharing state with the hub
-        safe_name = re.sub(r"[^\w-]", "_", self.name.lower())
-        node_dir = Path.home() / ".vibr8-node" / safe_name
-        session_dir = str(node_dir / "sessions")
+        if self.self_mode:
+            # Use the hub-host's data dir (~/.vibr8/) — the self-node IS the
+            # hub-host. No migration, no isolated dir; this node's sessions/
+            # ring0/etc. ARE the hub-host's existing state.
+            node_dir = Path.home() / ".vibr8"
+            session_dir = str(node_dir / "sessions")
+            ring0_config_path = node_dir / "ring0.json"
+            ring0_work_dir = node_dir / "ring0"
+        else:
+            # Use an isolated session directory per node to avoid sharing state with the hub
+            safe_name = re.sub(r"[^\w-]", "_", self.name.lower())
+            node_dir = Path.home() / ".vibr8-node" / safe_name
+            session_dir = str(node_dir / "sessions")
+            ring0_config_path = node_dir / "ring0.json"
+            ring0_work_dir = node_dir / "ring0"
         self._store = SessionStore(directory=session_dir)
         self._bridge = WsBridge()
         self._launcher = CliLauncher(self.port)
         self._ring0 = Ring0Manager(
             self.port,
-            config_path=node_dir / "ring0.json",
-            work_dir=node_dir / "ring0",
+            config_path=ring0_config_path,
+            work_dir=ring0_work_dir,
             scheme="http",
         )
 
@@ -427,7 +440,9 @@ class NodeAgent:
     async def _start_local_server(self) -> None:
         """Start a minimal aiohttp server for CLI WebSocket + Ring0 MCP."""
         middlewares = []
-        if self.hub_service_token:
+        # Self-mode is co-located with the hub, so no proxy needed (proxying
+        # to the same host's hub would just loop).
+        if self.hub_service_token and not self.self_mode:
             middlewares.append(self._make_hub_proxy_middleware())
         app = web.Application(middlewares=middlewares)
         bridge = self._bridge
