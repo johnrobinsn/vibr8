@@ -199,6 +199,68 @@ class NodeOperations:
             return {"error": f"Session {session_id} not found"}
         return {"messages": session.message_history[-500:]}
 
+    async def get_session(self, session_id: str = "") -> dict:
+        info = self._launcher.get_session(session_id)
+        if not info:
+            return {"error": "Session not found"}
+        d = info.to_dict() if hasattr(info, "to_dict") else (info if isinstance(info, dict) else info.__dict__)
+        names = session_names.get_all_names()
+        if session_id in names:
+            d["name"] = names[session_id]
+        if self._ring0 and session_id == self._ring0.session_id:
+            d["isRing0"] = True
+        bridge_session = self._bridge._sessions.get(session_id)
+        if bridge_session is not None:
+            d["controlledBy"] = bridge_session.controlled_by
+        return d
+
+    async def get_message_history(self, session_id: str = "", limit: int = 500) -> dict:
+        session = self._bridge._sessions.get(session_id)
+        if not session:
+            return {"error": "Session not found"}
+        return {"messages": session.message_history[-limit:]}
+
+    async def get_pending_permissions(self, session_id: str = "") -> dict:
+        return {"permissions": self._bridge.get_pending_permissions(session_id)}
+
+    async def get_pending_permission_count(self, session_id: str = "") -> dict:
+        return {"count": self._bridge.get_pending_permission_count(session_id)}
+
+    async def respond_to_permission(
+        self,
+        session_id: str = "",
+        request_id: str = "",
+        behavior: str = "",
+        message: str = "",
+    ) -> dict:
+        ok = await self._bridge.respond_to_permission(
+            session_id, request_id, behavior, message,
+        )
+        if not ok:
+            return {"error": f"Permission {request_id} not found"}
+        return {"ok": True}
+
+    async def get_session_archive(
+        self,
+        session_id: str = "",
+        date: str | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict:
+        messages, total = self._store.load_archive(
+            session_id, date=date, offset=offset, limit=limit,
+        )
+        return {"messages": messages, "total": total, "offset": offset, "limit": limit}
+
+    async def list_session_archive_dates(self, session_id: str = "") -> dict:
+        return {"dates": self._store.list_archive_dates(session_id)}
+
+    async def set_archived(self, session_id: str = "", archived: bool = True) -> dict:
+        """Persist the archived flag in the session store (separate from
+        the launcher-level archived flag handled by archive_session)."""
+        self._store.set_archived(session_id, bool(archived))
+        return {"ok": True}
+
     async def set_permission_mode(self, session_id: str = "", mode: str = "") -> dict:
         session = self._bridge._sessions.get(session_id)
         if not session:

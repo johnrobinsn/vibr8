@@ -780,10 +780,14 @@ def create_routes(
     @routes.get("/api/sessions/{id}")
     async def get_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
-        session = launcher.get_session(sid)
-        if not session:
-            return web.json_response({"error": "Session not found"}, status=404)
-        return web.json_response(session.to_dict() if hasattr(session, "to_dict") else session)
+        try:
+            client, raw_sid, _ = _resolve_client(sid)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.get_session(session_id=raw_sid)
+        if "error" in result:
+            return web.json_response(result, status=404)
+        return web.json_response(result)
 
     @routes.patch("/api/sessions/{id}/name")
     async def rename_session(request: web.Request) -> web.Response:
@@ -908,20 +912,23 @@ def create_routes(
         date = request.query.get("date")
         offset = int(request.query.get("offset", "0"))
         limit = int(request.query.get("limit", "100"))
-        messages, total = session_store.load_archive(sid, date=date, offset=offset, limit=limit)
-        return web.json_response({
-            "messages": messages,
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-        })
+        try:
+            client, raw_sid, _ = _resolve_client(sid)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        return web.json_response(await client.get_session_archive(
+            session_id=raw_sid, date=date, offset=offset, limit=limit,
+        ))
 
     @routes.get("/api/sessions/{id}/history-archive/dates")
     async def get_session_history_archive_dates(request: web.Request) -> web.Response:
         """List available archive dates with message counts and sizes."""
         sid = request.match_info["id"]
-        dates = session_store.list_archive_dates(sid)
-        return web.json_response({"dates": dates})
+        try:
+            client, raw_sid, _ = _resolve_client(sid)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        return web.json_response(await client.list_session_archive_dates(session_id=raw_sid))
 
     # ── Backends ─────────────────────────────────────────────────────────
 
@@ -1053,7 +1060,11 @@ def create_routes(
     @routes.post("/api/sessions/{session_id}/upload")
     async def session_upload(request: web.Request) -> web.Response:
         session_id = request.match_info["session_id"]
-        session = bridge.get_session(session_id)
+        # Fix pre-existing `bridge` typo (was NameError); use ws_bridge.
+        # NOTE: writes to the hub's filesystem at the session's cwd. Remote
+        # sessions' cwds live on the remote node, so this only works for
+        # hub-local sessions today. Future: forward as fs_write tunnel cmd.
+        session = ws_bridge.get_session(session_id)
         if not session:
             return web.json_response({"error": "Session not found"}, status=404)
         cwd = session.state.get("cwd", "")
@@ -1749,13 +1760,20 @@ def create_routes(
             if err:
                 return web.json_response({"error": err, "controlledBy": "user"}, status=409)
             return web.json_response({"ok": True, "sessionId": entry.qualified_id})
-        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
-        if not resolved:
-            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-        err = await ws_bridge.submit_user_message(resolved, message, source_client_id=on_behalf_of)
-        if err:
-            return web.json_response({"error": err, "controlledBy": "user"}, status=409)
-        return web.json_response({"ok": True, "sessionId": resolved})
+        # Fallback path through NodeClient (used when session_registry is
+        # unavailable, e.g. minimal test harnesses).
+        try:
+            client, raw_sid, _ = _resolve_client(session_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.submit_message(
+            session_id=raw_sid, content=message, source_client_id=on_behalf_of,
+        )
+        if "error" in result:
+            return web.json_response(
+                {"error": result["error"], "controlledBy": "user"}, status=409,
+            )
+        return web.json_response({"ok": True, "sessionId": raw_sid})
 
     @routes.post("/api/ring0/switch-ui")
     async def ring0_switch_ui(request: web.Request) -> web.Response:
@@ -1923,13 +1941,18 @@ def create_routes(
             if not ok:
                 return web.json_response({"error": f"Permission {request_id} not found"}, status=404)
             return web.json_response({"ok": True})
-        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
-        if not resolved:
-            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-        ok = await ws_bridge.respond_to_permission(resolved, request_id, behavior, message)
-        if not ok:
-            return web.json_response({"error": f"Permission {request_id} not found"}, status=404)
-        return web.json_response({"ok": True})
+        # Fallback path through NodeClient (used when session_registry is
+        # unavailable, e.g. minimal test harnesses).
+        try:
+            client, raw_sid, _ = _resolve_client(session_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.respond_to_permission(
+            session_id=raw_sid, request_id=request_id, behavior=behavior, message=message,
+        )
+        if "error" in result:
+            return web.json_response(result, status=404)
+        return web.json_response(result)
 
     @routes.post("/api/ring0/interrupt")
     async def ring0_interrupt(request: web.Request) -> web.Response:
@@ -1950,13 +1973,18 @@ def create_routes(
             if not ok:
                 return web.json_response({"error": f"Session {session_id} not interruptible"}, status=404)
             return web.json_response({"ok": True, "sessionId": entry.qualified_id})
-        resolved = _resolve_session_id(session_id, launcher, ws_bridge)
-        if not resolved:
-            return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-        ok = ws_bridge.interrupt_session(resolved)
-        if not ok:
-            return web.json_response({"error": f"Session {session_id} not found in bridge"}, status=404)
-        return web.json_response({"ok": True, "sessionId": resolved})
+        # Fallback path through NodeClient (used when session_registry is
+        # unavailable, e.g. minimal test harnesses).
+        try:
+            client, raw_sid, _ = _resolve_client(session_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.interrupt(session_id=raw_sid)
+        if not result.get("ok"):
+            return web.json_response(
+                {"error": f"Session {session_id} not found in bridge"}, status=404,
+            )
+        return web.json_response({"ok": True, "sessionId": raw_sid})
 
     @routes.post("/api/ring0/create-session")
     async def ring0_create_session(request: web.Request) -> web.Response:
