@@ -413,6 +413,125 @@ class NodeOperations:
             pass
         return {**result, "git_ahead": git_ahead, "git_behind": git_behind}
 
+    # ── Ring0 control ─────────────────────────────────────────────────────
+
+    async def ring0_status(self) -> dict:
+        if self._ring0 is None:
+            return {"enabled": False, "sessionId": None}
+        return {
+            "enabled": self._ring0.is_enabled,
+            "eventsMuted": getattr(self._ring0, "events_muted", False),
+            "sessionId": self._ring0.session_id,
+            "model": self._ring0.model,
+            "backendType": self._ring0.backend_type,
+        }
+
+    async def ring0_toggle(
+        self, enabled: bool = False, backend_type: str | None = None,
+    ) -> dict:
+        if self._ring0 is None:
+            return {"error": "Ring0 not available"}
+        if backend_type:
+            if backend_type not in ("claude", "codex", "opencode", "hermes"):
+                return {"error": f"Invalid backendType: {backend_type}"}
+            running = self._launcher.is_alive(self._ring0.session_id)
+            if running and backend_type != self._ring0.backend_type:
+                return {
+                    "error": "Ring0 is running with a different backend; use ring0_switch_backend",
+                    "current": self._ring0.backend_type,
+                }
+            try:
+                self._ring0.set_backend_type(backend_type)
+            except ValueError as e:
+                return {"error": str(e)}
+        self._ring0.toggle(bool(enabled))
+        if enabled:
+            session_id = await self._ring0.ensure_session(self._launcher, self._bridge)
+            return {
+                "ok": True, "enabled": True, "sessionId": session_id,
+                "backendType": self._ring0.backend_type,
+            }
+        return {
+            "ok": True, "enabled": False, "sessionId": self._ring0.session_id,
+            "backendType": self._ring0.backend_type,
+        }
+
+    async def ring0_switch_backend(self, backend_type: str = "") -> dict:
+        if self._ring0 is None:
+            return {"error": "Ring0 not available"}
+        if backend_type not in ("claude", "codex", "opencode", "hermes"):
+            return {"error": "backendType must be one of claude, codex, opencode, hermes"}
+        previous = self._ring0.backend_type
+        if backend_type == previous:
+            return {
+                "ok": True, "backendType": backend_type, "previous": previous,
+                "changed": False,
+            }
+
+        async def _do_switch() -> None:
+            await asyncio.sleep(1.5)
+            self._ring0.set_backend_type(backend_type)
+            await self._launcher.kill(self._ring0.session_id)
+            await self._ring0.ensure_session(self._launcher, self._bridge)
+
+        asyncio.create_task(_do_switch())
+        return {
+            "ok": True, "backendType": backend_type, "previous": previous, "changed": True,
+        }
+
+    async def ring0_switch_model(self, model: str = "") -> dict:
+        if self._ring0 is None:
+            return {"error": "Ring0 not available"}
+        model = (model or "").strip()
+        if not model:
+            return {"error": "model is required"}
+
+        backend_aliases: dict[str, dict[str, str]] = {
+            "claude": {
+                "haiku": "claude-haiku-4-5-20251001",
+                "sonnet": "claude-sonnet-4-6",
+                "opus": "claude-opus-4-6",
+            },
+            "hermes": {
+                "opus": "claude-opus-4-20250514",
+                "sonnet": "claude-sonnet-4-20250514",
+                "gpt-5": "gpt-5.5",
+                "gpt5": "gpt-5.5",
+                "gpt-4": "gpt-4o",
+                "gpt4": "gpt-4o",
+                "deepseek": "deepseek-r1",
+            },
+            "codex": {
+                "codex": "gpt-5.3-codex",
+                "max": "gpt-5.1-codex-max",
+                "mini": "gpt-5.1-codex-mini",
+            },
+            "opencode": {
+                "gemini": "google/gemini-2.5-pro",
+                "flash": "google/gemini-2.5-flash",
+                "gpt-4o": "openai/gpt-4o",
+                "sonnet": "anthropic/claude-sonnet-4-20250514",
+                "grok": "xai/grok-3",
+                "llama": "groq/llama-3.3-70b",
+            },
+        }
+        aliases = backend_aliases.get(self._ring0.backend_type, {})
+        resolved = aliases.get(model.lower(), model)
+        previous = self._ring0.model
+
+        async def _do_switch() -> None:
+            await asyncio.sleep(1.5)
+            await self._ring0.switch_model(resolved, self._launcher, self._bridge)
+
+        asyncio.create_task(_do_switch())
+        return {"ok": True, "model": resolved, "previous": previous}
+
+    async def ring0_mute_events(self, muted: bool = False) -> dict:
+        if self._ring0 is None:
+            return {"error": "Ring0 not available"}
+        self._ring0.set_events_muted(bool(muted))
+        return {"ok": True, "eventsMuted": bool(muted)}
+
     # ── WebRTC ────────────────────────────────────────────────────────────
 
     async def webrtc_offer(

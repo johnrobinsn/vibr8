@@ -1622,165 +1622,90 @@ def create_routes(
 
     @routes.get("/api/ring0/status")
     async def ring0_status(request: web.Request) -> web.Response:
-        if ring0_manager is None:
-            return web.json_response({"enabled": False, "sessionId": None})
-        return web.json_response({
-            "enabled": ring0_manager.is_enabled,
-            "eventsMuted": ring0_manager.events_muted,
-            "sessionId": ring0_manager.session_id,
-            "model": ring0_manager.model,
-            "backendType": ring0_manager.backend_type,
-        })
+        node_id = request.query.get("nodeId", "")
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        return web.json_response(await client.ring0_status())
 
     @routes.post("/api/ring0/toggle")
     async def ring0_toggle(request: web.Request) -> web.Response:
-        if ring0_manager is None:
-            return web.json_response({"error": "Ring0 not available"}, status=501)
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
-        enabled = bool(body.get("enabled", False))
-        # Optional backendType: only honored when Ring0 is currently off
-        # (no running session). Use /api/ring0/switch-backend to change the
-        # backend while Ring0 is enabled.
-        backend_override = body.get("backendType")
-        if backend_override:
-            if backend_override not in ("claude", "codex", "opencode", "hermes"):
-                return web.json_response(
-                    {"error": f"Invalid backendType: {backend_override}"}, status=400,
-                )
-            running = launcher.is_alive(ring0_manager.session_id)
-            if running and backend_override != ring0_manager.backend_type:
-                return web.json_response({
-                    "error": "Ring0 is running with a different backend; use /api/ring0/switch-backend to change it",
-                    "current": ring0_manager.backend_type,
-                }, status=409)
-            try:
-                ring0_manager.set_backend_type(backend_override)
-            except ValueError as e:
-                return web.json_response({"error": str(e)}, status=400)
-        ring0_manager.toggle(enabled)
-        # Ensure session exists when enabling
-        if enabled:
-            session_id = await ring0_manager.ensure_session(launcher, ws_bridge)
-            return web.json_response({
-                "ok": True, "enabled": True, "sessionId": session_id,
-                "backendType": ring0_manager.backend_type,
-            })
-        return web.json_response({
-            "ok": True, "enabled": False, "sessionId": ring0_manager.session_id,
-            "backendType": ring0_manager.backend_type,
-        })
+        node_id = body.get("nodeId", "")
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.ring0_toggle(
+            enabled=bool(body.get("enabled", False)),
+            backend_type=body.get("backendType"),
+        )
+        if "error" in result:
+            err = result["error"].lower()
+            status = 409 if "different backend" in err else (400 if "invalid" in err or "must be" in err else 501)
+            return web.json_response(result, status=status)
+        return web.json_response(result)
 
     @routes.post("/api/ring0/switch-backend")
     async def ring0_switch_backend(request: web.Request) -> web.Response:
         """Switch Ring0 to a different backend. Kills session and starts fresh."""
-        if ring0_manager is None:
-            return web.json_response({"error": "Ring0 not available"}, status=501)
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
-        backend = body.get("backendType", "").strip()
-        if backend not in ("claude", "codex", "opencode", "hermes"):
-            return web.json_response(
-                {"error": "backendType must be one of claude, codex, opencode, hermes"},
-                status=400,
-            )
-
-        previous = ring0_manager.backend_type
-        if backend == previous:
-            return web.json_response({
-                "ok": True, "backendType": backend, "previous": previous,
-                "changed": False,
-            })
-
-        async def _do_switch() -> None:
-            import asyncio
-            await asyncio.sleep(1.5)
-            ring0_manager.set_backend_type(backend)
-            await launcher.kill(ring0_manager.session_id)
-            await ring0_manager.ensure_session(launcher, ws_bridge)
-
-        import asyncio
-        asyncio.create_task(_do_switch())
-        return web.json_response({
-            "ok": True, "backendType": backend, "previous": previous, "changed": True,
-        })
+        node_id = body.get("nodeId", "")
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.ring0_switch_backend(
+            backend_type=body.get("backendType", "").strip(),
+        )
+        if "error" in result:
+            err = result["error"].lower()
+            status = 400 if "must be" in err else 501
+            return web.json_response(result, status=status)
+        return web.json_response(result)
 
     @routes.post("/api/ring0/mute-events")
     async def ring0_mute_events(request: web.Request) -> web.Response:
-        if ring0_manager is None:
-            return web.json_response({"error": "Ring0 not available"}, status=501)
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
-        muted = bool(body.get("muted", False))
-        ring0_manager.set_events_muted(muted)
-        return web.json_response({"ok": True, "eventsMuted": muted})
+        node_id = body.get("nodeId", "")
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.ring0_mute_events(muted=bool(body.get("muted", False)))
+        if "error" in result:
+            return web.json_response(result, status=501)
+        return web.json_response(result)
 
     @routes.post("/api/ring0/switch-model")
     async def ring0_switch_model(request: web.Request) -> web.Response:
         """Switch Ring0 to a different model. Kills session and starts fresh."""
-        if ring0_manager is None:
-            return web.json_response({"error": "Ring0 not available"}, status=501)
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
+        node_id = body.get("nodeId", "")
         model = body.get("model", "").strip()
         if not model:
             return web.json_response({"error": "model is required"}, status=400)
-
-        # Resolve friendly aliases per-backend. Each backend has its own
-        # model namespace (Claude IDs, OpenAI/Hermes IDs, provider/model for
-        # OpenCode, codex slugs). Unknown aliases fall through unchanged so
-        # the user can always pass a full model id.
-        backend_aliases: dict[str, dict[str, str]] = {
-            "claude": {
-                "haiku": "claude-haiku-4-5-20251001",
-                "sonnet": "claude-sonnet-4-6",
-                "opus": "claude-opus-4-6",
-            },
-            "hermes": {
-                "opus": "claude-opus-4-20250514",
-                "sonnet": "claude-sonnet-4-20250514",
-                "gpt-5": "gpt-5.5",
-                "gpt5": "gpt-5.5",
-                "gpt-4": "gpt-4o",
-                "gpt4": "gpt-4o",
-                "deepseek": "deepseek-r1",
-            },
-            "codex": {
-                "codex": "gpt-5.3-codex",
-                "max": "gpt-5.1-codex-max",
-                "mini": "gpt-5.1-codex-mini",
-            },
-            "opencode": {
-                "gemini": "google/gemini-2.5-pro",
-                "flash": "google/gemini-2.5-flash",
-                "gpt-4o": "openai/gpt-4o",
-                "sonnet": "anthropic/claude-sonnet-4-20250514",
-                "grok": "xai/grok-3",
-                "llama": "groq/llama-3.3-70b",
-            },
-        }
-        aliases = backend_aliases.get(ring0_manager.backend_type, {})
-        resolved = aliases.get(model.lower(), model)
-
-        # Schedule the switch asynchronously so the HTTP response gets back
-        # to the MCP subprocess before we kill the Ring0 CLI process.
-        async def _do_switch() -> None:
-            import asyncio
-            await asyncio.sleep(1.5)
-            await ring0_manager.switch_model(resolved, launcher, ws_bridge)
-
-        import asyncio
-        asyncio.create_task(_do_switch())
-
-        return web.json_response({"ok": True, "model": resolved, "previous": ring0_manager.model})
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.ring0_switch_model(model=model)
+        if "error" in result:
+            return web.json_response(result, status=501 if "not available" in result["error"].lower() else 400)
+        return web.json_response(result)
 
     @routes.post("/api/ring0/send-message")
     async def ring0_send_message(request: web.Request) -> web.Response:
