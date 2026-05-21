@@ -25,8 +25,8 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 3f — Per-node artifacts (second-screens deferred) | ✅ | `a9f06d0` |
 | 4a — `--self-mode` flag on `vibr8_node` | ✅ | `e192292` |
 | 4b — Hub-side self-node spawn machinery (gated) | ✅ verified live | `3ac81aa` |
-| 4c-1 — Migrate remaining session-state routes through NodeClient | ⏳ ~70% (batches 1+2 landed) | `aafd902` |
-| 4c-2 — Migrate webrtc.py, session_registry.py, main.py callbacks | ⏳ | — |
+| 4c-1 — Migrate remaining session-state routes through NodeClient | ✅ (`routes.py` has zero direct launcher/store/worktree refs) | `9c825e3` |
+| 4c-2 — Migrate webrtc.py, session_registry.py, main.py callbacks | ⏳ NEXT | — |
 | 4c-3 — Extract `HubBrowserBridge` from `WsBridge` | ⏳ | — |
 | **4c-4 — Atomic flip** (spawn self-node by default, drop in-process managers, data dir consolidation) | ⏳ KEYSTONE | — |
 | 4c-5 — Unify browser+CLI WS relays through tunnel | ⏳ | — |
@@ -53,12 +53,13 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 - Deleted legacy `_resolve_session_id` helper from `routes.py`
 - Added `NodeOperations`: `get_session`, `get_message_history`, `get_pending_permissions`, `get_pending_permission_count`, `respond_to_permission`, `get_session_archive`, `list_session_archive_dates`, `set_archived`
 
-**Deferred to a 4c-1 batch 3** (these still touch in-process managers directly):
-- `POST /api/sessions` (`create_session`) and `POST /api/ring0/create-session` — heavy hub-orchestration: env resolution, auto-naming setup, worktree creation, computer-use agent registration. Each branch needs deliberate assignment to NodeOps vs hub-side.
-- `GET /api/sessions` (the big aggregator) — Android-node branch, computer-use-targeting branch, terminal-session injection branch each need design.
-- `GET /api/ring0/sessions` — similar to `list_sessions` aggregator.
-- `_cleanup_worktree` helper + `delete_session`/`archive_session` worktree calls — direct `worktree_tracker.*` references.
-- `nodes/all` session count enrichment — minor.
+**Batch 3 (now done — commits `196d570`..`9c825e3`):**
+- 3a (`196d570`): `list_nodes` session count, `ring0_sessions` fallback both pull via `local_node_ops.list_sessions()`.
+- 3b (`ebed2c1`): `_cleanup_worktree` moved into `NodeOperations` as a private helper; `delete_session` / `archive_session` invoke it internally; routes simplified to drop duplicate `launcher.kill`/`launcher.remove_session`/`ws_bridge.close_session` calls.
+- 3c (`c71320f`): `GET /api/sessions` aggregator — all three branches (Android-node, remote-node, local) now pull via `local_node_ops.list_sessions()`; extended `NodeOps.list_sessions` to also enrich `agentState`.
+- 3d (`9c825e3`): `create_session` for both `POST /api/sessions` (all backends) and `POST /api/ring0/create-session` use new `NodeOperations.launch_with_options(opts, backend_type, name, worktree_mapping)`. Env resolution + worktree creation still happen on the hub (orchestration) and the resolved bits are handed off through `launch_with_options`.
+
+**Outcome**: `server/routes.py` has **zero** direct references to `launcher`, `session_store`, or `worktree_tracker`. Remaining `ws_bridge.*` references in `routes.py` are all hub-only (proxy session lookup for remote-prefixed ids, `close_session` on hub proxy state, broadcasts, client metadata) — those move with the `HubBrowserBridge` split in Phase 4c-3.
 
 **Hub-only references to ws_bridge** that stay (move to HubBrowserBridge in 4c-3, not 4c-1):
 - `ws_bridge.broadcast_name_update`, `broadcast_ring0_switch_ui`, `_broadcast_to_browsers`
