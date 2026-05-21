@@ -43,6 +43,32 @@ class NodeClient(Protocol):
 LocalNodeClient = NodeOperations
 
 
+class SwappableNodeClient:
+    """NodeClient wrapper whose backing target can be replaced at runtime.
+
+    Used by the hub so `local_node_ops` can start as the in-process
+    `NodeOperations` and then atomically swap to a `RemoteNodeClient`
+    pointing at the self-node tunnel once it has registered. Routes
+    capture the wrapper in closure and pick up the new target via
+    `__getattr__` after the swap.
+    """
+
+    def __init__(self, initial_target: Any) -> None:
+        self._target = initial_target
+
+    def swap(self, new_target: Any) -> None:
+        self._target = new_target
+
+    @property
+    def target(self) -> Any:
+        return self._target
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._target, name)
+
+
 class RemoteNodeUnavailable(Exception):
     """Raised when a remote node has no live tunnel to handle a request."""
 
