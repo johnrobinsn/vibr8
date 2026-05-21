@@ -29,8 +29,11 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 4c-2 — Migrate session_registry.py (webrtc/main callbacks deferred to 4c-4/Phase 6) | ✅ | `d90bcb5` |
 | 4c-3 — Extract `HubBrowserBridge` from `WsBridge` | ✅ (redundant — folded into 4c-4) | — |
 | 4c-4 step 1 — `HubBrowserBridge` facade (delegates to WsBridge today; swappable later) | ✅ | `c00ca3a` |
-| **4c-4 step 2+ — Atomic flip** (spawn self-node by default, drop in-process managers, swap facade backing, data dir consolidation) | ⏳ KEYSTONE | — |
-| 4c-5 — Unify browser+CLI WS relays through tunnel | ⏳ | — |
+| 4c-4 step 2a — `SwappableNodeClient` seam (no behavior change) | ✅ | `dcd3df0` |
+| 4c-4 step 2b — Swap `local_node_ops` to self-node when `VIBR8_USE_SELF_NODE=1` | ✅ | `1d1bf2b` |
+| 4c-4 step 2c — Data-dir consolidation (`~/.vibr8/`) + skip hub restore when full self-node mode | ✅ | `8866492` |
+| **4c-5 — Browser+CLI WS routing handles self-node sessions** (qualify IDs at hub boundary; existing tunnel relay then works) | ⏳ NEXT | — |
+| 4c-6 — Drop env-var gates; restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
 | 4c-6 — Restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
 | 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` and `speak` tunnel commands) | ⏳ | — |
 | 6b — Per-node scheduler (deferred from 3g) | ⏳ | — |
@@ -107,12 +110,50 @@ This is a sizable single PR (likely 500-1000 LOC delta across server/) and deser
 
 This is the *seam* — when Phase 4c-4 step 2 happens (the atomic flip), the swap is `HubBrowserBridge.__init__` (give it real state instead of a `WsBridge` reference), not a refactor of every caller.
 
-**Phase 4c-4 step 2+ (next session)**: do the actual flip.
-1. Make the hub run in one of two modes — default (current behavior) or self-node mode (`VIBR8_SPAWN_SELF_NODE=1`).
-2. In self-node mode: skip the `WsBridge`/`Ring0Manager`/`CliLauncher`/`SessionStore` constructors entirely; give `HubBrowserBridge` real state; spawn self-node; wait for registration; bind `local_node_ops` to `RemoteNodeClient(self_id, tunnel)`; route everything through it.
-3. Move the self-node's data dir from `~/.vibr8-self/` to `~/.vibr8/`; add a one-shot migrator if both directories have data.
-4. Once self-node mode is verified solid, drop the gate and the default path.
-5. CLI WS endpoint repointing (could be a separate 4c-5 commit).
+### Phase 4c-4 — step 2 landed (commits `dcd3df0`, `1d1bf2b`, `8866492`)
+
+Three opt-in env vars, additive:
+
+| Env vars | Behavior |
+|---|---|
+| (none) | Current production behavior. Hub creates in-process managers, owns `~/.vibr8/`. |
+| `VIBR8_SPAWN_SELF_NODE=1` | Spawns the self-node subprocess to `~/.vibr8-self/`. Coexists. (Phase 4b verification recipe — unchanged.) |
+| `VIBR8_SPAWN_SELF_NODE=1` + `VIBR8_USE_SELF_NODE=1` | **Full self-node mode.** Hub spawns self-node to `~/.vibr8/` (passed via `VIBR8_SELF_NODE_DATA_DIR`); hub skips `launcher.restore_from_disk()` and `ws_bridge.restore_from_disk()` and Ring0 auto-launch; after self-node registers, `local_node_ops.swap()` flips it to `RemoteNodeClient(self_id, tunnel)`. |
+
+`local_node_ops` is now a `SwappableNodeClient` wrapper — routes captured it in closure but `__getattr__` dispatches to whatever target is bound. The swap is atomic. (`vibr8_core/node_client.py`)
+
+**Phase 4c-4 step 2 — still not viable in production**: in full self-node mode, the browser-WS `/ws/browser/{sid}` handler is routed by `WsBridge._route_browser_message`, which only forwards to a remote node when `_is_remote_session(session_id)` is true (i.e. session id contains `:`). For self-node-owned sessions, the IDs come back from `list_sessions` raw (no `self:` prefix), so the hub treats them as local and finds nothing. **That's Phase 4c-5.**
+
+### Phase 4c-5 — what to do next
+
+The cleanest fix: have the hub treat the self-node like any other remote node from the routing perspective.
+
+1. When `VIBR8_USE_SELF_NODE=1`, after the self-node registers, **qualify session IDs at the hub boundary** in `local_node_ops.list_sessions()` (and any other route returning raw IDs). One approach: `SwappableNodeClient` could be subclassed (or extended) to know about a `qualify_prefix` and post-process certain method responses. Cleaner: a thin `QualifyingNodeClient` wrapper that delegates to `RemoteNodeClient` and rewrites `sessionId` fields in known response shapes.
+
+2. With qualified IDs in the frontend, browser opens `/ws/browser/self:RAW_ID`. The hub's `WsBridge._is_remote_session` returns True; the existing remote-session forwarding code path picks it up. No new WS-routing code needed — just the ID qualification.
+
+3. CLI WS endpoint: the CLI subprocesses are spawned by the *self-node*, not the hub, in full mode. They get the self-node's port via `--sdk-url` and connect there directly. The hub's `/ws/cli/{session_id}` endpoint just becomes unused in full mode (could 404 it post-4c-6).
+
+4. Other routes returning session IDs (`create_session`, `get_session`, etc.) — same qualification at the hub boundary.
+
+A `QualifyingNodeClient` could be done as: `class QualifyingNodeClient: def __init__(self, inner, node_id): ...`. It wraps `RemoteNodeClient`, and overrides the methods that return session IDs to rewrite them. Inserted between the `SwappableNodeClient` and the `RemoteNodeClient` when the swap happens.
+
+After 4c-5 lands, run the live test:
+```
+VIBR8_SPAWN_SELF_NODE=1 VIBR8_USE_SELF_NODE=1 PORT=3556 uv run python -m server.main
+# Hit /api/sessions, create a session, kill it, list, etc.
+```
+Should see all operations flowing through the loopback tunnel to the self-node, with session IDs prefixed `self:` in API responses.
+
+### Phase 4c-6 — drop the gates
+
+Once 4c-5 is solid:
+- Make full self-node mode the default (the env vars become a way to disable it, if anything).
+- Hub stops creating `WsBridge`/`Ring0Manager`/`CliLauncher`/`SessionStore` constructors at all (delete the conditional logic).
+- `HubBrowserBridge` gets a real implementation (replace `__getattr__` delegation with standalone state — the keystone deletes its underlying `WsBridge`).
+- Add subprocess restart-on-crash with exponential backoff.
+- Delete `LocalNodeClient` alias from `vibr8_core/node_client.py`.
+- Delete `_in_process_ops` and the `SwappableNodeClient` if no longer needed.
 
 Verify the table against `git log --oneline main` — commits should be on `main` in the order above, after `7ff55c3`.
 
