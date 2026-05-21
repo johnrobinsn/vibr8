@@ -1,0 +1,243 @@
+# Remote Node Parity — Handoff / Recovery Guide
+
+**Purpose**: bootstrap a new Claude (or human) session that needs to pick up the remote-node-parity refactor without access to the prior conversation. Read this *and* `docs/remote-node-parity.md` before doing anything.
+
+**Audience assumption**: you have the repo at `/mntc/code/vibr8` (or equivalent), but the running vibr8 hub may be down or stale. Don't trust prior memory; verify everything against `git log` and the repo on disk.
+
+---
+
+## TL;DR — Where We Are
+
+The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalents of the hub-host ("neo"). The agreed architecture is **full loopback**: the hub becomes a thin registry + bridge that spawns its own `vibr8_node` subprocess and talks to itself over the same tunnel protocol used by remote nodes. The hub owns no node-scoped state.
+
+**Refactor phases (per `docs/remote-node-parity.md`):**
+
+| Phase | Status | Last commit |
+|---|---|---|
+| 0 — relocate node-scoped modules to `vibr8_core/` | ✅ | `85b020c` |
+| 1 — `NodeOperations` + generic tunnel dispatch | ✅ | `ead00a6` |
+| 2 — `NodeClient` interface + session-CRUD migration | ✅ | `983212b` |
+| 3a — Per-node FS commands | ✅ | `a798e5e` |
+| 3b — Per-node git commands | ✅ | `dbb785b` |
+| 3c — Per-node Ring0 control | ✅ | `e0439c8` |
+| 3d — Per-node env commands | ✅ | `b75ff87` |
+| 3e — Pen visibility + release for remote sessions | ✅ | `80d3d56` |
+| 3f — Per-node artifacts (second-screens deferred) | ✅ | `a9f06d0` |
+| 4a — `--self-mode` flag on `vibr8_node` | ✅ | `e192292` |
+| 4b — Hub-side self-node spawn machinery (gated) | ✅ verified live | `3ac81aa` |
+| **4c — Keystone flip** (route default to self-node; delete `LocalNodeClient`; remove in-process managers from `main.py`) | ⏳ NEXT | — |
+| 5 — Unify browser WebSocket relay through tunnel | ⏳ | — |
+| 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` and `speak` tunnel commands) | ⏳ | — |
+| 6b — Per-node scheduler (deferred from 3g) | ⏳ | — |
+| 7 — Frontend node-scoping | ⏳ | — |
+| 8 — Cleanup + docs | ⏳ | — |
+
+Verify the table against `git log --oneline main` — commits should be on `main` in the order above, after `7ff55c3`.
+
+---
+
+## Architecture in one paragraph
+
+A **node** (hub or remote) is a self-contained vibr8 instance: its own `WsBridge`, `Ring0Manager`, `CliLauncher`, `SessionStore`, env/artifact/etc managers. The **hub** plays an additional role beyond being a node: it's the **registry** for nodes, the **browser WebSocket relay**, the **WebRTC I/O endpoint** (microphone, TTS playback, computer-use VLM). All node-scoped operations go through `NodeClient`. `NodeOperations` (`vibr8_core/node_operations.py`) is the canonical implementation; `LocalNodeClient` is currently `= NodeOperations` bound to in-process managers; `RemoteNodeClient` (`vibr8_core/node_client.py`) wraps the tunnel via `__getattr__`-based generic dispatch. After Phase 4c, the hub stops creating in-process managers — `LocalNodeClient` is deleted and the hub talks to its own embedded `vibr8_node` subprocess over a loopback tunnel.
+
+---
+
+## Key Files & Patterns
+
+### Where things live
+
+```
+vibr8_core/                         # shared package — both hub and node import
+├── node_operations.py              # NodeOperations — single source of truth per op
+├── node_client.py                  # NodeClient protocol, RemoteNodeClient, resolve_node_client
+├── ws_bridge.py                    # session/pen/event router (per-node)
+├── ring0.py                        # Ring0Manager (per-node)
+├── ring0_events.py                 # Ring0EventRouter (per-node)
+├── ring0_scheduler.py              # TaskScheduler
+├── cli_launcher.py                 # spawns CLI subprocesses
+├── session_store.py                # session persistence
+├── session_types.py                # wire TypedDicts (camelCase)
+├── session_names.py                # naming utilities
+├── env_manager.py                  # ~/.vibr8/envs/
+├── artifacts.py                    # ~/.vibr8/artifacts/
+├── worktree_tracker.py             # worktree mappings
+├── git_utils.py                    # git operations
+└── {codex,hermes,opencode}_adapter.py  # backend ACP/JSON-RPC adapters
+
+server/                              # hub-only modules
+├── main.py                          # entry point; instantiates managers + spawns self-node
+├── routes.py                        # REST handlers; uses NodeClient via resolve_node_client
+├── node_registry.py                 # node registry (hub-only)
+├── node_tunnel.py                   # tunnel server (hub side)
+├── webrtc.py, stt.py, tts.py        # voice/audio I/O (hub-only)
+├── auth.py                          # auth (hub-only)
+├── computer_use_agent.py, ui_tars_*  # VLM-based agents (hub-only)
+└── ...                              # other hub-only modules
+
+vibr8_node/                          # remote node process (and, post-4c, also hub's self-node)
+├── __main__.py                      # CLI entry (argparse + spawn NodeAgent)
+└── node_agent.py                    # NodeAgent — connects to hub, dispatches tunnel commands
+                                     # via getattr(self._ops, cmd)(**payload_to_kwargs(msg))
+
+docs/
+├── remote-node-parity.md            # canonical plan doc + progress log
+└── remote-node-parity-handoff.md    # this file
+```
+
+### Adding a new tunnel command (the Phase 3 pattern)
+
+1. Add an `async def my_op(self, ...) -> dict:` method to `NodeOperations` in `vibr8_core/node_operations.py`. Use **snake_case** kwargs; return a dict (never raise — return `{"error": "..."}`).
+2. (Optional) Add the method to the `NodeClient` Protocol in `vibr8_core/node_client.py` for typing.
+3. In `server/routes.py`, change the REST handler to:
+   ```python
+   node_id = body.get("nodeId", "")  # or request.query.get("nodeId", "")
+   try:
+       client, _ = _resolve_node_client(node_id)
+   except Exception as e:
+       return web.json_response({"error": str(e)}, status=503)
+   result = await client.my_op(arg1=..., arg2=...)
+   if "error" in result:
+       return web.json_response(result, status=_status_for_error(result["error"]))
+   return web.json_response(result)
+   ```
+4. The tunnel command **name = method name**. The dispatch on the node side is generic via `getattr(self._ops, cmd_type)(**payload_to_kwargs(msg))` — no code change needed.
+5. Wire formatting: snake_case in Python ↔ camelCase on the wire. `payload_to_kwargs` and `RemoteNodeClient.__getattr__` handle the translation automatically.
+
+### Session-prefixed IDs
+
+Remote session IDs from the hub's perspective look like `{node_id}:{raw_session_id}`. Use `ws_bridge.get_session_node_id(sid)`, `ws_bridge._is_remote_session(sid)`, `ws_bridge._raw_session_id(sid)`, and `WsBridge.qualify_session_id(node_id, raw)` to handle them. `resolve_node_client(sid, ...)` (in `vibr8_core/node_client.py`) does all of this and returns `(client, raw_sid, is_remote)`.
+
+---
+
+## How to Verify the Refactor's Current State
+
+Run all of these before making changes; they're a tripwire if any prior commit broke something.
+
+```bash
+# All tests should pass (1 unrelated test_video_track failure is pre-existing).
+uv run pytest server/tests/ --ignore=server/tests/test_video_track.py
+
+# Imports should resolve cleanly with no side effects in the import path.
+uv run python -c "
+from vibr8_core.node_operations import NodeOperations
+from vibr8_core.node_client import NodeClient, RemoteNodeClient, LocalNodeClient, resolve_node_client
+from vibr8_node.node_agent import NodeAgent
+from server import main
+print('OK')
+"
+
+# Verify the self-node CLI flag exists.
+uv run python -m vibr8_node --help | grep -- --self-mode
+```
+
+Expected: 230 tests pass, all imports succeed, `--self-mode` appears in help.
+
+---
+
+## How to Pick Up Where We Left Off (Phase 4c)
+
+**Goal**: flip the hub from using in-process `LocalNodeClient` to using `RemoteNodeClient` against the self-node subprocess. After Phase 4c the hub holds **zero** node-scoped state.
+
+### Phase 4c sub-steps (suggested ordering)
+
+1. **Wire `local_node_ops` to be the self-node client instead of in-process** when the self-node has registered.
+   - In `server/main.py`, after `[server] Self-node registered: id=…` fires in `_spawn_self_node`, replace `local_node_ops` (or the `_resolve_node_client`/`_resolve_client` lookups) so an empty `nodeId` resolves to `RemoteNodeClient(self_id, self_node.tunnel)`.
+   - Until the self-node is registered, requests still hit in-process. Once registered, they flip.
+   - **Risk**: this is the moment the hub depends on the subprocess. If the subprocess dies, things break. Add restart-on-crash logic (exponential backoff).
+
+2. **Stop instantiating in-process managers in `main.py`.**
+   - Delete the in-process `WsBridge`, `Ring0Manager`, `CliLauncher`, `SessionStore` constructors at lines ~386-407 in `server/main.py`.
+   - Routes that still touch these directly (search for `launcher.`, `ws_bridge.`, `ring0_manager.` in `routes.py`) need to either be migrated through `NodeClient` or accept that they no longer work.
+   - **Trap**: hub-only code that uses `ws_bridge` for things like browser broadcasts, WebRTC orchestration, computer-use agents — those still need a reference. Keep ws_bridge for *those* concerns but stop using it for *session* state (the self-node has that).
+
+3. **Migrate the browser WebSocket relay** (`/ws/browser/{session_id}` in `main.py`).
+   - Today there's a "hub-local session" path (direct ws_bridge call) and a "remote session" path (tunnel forward). Remove the hub-local path entirely; *every* browser message goes through the tunnel to the owning node, including self-node.
+   - Symmetric for the CLI WebSocket (`/ws/cli/{session_id}`): post-4c, CLIs spawned by the self-node connect to the *self-node's* port (default 3459), not the hub's. The hub's `/ws/cli` endpoint can be removed (or kept as a 404).
+
+4. **Delete `LocalNodeClient`** alias in `vibr8_core/node_client.py`. Verify no code references it.
+
+5. **Data dir**: today self-mode uses `~/.vibr8-self/` (Phase 4a/b decision to avoid coexistence corruption). Now that in-process managers are gone, change self-mode to use `~/.vibr8/` (the hub's existing data dir) and write a one-shot migrator that copies from `~/.vibr8-self/` if it has data and `~/.vibr8/` doesn't. See `vibr8_node/node_agent.py:run()`.
+
+6. **Always-on self-node**: remove the `VIBR8_SPAWN_SELF_NODE` env-var gate. The hub now requires the self-node to function.
+
+7. **Restart-on-crash**: monitor the subprocess; on exit, respawn with exponential backoff. The hub should never silently lose its self-node.
+
+8. **Run live verification**:
+   - Restart the hub. Verify it spawns the self-node, the self-node registers, and basic operations (list sessions, create session, kill session) work through the UI.
+   - Test against the existing **Hermes** remote node — it should still work, since the tunnel protocol didn't change.
+
+### Phase 4c risks (read these first)
+
+- **Atomic change**: every "hub had `WsBridge` in-process" assumption breaks at once. Greater chance of subtle bugs than any previous phase.
+- **Voice/WebRTC**: `server/webrtc.py` references `ws_bridge.*` to find Ring0 session id, last prompted at, etc. Those calls need to route to `local_node_ops` (which is now the self-node client). Same for `stt.py` if it touches the bridge.
+- **Hub-side broadcasts**: `ws_bridge.broadcast_to_all_browsers` is used by `routes.py` (artifacts_changed event, etc.). Whose browsers? The hub's. So keep a "broadcast-only" hub-side `WsBridge` for browser tracking, even though session state moves to the self-node. Or: have the self-node broadcast via tunnel back to the hub which fans out.
+- **`server/session_registry.py`** unifies local + remote sessions for the routes layer. After 4c, "local" = self-node, so this might collapse to just the registry-of-remotes pattern.
+- **`server/routes.py` non-migrated handlers**: search for `launcher\.|ws_bridge\.|ring0_manager\.` — anywhere that's a direct call to in-process state will break.
+
+### Verification of Phase 4b (already passed, for reference)
+
+The Phase 4b smoke test (run on 2026-05-21):
+
+```bash
+VIBR8_SPAWN_SELF_NODE=1 PORT=3556 uv run python -m server.main > /tmp/test-hub.log 2>&1 &
+# Then poll: grep -E "Self-node registered|self-node did not register" /tmp/test-hub.log
+# Expected lines (in order):
+#   [server] Spawning self-node: port=3459 hub=wss://127.0.0.1:3556
+#   [server] Self-node registered: id=<8 hex chars>
+#   [self-node] Registered as node self (id=<same id>)
+#   [self-node] Local server running on http://127.0.0.1:3459
+#   [self-node] Tunnel connected
+```
+
+This leaves a stale `self` node entry in `~/.vibr8/nodes.json` — clean it up after:
+```python
+import json, pathlib
+p = pathlib.Path.home() / ".vibr8" / "nodes.json"
+data = json.loads(p.read_text())
+data["nodes"] = {nid: n for nid, n in data["nodes"].items() if n.get("name") != "self"}
+data["api_keys"] = {kid: k for kid, k in data.get("api_keys", {}).items()
+                    if not k.get("name", "").startswith("self-node bootstrap")}
+p.write_text(json.dumps(data, indent=2))
+```
+
+**Caveat**: `pkill -TERM -f "python -m server.main"` is too broad if the user has `make dev` running — it kills that hub too. Use the PID returned by the background command instead, or grep for `PORT=3556` explicitly.
+
+---
+
+## Operational Context You Need
+
+- **User's main hub** runs via `make dev` (loop in `Makefile`) at `PORT=3456`, behind nginx + autossh tunnel exposed at `https://vibr8.ringzero.ai`. Don't kill it; restart-cost is real (heavy ML models reload).
+- **Hermes node** (a real remote node, not self-node) lives in `~/.vibr8/nodes.json` and is normally launched via:
+  ```bash
+  nohup uv run python -m vibr8_node --hub wss://localhost:3456 \
+    --api-key sk-node-a1869e15225c3b6e811fe1ad80aa02e999fb7b04417fe1f2 \
+    --name Hermes --port 3458 --default-backend hermes \
+    > /tmp/hermes-node.log 2>&1 &
+  ```
+  Use it as the remote-side test target.
+- **Data dirs**:
+  - Hub: `~/.vibr8/` (sessions, ring0, envs, artifacts, nodes.json, etc.)
+  - Remote nodes: `~/.vibr8-node/{name-slug}/` (isolated)
+  - Self-node (Phase 4a/b): `~/.vibr8-self/` (will consolidate to `~/.vibr8/` in 4c)
+- **Tests**: `uv run pytest server/tests/ --ignore=server/tests/test_video_track.py` — 230 passing. `test_video_track` is a pre-existing failure unrelated to this work.
+- **CLAUDE.md** in the repo root has further conventions (camelCase wire / snake_case Python, logging prefixes, async-by-default, `uv` for Python, `bun` for frontend).
+
+---
+
+## What NOT To Do
+
+- **Don't `pkill -f "server.main"`** without scoping to a port. Use `lsof -ti:3556 | xargs kill` instead when killing a test hub.
+- **Don't run `--self-mode` against a live hub on `~/.vibr8/`** — until Phase 4c, the self-node and the hub's in-process managers share the data dir and will conflict. The flag uses `~/.vibr8-self/` for now to prevent this.
+- **Don't migrate hub-only routes** (auth, node-registry, WebRTC, voice, computer-use VLM) to use `NodeClient`. They genuinely belong on the hub.
+- **Don't trust this document blindly** — verify status with `git log --oneline` and `git diff main..HEAD` for any local changes. Phase numbers and commit hashes might have moved.
+- **Don't generate URLs** for tutorials or external docs — you're working from the plan doc and the code, period.
+
+---
+
+## If You're Truly Lost
+
+1. Read `docs/remote-node-parity.md` (the canonical plan).
+2. Read `CLAUDE.md` in the repo root.
+3. Run `git log --oneline 7ff55c3..HEAD` to see what's been done.
+4. Run the verification commands in this doc.
+5. The user (johnrobinsn@gmail.com) can be reached via the `/email` skill (`/mntc/code/agentmail/`) if needed — but only for genuine blockers.
