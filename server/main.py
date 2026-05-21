@@ -418,6 +418,13 @@ def create_app() -> web.Application:
         default_backend="claude",
     )
 
+    # Phase 4b: self-node subprocess machinery (gated, OFF by default).
+    # When VIBR8_SPAWN_SELF_NODE=1, the hub spawns its own vibr8_node child
+    # process at startup that connects back via the tunnel. The subprocess
+    # is not USED for routing yet — that switch flips in Phase 4c. Today it
+    # just proves the spawn handshake works.
+    self_node_state: dict[str, object] = {"proc": None, "node_id": "", "api_key": ""}
+
     try:
         from server.android_registry import AndroidRegistry
         android_registry = AndroidRegistry()
@@ -822,10 +829,102 @@ def create_app() -> web.Application:
         # Start scheduled task runner
         await task_scheduler.start()
 
+        # Phase 4b: optionally spawn the hub's self-node subprocess.
+        # Fire-and-forget so we don't block startup; the subprocess waits
+        # briefly for the hub's listener to bind before connecting.
+        if os.environ.get("VIBR8_SPAWN_SELF_NODE") == "1":
+            spawn(_spawn_self_node())
+
+    async def _spawn_self_node() -> None:
+        """Spawn the hub's self-node child process and wait for it to register.
+
+        Today the subprocess uses ~/.vibr8-self/ (separate from the hub's
+        ~/.vibr8/) so it can run safely alongside the hub's in-process
+        managers. Phase 4c+ will remove the in-process managers and merge
+        the data dirs.
+        """
+        import socket
+        import subprocess
+
+        # Wait briefly for the hub's HTTP listener to bind. on_startup fires
+        # before run_app starts accepting connections; without this poll, the
+        # subprocess immediately gets ConnectionRefusedError.
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.settimeout(0.2)
+                    s.connect(("127.0.0.1", PORT))
+                    break
+                except OSError:
+                    continue
+        else:
+            logger.warning("[server] Hub listener never came up; skipping self-node spawn")
+            return
+
+        # Issue an ephemeral API key the subprocess can use to register.
+        raw_key, _entry = node_registry.generate_api_key(name="self-node bootstrap")
+        self_node_state["api_key"] = raw_key
+
+        self_port = int(os.environ.get("VIBR8_SELF_NODE_PORT", "3459"))
+        # Match the hub's scheme — vibr8_node already disables cert
+        # verification for 127.0.0.1, so self-signed certs are fine.
+        ws_scheme_local = "wss" if _get_ssl_context() else "ws"
+        hub_ws_url = f"{ws_scheme_local}://127.0.0.1:{PORT}"
+
+        env = dict(os.environ)
+        cmd = [
+            sys.executable, "-m", "vibr8_node",
+            "--hub", hub_ws_url,
+            "--api-key", raw_key,
+            "--name", "self",
+            "--port", str(self_port),
+            "--self-mode",
+        ]
+        logger.info("[server] Spawning self-node: port=%d hub=%s", self_port, hub_ws_url)
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        self_node_state["proc"] = proc
+
+        # Stream the child's stdout to our logs in the background.
+        async def _drain_child() -> None:
+            loop = asyncio.get_event_loop()
+            while True:
+                line = await loop.run_in_executor(None, proc.stdout.readline)
+                if not line:
+                    break
+                logger.info("[self-node] %s", line.decode(errors="replace").rstrip())
+
+        spawn(_drain_child())
+
+        # Poll the registry for the new "self" node id (up to 10s).
+        for _ in range(50):
+            await asyncio.sleep(0.2)
+            n = node_registry.get_node_by_name("self")
+            if n:
+                self_node_state["node_id"] = n.id
+                logger.info("[server] Self-node registered: id=%s", n.id[:8])
+                return
+        logger.warning("[server] Self-node did not register within 10s")
+
     app.on_startup.append(on_startup)
 
     async def on_shutdown(app: web.Application) -> None:
         logger.info("[server] Shutting down (restart=%s)...", _restart["requested"])
+
+        # Phase 4b: terminate the self-node subprocess if one was spawned.
+        proc = self_node_state.get("proc")
+        if proc is not None and proc.poll() is None:
+            logger.info("[server] Terminating self-node subprocess (pid=%d)", proc.pid)
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
 
         # Flush any pending debounced session saves to disk before anything else.
         ws_bridge.flush_to_disk()

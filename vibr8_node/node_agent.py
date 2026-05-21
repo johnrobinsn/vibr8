@@ -76,10 +76,12 @@ class NodeAgent:
     async def run(self) -> None:
         """Main entry point — register, start local server, connect tunnel."""
         if self.self_mode:
-            # Use the hub-host's data dir (~/.vibr8/) — the self-node IS the
-            # hub-host. No migration, no isolated dir; this node's sessions/
-            # ring0/etc. ARE the hub-host's existing state.
-            node_dir = Path.home() / ".vibr8"
+            # Self-mode uses ~/.vibr8-self/ today rather than the hub's
+            # ~/.vibr8/, so the subprocess can run safely alongside the hub's
+            # in-process managers without colliding on session/ring0 state.
+            # Phase 4c+ (the keystone) will delete the in-process managers and
+            # consolidate the data dirs.
+            node_dir = Path.home() / ".vibr8-self"
             session_dir = str(node_dir / "sessions")
             ring0_config_path = node_dir / "ring0.json"
             ring0_work_dir = node_dir / "ring0"
