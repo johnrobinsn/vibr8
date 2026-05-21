@@ -264,6 +264,18 @@ def create_routes(
             ws_bridge=ws_bridge,
         )
 
+    def _resolve_node_client(node_id: str):
+        """Return a NodeClient for a node_id (empty string → local hub)."""
+        from vibr8_core.node_client import RemoteNodeClient, RemoteNodeUnavailable
+        if not node_id:
+            return local_node_ops, False
+        if not node_registry:
+            raise RemoteNodeUnavailable(node_id)
+        node = node_registry.get_node(node_id)
+        if not node or not node.tunnel or not node.tunnel.connected:
+            raise RemoteNodeUnavailable(node_id)
+        return RemoteNodeClient(node_id, node.tunnel), True
+
     def _status_for_error(msg: str) -> int:
         m = (msg or "").lower()
         if "not found" in m:
@@ -954,60 +966,53 @@ def create_routes(
 
     @routes.get("/api/fs/list")
     async def fs_list(request: web.Request) -> web.Response:
-        raw_path = request.query.get("path") or str(Path.home())
-        base = Path(raw_path).resolve()
+        node_id = request.query.get("nodeId", "")
+        path = request.query.get("path", "")
         try:
-            dirs = []
-            for entry in sorted(base.iterdir(), key=lambda e: e.name):
-                if entry.is_dir() and not entry.name.startswith("."):
-                    dirs.append({"name": entry.name, "path": str(entry)})
-            return web.json_response({"path": str(base), "dirs": dirs, "home": str(Path.home())})
-        except Exception:
-            return web.json_response({"error": "Cannot read directory", "path": str(base), "dirs": [], "home": str(Path.home())}, status=400)
+            client, _is_remote = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.fs_list(path=path)
+        if "error" in result and not result.get("dirs"):
+            return web.json_response(result, status=400)
+        return web.json_response(result)
 
     @routes.get("/api/fs/home")
     async def fs_home(request: web.Request) -> web.Response:
-        return web.json_response({"home": str(Path.home()), "cwd": os.getcwd()})
+        node_id = request.query.get("nodeId", "")
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        return web.json_response(await client.fs_home())
 
     @routes.get("/api/fs/tree")
     async def fs_tree(request: web.Request) -> web.Response:
-        raw_path = request.query.get("path")
-        if not raw_path:
+        node_id = request.query.get("nodeId", "")
+        path = request.query.get("path", "")
+        if not path:
             return web.json_response({"error": "path required"}, status=400)
-        base = Path(raw_path).resolve()
-
-        def build_tree(d: Path, depth: int) -> list[dict[str, Any]]:
-            if depth > 10:
-                return []
-            try:
-                nodes: list[dict[str, Any]] = []
-                for entry in sorted(d.iterdir(), key=lambda e: (not e.is_dir(), e.name)):
-                    if entry.name.startswith(".") or entry.name == "node_modules":
-                        continue
-                    if entry.is_dir():
-                        nodes.append({"name": entry.name, "path": str(entry), "type": "directory", "children": build_tree(entry, depth + 1)})
-                    elif entry.is_file():
-                        nodes.append({"name": entry.name, "path": str(entry), "type": "file"})
-                return nodes
-            except Exception:
-                return []
-
-        tree = build_tree(base, 0)
-        return web.json_response({"path": str(base), "tree": tree})
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        return web.json_response(await client.fs_tree(path=path))
 
     @routes.get("/api/fs/read")
     async def fs_read(request: web.Request) -> web.Response:
-        file_path = request.query.get("path")
-        if not file_path:
+        node_id = request.query.get("nodeId", "")
+        path = request.query.get("path", "")
+        if not path:
             return web.json_response({"error": "path required"}, status=400)
-        p = Path(file_path).resolve()
         try:
-            if p.stat().st_size > 2 * 1024 * 1024:
-                return web.json_response({"error": "File too large (>2MB)"}, status=413)
-            content = p.read_text()
-            return web.json_response({"path": str(p), "content": content})
+            client, _ = _resolve_node_client(node_id)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=404)
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.fs_read(path=path)
+        if "error" in result:
+            status = 413 if "too large" in result["error"].lower() else 404
+            return web.json_response(result, status=status)
+        return web.json_response(result)
 
     @routes.get("/api/fs/raw")
     async def fs_raw(request: web.Request) -> web.Response:
@@ -1031,16 +1036,19 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
-        file_path = body.get("path")
+        node_id = body.get("nodeId", "") or request.query.get("nodeId", "")
+        path = body.get("path")
         content = body.get("content")
-        if not file_path or not isinstance(content, str):
+        if not path or not isinstance(content, str):
             return web.json_response({"error": "path and content required"}, status=400)
-        p = Path(file_path).resolve()
         try:
-            p.write_text(content)
-            return web.json_response({"ok": True, "path": str(p)})
+            client, _ = _resolve_node_client(node_id)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.fs_write(path=path, content=content)
+        if "error" in result:
+            return web.json_response(result, status=500)
+        return web.json_response(result)
 
     @routes.post("/api/sessions/{session_id}/upload")
     async def session_upload(request: web.Request) -> web.Response:
@@ -1073,15 +1081,18 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
-        dir_path = body.get("path")
-        if not dir_path:
+        node_id = body.get("nodeId", "")
+        path = body.get("path")
+        if not path:
             return web.json_response({"error": "path required"}, status=400)
-        p = Path(dir_path).resolve()
         try:
-            p.mkdir(parents=True, exist_ok=True)
-            return web.json_response({"ok": True, "path": str(p)})
+            client, _ = _resolve_node_client(node_id)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.fs_mkdir(path=path)
+        if "error" in result:
+            return web.json_response(result, status=500)
+        return web.json_response(result)
 
     @routes.post("/api/fs/rename")
     async def fs_rename(request: web.Request) -> web.Response:
@@ -1089,21 +1100,21 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
+        node_id = body.get("nodeId", "")
         old_path = body.get("oldPath")
         new_path = body.get("newPath")
         if not old_path or not new_path:
             return web.json_response({"error": "oldPath and newPath required"}, status=400)
-        src = Path(old_path).resolve()
-        dst = Path(new_path).resolve()
-        if not src.exists():
-            return web.json_response({"error": "source not found"}, status=404)
-        if dst.exists():
-            return web.json_response({"error": "destination already exists"}, status=409)
         try:
-            src.rename(dst)
-            return web.json_response({"ok": True})
+            client, _ = _resolve_node_client(node_id)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.fs_rename(old_path=old_path, new_path=new_path)
+        if "error" in result:
+            err = result["error"].lower()
+            status = 404 if "not found" in err else (409 if "already exists" in err else 500)
+            return web.json_response(result, status=status)
+        return web.json_response(result)
 
     @routes.post("/api/fs/delete")
     async def fs_delete(request: web.Request) -> web.Response:
@@ -1111,21 +1122,18 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
-        target = body.get("path")
-        if not target:
+        node_id = body.get("nodeId", "")
+        path = body.get("path")
+        if not path:
             return web.json_response({"error": "path required"}, status=400)
-        p = Path(target).resolve()
-        if not p.exists():
-            return web.json_response({"error": "not found"}, status=404)
         try:
-            if p.is_dir():
-                import shutil
-                shutil.rmtree(p)
-            else:
-                p.unlink()
-            return web.json_response({"ok": True})
+            client, _ = _resolve_node_client(node_id)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.fs_delete(path=path)
+        if "error" in result:
+            return web.json_response(result, status=404 if "not found" in result["error"].lower() else 500)
+        return web.json_response(result)
 
     @routes.get("/api/fs/diff")
     async def fs_diff(request: web.Request) -> web.Response:

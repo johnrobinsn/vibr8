@@ -210,6 +210,119 @@ class NodeOperations:
         )
         return {"ok": True}
 
+    # ── Filesystem ────────────────────────────────────────────────────────
+    #
+    # Each method operates on this node's local filesystem. The hub forwards
+    # /api/fs/* calls here when ?nodeId= targets a remote node.
+
+    async def fs_list(self, path: str = "") -> dict:
+        from pathlib import Path
+        base = Path(path).resolve() if path else Path.home()
+        try:
+            dirs = []
+            for entry in sorted(base.iterdir(), key=lambda e: e.name):
+                if entry.is_dir() and not entry.name.startswith("."):
+                    dirs.append({"name": entry.name, "path": str(entry)})
+            return {"path": str(base), "dirs": dirs, "home": str(Path.home())}
+        except Exception as e:
+            return {"error": f"Cannot read directory: {e}", "path": str(base), "dirs": [], "home": str(Path.home())}
+
+    async def fs_home(self) -> dict:
+        import os
+        from pathlib import Path
+        return {"home": str(Path.home()), "cwd": os.getcwd()}
+
+    async def fs_tree(self, path: str = "", max_depth: int = 10) -> dict:
+        from pathlib import Path
+        if not path:
+            return {"error": "path required"}
+        base = Path(path).resolve()
+
+        def build(d: Path, depth: int) -> list[dict]:
+            if depth > max_depth:
+                return []
+            try:
+                nodes: list[dict] = []
+                for entry in sorted(d.iterdir(), key=lambda e: (not e.is_dir(), e.name)):
+                    if entry.name.startswith(".") or entry.name == "node_modules":
+                        continue
+                    if entry.is_dir():
+                        nodes.append({"name": entry.name, "path": str(entry), "type": "directory", "children": build(entry, depth + 1)})
+                    elif entry.is_file():
+                        nodes.append({"name": entry.name, "path": str(entry), "type": "file"})
+                return nodes
+            except Exception:
+                return []
+
+        return {"path": str(base), "tree": build(base, 0)}
+
+    async def fs_read(self, path: str = "", max_bytes: int = 2 * 1024 * 1024) -> dict:
+        from pathlib import Path
+        if not path:
+            return {"error": "path required"}
+        p = Path(path).resolve()
+        try:
+            if p.stat().st_size > max_bytes:
+                return {"error": f"File too large (>{max_bytes} bytes)"}
+            return {"path": str(p), "content": p.read_text()}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def fs_write(self, path: str = "", content: str = "") -> dict:
+        from pathlib import Path
+        if not path:
+            return {"error": "path required"}
+        p = Path(path).resolve()
+        try:
+            p.write_text(content)
+            return {"ok": True, "path": str(p)}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def fs_mkdir(self, path: str = "") -> dict:
+        from pathlib import Path
+        if not path:
+            return {"error": "path required"}
+        p = Path(path).resolve()
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            return {"ok": True, "path": str(p)}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def fs_rename(self, old_path: str = "", new_path: str = "") -> dict:
+        from pathlib import Path
+        if not old_path or not new_path:
+            return {"error": "oldPath and newPath required"}
+        src = Path(old_path).resolve()
+        dst = Path(new_path).resolve()
+        if not src.exists():
+            return {"error": "source not found"}
+        if dst.exists():
+            return {"error": "destination already exists"}
+        try:
+            src.rename(dst)
+            return {"ok": True}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def fs_delete(self, path: str = "") -> dict:
+        from pathlib import Path
+        import shutil
+        if not path:
+            return {"error": "path required"}
+        p = Path(path).resolve()
+        if not p.exists():
+            return {"error": "not found"}
+        try:
+            if p.is_dir():
+                shutil.rmtree(p)
+            else:
+                p.unlink()
+            return {"ok": True}
+        except Exception as e:
+            return {"error": str(e)}
+
     # ── WebRTC ────────────────────────────────────────────────────────────
 
     async def webrtc_offer(
