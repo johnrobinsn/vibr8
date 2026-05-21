@@ -26,7 +26,7 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 4a — `--self-mode` flag on `vibr8_node` | ✅ | `e192292` |
 | 4b — Hub-side self-node spawn machinery (gated) | ✅ verified live | `3ac81aa` |
 | 4c-1 — Migrate remaining session-state routes through NodeClient | ✅ (`routes.py` has zero direct launcher/store/worktree refs) | `9c825e3` |
-| 4c-2 — Migrate webrtc.py, session_registry.py, main.py callbacks | ⏳ NEXT | — |
+| 4c-2 — Migrate session_registry.py (webrtc/main callbacks deferred to 4c-4/Phase 6) | ✅ | `d90bcb5` |
 | 4c-3 — Extract `HubBrowserBridge` from `WsBridge` | ⏳ | — |
 | **4c-4 — Atomic flip** (spawn self-node by default, drop in-process managers, data dir consolidation) | ⏳ KEYSTONE | — |
 | 4c-5 — Unify browser+CLI WS relays through tunnel | ⏳ | — |
@@ -66,6 +66,18 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 - `ws_bridge.get_ring0_prompt_client`, `set_client_metadata`, `get_all_clients`
 - `ws_bridge._build_client_list`, `_client_sessions`, `register_device_info`
 - `ws_bridge.register_computer_use_agent`, `attach_adapter`, `get_or_create_session`
+
+### Phase 4c-2 — DONE (commit `d90bcb5`)
+
+- `LocalSessionRouter` now wraps `NodeOperations` for writes (`send_message`, `kill`, `respond_permission`). Sync reads (history, pending permissions) still hit the bridge — those move with `HubBrowserBridge` in 4c-3.
+- `SessionRegistry` constructor takes optional `local_node_ops`; `sync_from_launcher` is async and pulls via `local_node_ops.list_sessions()`. Both callers (`server/main.py` startup + `server/routes.py /api/ring0/sessions`) updated to `await`.
+- `server/main.py` reorders construction so `local_node_ops` is built before `SessionRegistry`.
+- Lazy-fallback path retained in `SessionRegistry.sync_from_launcher` for callers/tests that don't pass `local_node_ops`.
+
+**Intentionally not touched in 4c-2:**
+- `webrtc.py` references to `ring0_manager` (voice routing) + `launcher` (Ring0 lazy-create) → Phase 6 (hub-side I/O bridging to active node).
+- `main.py` event callbacks (`on_cli_session_id`, `on_cli_relaunch_needed`, `on_first_turn_completed`, `on_codex_adapter_created`) → these fire from the hub's in-process `WsBridge`. When 4c-4 removes that bridge, the callbacks become unreachable and the wiring code can be deleted in the same commit. They're not broken now.
+- `ws_bridge.set_*()` wiring calls (`set_store`/`set_webrtc_manager`/`set_ring0_manager`/`set_node_registry`/etc.) → same story; they configure the in-process bridge which is going away.
 
 Verify the table against `git log --oneline main` — commits should be on `main` in the order above, after `7ff55c3`.
 
