@@ -323,6 +323,96 @@ class NodeOperations:
         except Exception as e:
             return {"error": str(e)}
 
+    # ── Git ───────────────────────────────────────────────────────────────
+    #
+    # Each operation runs against this node's working trees. The hub forwards
+    # /api/git/* calls here when ?nodeId= targets a remote node.
+
+    async def git_repo_info(self, path: str = "") -> dict:
+        from vibr8_core import git_utils
+        if not path:
+            return {"error": "path required"}
+        info = git_utils.get_repo_info(path)
+        if not info:
+            return {"error": "Not a git repository"}
+        return _to_camel_dict(info)
+
+    async def git_branches(self, repo_root: str = "") -> dict:
+        from vibr8_core import git_utils
+        if not repo_root:
+            return {"error": "repoRoot required"}
+        try:
+            branches = git_utils.list_branches(repo_root)
+            return {"branches": [_to_camel_dict(b) for b in branches]}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def git_worktrees(self, repo_root: str = "") -> dict:
+        from vibr8_core import git_utils
+        if not repo_root:
+            return {"error": "repoRoot required"}
+        try:
+            wts = git_utils.list_worktrees(repo_root)
+            return {"worktrees": [_to_camel_dict(w) for w in wts]}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def git_create_worktree(
+        self,
+        repo_root: str = "",
+        branch: str = "",
+        base_branch: str | None = None,
+        create_branch: bool | None = None,
+    ) -> dict:
+        from vibr8_core import git_utils
+        if not repo_root or not branch:
+            return {"error": "repoRoot and branch required"}
+        try:
+            result = git_utils.ensure_worktree(
+                repo_root, branch, base_branch=base_branch, create_branch=create_branch,
+            )
+            return _to_camel_dict(result)
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def git_delete_worktree(
+        self,
+        repo_root: str = "",
+        worktree_path: str = "",
+        force: bool | None = None,
+    ) -> dict:
+        from vibr8_core import git_utils
+        if not repo_root or not worktree_path:
+            return {"error": "repoRoot and worktreePath required"}
+        return git_utils.remove_worktree(repo_root, worktree_path, force=force)
+
+    async def git_fetch(self, repo_root: str = "") -> dict:
+        from vibr8_core import git_utils
+        if not repo_root:
+            return {"error": "repoRoot required"}
+        return git_utils.git_fetch(repo_root)
+
+    async def git_pull(self, cwd: str = "") -> dict:
+        import subprocess
+        from vibr8_core import git_utils
+        if not cwd:
+            return {"error": "cwd required"}
+        result = git_utils.git_pull(cwd)
+        git_ahead = 0
+        git_behind = 0
+        try:
+            counts = subprocess.run(
+                ["git", "rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+                cwd=cwd, capture_output=True, text=True, timeout=3,
+            ).stdout.strip()
+            parts = counts.split()
+            if len(parts) == 2:
+                git_behind = int(parts[0])
+                git_ahead = int(parts[1])
+        except Exception:
+            pass
+        return {**result, "git_ahead": git_ahead, "git_behind": git_behind}
+
     # ── WebRTC ────────────────────────────────────────────────────────────
 
     async def webrtc_offer(
@@ -367,6 +457,15 @@ def snake_to_camel(name: str) -> str:
 
 def _snake_to_camel_dict(d: dict) -> dict:
     return {snake_to_camel(k): v for k, v in d.items()}
+
+
+def _to_camel_dict(d: Any) -> Any:
+    """Recursively convert dict keys snake_case → camelCase."""
+    if isinstance(d, dict):
+        return {snake_to_camel(k): _to_camel_dict(v) for k, v in d.items()}
+    if isinstance(d, list):
+        return [_to_camel_dict(x) for x in d]
+    return d
 
 
 def payload_to_kwargs(msg: dict, *, drop: tuple = ("type", "requestId")) -> dict:

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 from vibr8_core import artifacts, env_manager, session_names
-from server import git_utils
+from vibr8_core import git_utils
 from server import speaker_fingerprints, voice_profiles, voice_logger
 from server.usage_limits import get_usage_limits
 from vibr8_core.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
@@ -1205,35 +1205,48 @@ def create_routes(
 
     @routes.get("/api/git/repo-info")
     async def git_repo_info(request: web.Request) -> web.Response:
+        node_id = request.query.get("nodeId", "")
         path = request.query.get("path")
         if not path:
             return web.json_response({"error": "path required"}, status=400)
-        info = git_utils.get_repo_info(path)
-        if not info:
-            return web.json_response({"error": "Not a git repository"}, status=400)
-        return web.json_response(_camel_dict(info))
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.git_repo_info(path=path)
+        if "error" in result:
+            return web.json_response(result, status=400)
+        return web.json_response(result)
 
     @routes.get("/api/git/branches")
     async def git_branches(request: web.Request) -> web.Response:
+        node_id = request.query.get("nodeId", "")
         repo_root = request.query.get("repoRoot")
         if not repo_root:
             return web.json_response({"error": "repoRoot required"}, status=400)
         try:
-            branches = git_utils.list_branches(repo_root)
-            return web.json_response([_camel_dict(b) for b in branches])
+            client, _ = _resolve_node_client(node_id)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.git_branches(repo_root=repo_root)
+        if "error" in result:
+            return web.json_response(result, status=500)
+        return web.json_response(result.get("branches", []))
 
     @routes.get("/api/git/worktrees")
     async def git_worktrees(request: web.Request) -> web.Response:
+        node_id = request.query.get("nodeId", "")
         repo_root = request.query.get("repoRoot")
         if not repo_root:
             return web.json_response({"error": "repoRoot required"}, status=400)
         try:
-            wts = git_utils.list_worktrees(repo_root)
-            return web.json_response([_camel_dict(w) for w in wts])
+            client, _ = _resolve_node_client(node_id)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.git_worktrees(repo_root=repo_root)
+        if "error" in result:
+            return web.json_response(result, status=500)
+        return web.json_response(result.get("worktrees", []))
 
     @routes.post("/api/git/worktree")
     async def git_create_worktree(request: web.Request) -> web.Response:
@@ -1241,15 +1254,24 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
+        node_id = body.get("nodeId", "")
         repo_root = body.get("repoRoot")
         branch = body.get("branch")
         if not repo_root or not branch:
             return web.json_response({"error": "repoRoot and branch required"}, status=400)
         try:
-            result = git_utils.ensure_worktree(repo_root, branch, base_branch=body.get("baseBranch"), create_branch=body.get("createBranch"))
-            return web.json_response(_camel_dict(result))
+            client, _ = _resolve_node_client(node_id)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.git_create_worktree(
+            repo_root=repo_root,
+            branch=branch,
+            base_branch=body.get("baseBranch"),
+            create_branch=body.get("createBranch"),
+        )
+        if "error" in result:
+            return web.json_response(result, status=500)
+        return web.json_response(result)
 
     @routes.delete("/api/git/worktree")
     async def git_delete_worktree(request: web.Request) -> web.Response:
@@ -1257,11 +1279,20 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
+        node_id = body.get("nodeId", "")
         repo_root = body.get("repoRoot")
         worktree_path = body.get("worktreePath")
         if not repo_root or not worktree_path:
             return web.json_response({"error": "repoRoot and worktreePath required"}, status=400)
-        result = git_utils.remove_worktree(repo_root, worktree_path, force=body.get("force"))
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.git_delete_worktree(
+            repo_root=repo_root,
+            worktree_path=worktree_path,
+            force=body.get("force"),
+        )
         return web.json_response(result)
 
     @routes.post("/api/git/fetch")
@@ -1270,10 +1301,15 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
+        node_id = body.get("nodeId", "")
         repo_root = body.get("repoRoot")
         if not repo_root:
             return web.json_response({"error": "repoRoot required"}, status=400)
-        return web.json_response(git_utils.git_fetch(repo_root))
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        return web.json_response(await client.git_fetch(repo_root=repo_root))
 
     @routes.post("/api/git/pull")
     async def git_pull(request: web.Request) -> web.Response:
@@ -1281,24 +1317,15 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
+        node_id = body.get("nodeId", "")
         cwd = body.get("cwd")
         if not cwd:
             return web.json_response({"error": "cwd required"}, status=400)
-        result = git_utils.git_pull(cwd)
-        git_ahead = 0
-        git_behind = 0
         try:
-            counts = subprocess.run(
-                ["git", "rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
-                cwd=cwd, capture_output=True, text=True, timeout=3,
-            ).stdout.strip()
-            parts = counts.split()
-            if len(parts) == 2:
-                git_behind = int(parts[0])
-                git_ahead = int(parts[1])
-        except Exception:
-            pass
-        return web.json_response({**result, "git_ahead": git_ahead, "git_behind": git_behind})
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        return web.json_response(await client.git_pull(cwd=cwd))
 
     # ── Usage Limits ─────────────────────────────────────────────────────
 
