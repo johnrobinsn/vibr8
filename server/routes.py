@@ -1154,18 +1154,27 @@ def create_routes(
 
     @routes.get("/api/envs")
     async def list_envs(request: web.Request) -> web.Response:
+        node_id = request.query.get("nodeId", "")
         try:
-            envs = env_manager.list_envs()
-            return web.json_response([e.to_dict() for e in envs])
+            client, _ = _resolve_node_client(node_id)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.env_list()
+        if "error" in result:
+            return web.json_response(result, status=500)
+        return web.json_response(result.get("envs", []))
 
     @routes.get("/api/envs/{slug}")
     async def get_env(request: web.Request) -> web.Response:
-        env = env_manager.get_env(request.match_info["slug"])
-        if not env:
-            return web.json_response({"error": "Environment not found"}, status=404)
-        return web.json_response(env.to_dict())
+        node_id = request.query.get("nodeId", "")
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.env_get(slug=request.match_info["slug"])
+        if "error" in result:
+            return web.json_response(result, status=404)
+        return web.json_response(result)
 
     @routes.post("/api/envs")
     async def create_env(request: web.Request) -> web.Response:
@@ -1173,11 +1182,18 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
+        node_id = body.get("nodeId", "")
         try:
-            env = env_manager.create_env(body.get("name", ""), body.get("variables", {}))
-            return web.json_response(env.to_dict(), status=201)
+            client, _ = _resolve_node_client(node_id)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=400)
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.env_create(
+            name=body.get("name", ""),
+            variables=body.get("variables", {}),
+        )
+        if "error" in result:
+            return web.json_response(result, status=400)
+        return web.json_response(result, status=201)
 
     @routes.put("/api/envs/{slug}")
     async def update_env(request: web.Request) -> web.Response:
@@ -1186,20 +1202,32 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
+        node_id = body.get("nodeId", "")
         try:
-            env = env_manager.update_env(slug, name=body.get("name"), variables=body.get("variables"))
-            if not env:
-                return web.json_response({"error": "Environment not found"}, status=404)
-            return web.json_response(env.to_dict())
+            client, _ = _resolve_node_client(node_id)
         except Exception as e:
-            return web.json_response({"error": str(e)}, status=400)
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.env_update(
+            slug=slug,
+            name=body.get("name"),
+            variables=body.get("variables"),
+        )
+        if "error" in result:
+            status = 404 if "not found" in result["error"].lower() else 400
+            return web.json_response(result, status=status)
+        return web.json_response(result)
 
     @routes.delete("/api/envs/{slug}")
     async def delete_env(request: web.Request) -> web.Response:
-        deleted = env_manager.delete_env(request.match_info["slug"])
-        if not deleted:
-            return web.json_response({"error": "Environment not found"}, status=404)
-        return web.json_response({"ok": True})
+        node_id = request.query.get("nodeId", "")
+        try:
+            client, _ = _resolve_node_client(node_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.env_delete(slug=request.match_info["slug"])
+        if "error" in result:
+            return web.json_response(result, status=404)
+        return web.json_response(result)
 
     # ── Git operations ───────────────────────────────────────────────────
 

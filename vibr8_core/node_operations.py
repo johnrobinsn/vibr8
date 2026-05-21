@@ -413,6 +413,53 @@ class NodeOperations:
             pass
         return {**result, "git_ahead": git_ahead, "git_behind": git_behind}
 
+    # ── Environments ──────────────────────────────────────────────────────
+    #
+    # Each node reads/writes its own ~/.vibr8/envs/ directory (per-node since
+    # remote nodes use isolated data dirs).
+
+    async def env_list(self) -> dict:
+        from vibr8_core import env_manager
+        try:
+            envs = env_manager.list_envs()
+            return {"envs": [e.to_dict() for e in envs]}
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def env_get(self, slug: str = "") -> dict:
+        from vibr8_core import env_manager
+        env = env_manager.get_env(slug)
+        if not env:
+            return {"error": "Environment not found"}
+        return env.to_dict()
+
+    async def env_create(self, name: str = "", variables: dict | None = None) -> dict:
+        from vibr8_core import env_manager
+        try:
+            env = env_manager.create_env(name, variables or {})
+            return env.to_dict()
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def env_update(
+        self, slug: str = "", name: str | None = None, variables: dict | None = None,
+    ) -> dict:
+        from vibr8_core import env_manager
+        try:
+            env = env_manager.update_env(slug, name=name, variables=variables)
+            if not env:
+                return {"error": "Environment not found"}
+            return env.to_dict()
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def env_delete(self, slug: str = "") -> dict:
+        from vibr8_core import env_manager
+        deleted = env_manager.delete_env(slug)
+        if not deleted:
+            return {"error": "Environment not found"}
+        return {"ok": True}
+
     # ── Ring0 control ─────────────────────────────────────────────────────
 
     async def ring0_status(self) -> dict:
