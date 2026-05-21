@@ -562,12 +562,10 @@ def create_routes(
                     agentType=body.get("agentType"),
                     agentConfig=body.get("agentConfig"),
                 )
-                session = launcher.launch(opts)
                 name = body.get("name") or session_names.generate_random_name()
-                session_names.set_name(session.sessionId, name)
-                result = session.to_dict()
-                result["name"] = name
-                return web.json_response(result)
+                return web.json_response(await local_node_ops.launch_with_options(
+                    opts=opts, backend_type="computer-use", name=name,
+                ))
 
             # Resolve environment variables
             env_vars: dict[str, str] | None = body.get("env")
@@ -627,32 +625,19 @@ def create_routes(
                 backendType=backend,
                 worktreeInfo=wt_info,
             )
-            session = launcher.launch(opts)
 
-            # Pre-create WsBridge session with correct backend_type so browser
-            # messages arriving before the adapter is attached get routed correctly
-            ws_bridge.get_or_create_session(session.sessionId, backend)
-
-            session_dict = session.to_dict()
-
-            # Use directory basename as initial session name (e.g. "myapp" from /home/user/myapp)
-            effective_cwd = session.cwd or cwd or ""
+            # Derive an initial session name (directory basename when cwd is
+            # known, otherwise a random one) before handing off.
+            effective_cwd = opts.cwd or cwd or ""
             dir_name = os.path.basename(effective_cwd) if effective_cwd else ""
             name = body.get("name") or dir_name or session_names.generate_random_name()
-            session_names.set_name(session.sessionId, name)
-            session_dict["name"] = name
 
-            if worktree_info:
-                worktree_tracker.add_mapping(WorktreeMapping(
-                    sessionId=session.sessionId,
-                    repoRoot=worktree_info["repoRoot"],
-                    branch=worktree_info["branch"],
-                    worktreePath=worktree_info["worktreePath"],
-                    createdAt=session.createdAt,
-                    actualBranch=worktree_info["actualBranch"],
-                ))
-
-            return web.json_response(session_dict)
+            return web.json_response(await local_node_ops.launch_with_options(
+                opts=opts,
+                backend_type=backend,
+                name=name,
+                worktree_mapping=worktree_info,
+            ))
         except Exception as e:
             logger.exception(f"[routes] Failed to create session: {e}")
             return web.json_response({"error": str(e)}, status=500)
@@ -1994,13 +1979,9 @@ def create_routes(
             nodeId=body.get("nodeId") or None,
         )
         try:
-            session = launcher.launch(opts)
-            if name:
-                session_names.set_name(session.sessionId, name)
-            result = session.to_dict()
-            if name:
-                result["name"] = name
-            return web.json_response(result)
+            return web.json_response(await local_node_ops.launch_with_options(
+                opts=opts, backend_type=backend, name=name or None,
+            ))
         except Exception as e:
             logger.exception(f"[routes] Ring0 create session failed: {e}")
             return web.json_response({"error": str(e)}, status=500)

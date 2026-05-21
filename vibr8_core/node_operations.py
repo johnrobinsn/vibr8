@@ -118,6 +118,41 @@ class NodeOperations:
         await self._notify_sessions_changed()
         return result
 
+    async def launch_with_options(
+        self,
+        opts: LaunchOptions,
+        backend_type: str,
+        name: str | None = None,
+        worktree_mapping: dict | None = None,
+    ) -> dict:
+        """Direct-launch path for callers that already built a LaunchOptions.
+
+        Performs the launch, pre-creates the bridge session for the correct
+        backend, applies a name, and adds a worktree mapping (if any). The
+        existing tunnel `create_session` command is the wire equivalent
+        that wraps this for remote nodes.
+        """
+        info = self._launcher.launch(opts)
+        sid = info.sessionId
+        self._bridge.get_or_create_session(sid, backend_type)
+        if name:
+            session_names.set_name(sid, name)
+        if worktree_mapping and self._worktree_tracker:
+            from vibr8_core.worktree_tracker import WorktreeMapping
+            self._worktree_tracker.add_mapping(WorktreeMapping(
+                sessionId=sid,
+                repoRoot=worktree_mapping["repoRoot"],
+                branch=worktree_mapping["branch"],
+                worktreePath=worktree_mapping["worktreePath"],
+                createdAt=info.createdAt,
+                actualBranch=worktree_mapping.get("actualBranch"),
+            ))
+        result = info.to_dict() if hasattr(info, "to_dict") else info.__dict__
+        if name:
+            result["name"] = name
+        await self._notify_sessions_changed()
+        return result
+
     async def kill_session(self, session_id: str = "") -> dict:
         killed = await self._launcher.kill(session_id)
         await self._notify_sessions_changed()
