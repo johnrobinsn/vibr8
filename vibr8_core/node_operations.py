@@ -77,11 +77,12 @@ class NodeOperations:
                 s_dict["lastPromptedAt"] = lpa
             if self._ring0 and sid == self._ring0.session_id:
                 s_dict["isRing0"] = True
-            # Surface pen state so the UI can show the indicator for sessions
-            # on remote nodes too.
+            # Surface pen state + agent runtime status so the UI can render
+            # them for sessions on remote nodes too.
             bridge_session = self._bridge._sessions.get(sid)
             if bridge_session is not None:
                 s_dict["controlledBy"] = bridge_session.controlled_by
+                s_dict["agentState"] = self._bridge._derive_agent_status(bridge_session)
             sessions.append(s_dict)
         return {"sessions": sessions}
 

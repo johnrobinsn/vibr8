@@ -678,27 +678,19 @@ def create_routes(
         # Android node — return host sessions associated with this node
         android_registry = request.app.get("android_registry")
         if requested_node and android_registry and android_registry.get_node(requested_node):
-            names = session_names.get_all_names()
             r0_id = ring0_manager.session_id if ring0_manager else None
+            list_result = await local_node_ops.list_sessions()
             associated = []
-            for s in launcher.list_sessions():
-                s_dict = s.to_dict() if hasattr(s, "to_dict") else (s if isinstance(s, dict) else s.__dict__)
+            for s_dict in list_result.get("sessions", []):
                 sid = s_dict.get("sessionId", "")
-                # Include sessions associated with this Android node, or CU sessions targeting it
+                # Sessions associated with this Android node (via bridge),
+                # or CU sessions targeting it.
                 bridge_session = ws_bridge._sessions.get(sid)
                 associated_nid = bridge_session.associated_node_id if bridge_session else ""
                 cu_node = s_dict.get("nodeId", "")
                 if associated_nid != requested_node and cu_node != requested_node:
                     continue
-                s_dict["name"] = names.get(sid, s_dict.get("name"))
                 s_dict["associatedNodeId"] = requested_node
-                lpa = ws_bridge.get_last_prompted_at(sid)
-                if lpa:
-                    s_dict["lastPromptedAt"] = lpa
-                if r0_id and sid == r0_id:
-                    s_dict["isRing0"] = True
-                if bridge_session:
-                    s_dict["agentState"] = ws_bridge._derive_agent_status(bridge_session)
                 associated.append(s_dict)
             associated.sort(key=lambda s: (0 if s.get("isRing0") else 1, -(s.get("lastPromptedAt") or s.get("createdAt") or 0)))
             return web.json_response(associated)
@@ -715,19 +707,12 @@ def create_routes(
                     raw_id = s.get("sessionId", "")
                     if raw_id:
                         s["sessionId"] = WsBridge.qualify_session_id(requested_node, raw_id)
-                # Append local CU sessions targeting this remote node
-                names = session_names.get_all_names()
-                for s in launcher.list_sessions():
-                    s_dict = s.to_dict() if hasattr(s, "to_dict") else (s if isinstance(s, dict) else s.__dict__)
+                # Append local CU sessions targeting this remote node (pulled
+                # through NodeClient so they pick up the same enrichment).
+                local_list = (await local_node_ops.list_sessions()).get("sessions", [])
+                for s_dict in local_list:
                     if s_dict.get("backendType") == "computer-use" and s_dict.get("nodeId") == requested_node:
-                        sid = s_dict.get("sessionId", "")
-                        s_dict["name"] = names.get(sid, s_dict.get("name"))
-                        lpa = ws_bridge.get_last_prompted_at(sid)
-                        if lpa:
-                            s_dict["lastPromptedAt"] = lpa
-                        bridge_session = ws_bridge._sessions.get(sid)
-                        if bridge_session:
-                            s_dict["agentState"] = ws_bridge._derive_agent_status(bridge_session)
+                        # NodeOps.list_sessions already enriches agentState.
                         remote_sessions.append(s_dict)
                 # Sort: Ring0 pinned first, then MRU
                 remote_sessions.sort(
@@ -742,33 +727,23 @@ def create_routes(
             else:
                 return web.json_response([])  # Offline remote node
 
-        # Local node — existing logic
-        sessions = launcher.list_sessions()
-        names = session_names.get_all_names()
+        # Local node — pull sessions through NodeClient. NodeOperations
+        # already does name/lastPromptedAt/isRing0/controlledBy/agentState
+        # enrichment, so we only filter out CU sessions targeting other
+        # nodes and graft terminal sessions on top here on the hub.
         r0_id = ring0_manager.session_id if ring0_manager else None
+        list_result = await local_node_ops.list_sessions()
         enriched = []
-        for s in sessions:
-            s_dict = s.to_dict() if hasattr(s, "to_dict") else (s if isinstance(s, dict) else s.__dict__)
-            # CU sessions targeting remote nodes appear under their target node, not here
+        for s_dict in list_result.get("sessions", []):
             cu_node = s_dict.get("nodeId")
             if s_dict.get("backendType") == "computer-use" and cu_node and cu_node != "local":
                 continue
-            sid = s_dict.get("sessionId", "")
-            s_dict["name"] = names.get(sid, s_dict.get("name"))
-            # Enrich with MRU timestamp from WsBridge
-            lpa = ws_bridge.get_last_prompted_at(sid)
-            if lpa:
-                s_dict["lastPromptedAt"] = lpa
-            if r0_id and sid == r0_id:
-                s_dict["isRing0"] = True
-            # Enrich with agent runtime state from WsBridge
-            bridge_session = ws_bridge._sessions.get(sid)
-            if bridge_session:
-                s_dict["agentState"] = ws_bridge._derive_agent_status(bridge_session)
             enriched.append(s_dict)
-        # Include terminal sessions
+        # Include terminal sessions (hub-only concept; TerminalManager isn't
+        # node-scoped).
         if terminal_manager:
             import time
+            names = session_names.get_all_names()
             for sid in terminal_manager.get_all_ids():
                 term = terminal_manager.get(sid)
                 if term:
@@ -895,16 +870,12 @@ def create_routes(
     async def unarchive_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
         try:
-            client, raw_sid, is_remote = _resolve_client(sid)
+            client, raw_sid, _ = _resolve_client(sid)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=503)
         result = await client.unarchive_session(session_id=raw_sid)
         if "error" in result:
             return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
-        # session_store.set_archived for the in-process unarchive — NodeOps
-        # doesn't reset the session_store flag, only the launcher's.
-        if not is_remote:
-            session_store.set_archived(sid, False)
         return web.json_response({"ok": True})
 
     # ── Message history archive ──────────────────────────────────────────
