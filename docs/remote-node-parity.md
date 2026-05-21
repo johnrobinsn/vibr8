@@ -133,6 +133,38 @@ Every panel acquires a `nodeId` from a node selector or session context. Hub app
 
 Phases 0–2 together, with no behavioral change. Foundation: `NodeOperations` defined, `NodeClient` interface in use, `routes.py` migrated to call the interface. Everything still in-process behind the scenes — but the seams are in the right place, so Phase 4 (the keystone) becomes a contained change.
 
+## Progress Log
+
+### 2026-05-20 / 2026-05-21 — initial implementation pass
+
+Landed (commits 85b020c..a9f06d0):
+
+- **Phase 0** — vibr8_core/ relocate of 15 modules (ws_bridge, ring0*, cli_launcher, session_*, env_manager, artifacts, worktree_tracker, codex/hermes/opencode adapters). Plus git_utils in 3b.
+- **Phase 1** — `NodeOperations` class + generic `getattr(self._ops, cmd)(**payload)` dispatcher in vibr8_node/node_agent.py. All 17 existing `_cmd_*` handlers collapsed.
+- **Phase 2** — `NodeClient` protocol, `LocalNodeClient` (= `NodeOperations`), `RemoteNodeClient` (tunnel via `__getattr__` generic dispatch). `resolve_node_client()` helper. Session-CRUD routes (rename/kill/relaunch/delete/archive/unarchive) migrated; `_forward_to_remote()` deleted.
+- **Phase 3a** — Per-node FS tunnel commands (list/tree/read/write/mkdir/rename/delete/home). `/api/fs/*` accepts `?nodeId=`.
+- **Phase 3b** — Per-node git tunnel commands (repo-info/branches/worktrees/fetch/pull/create_worktree/delete_worktree). `/api/git/*` accepts `?nodeId=`.
+- **Phase 3c** — Per-node Ring0 control (toggle/switch-backend/switch-model/mute-events/status). Hub UI can drive any node's Ring0.
+- **Phase 3d** — Per-node env tunnel commands (list/get/create/update/delete).
+- **Phase 3e** — Pen indicator visible in sidebar for remote sessions (controlledBy flows through list_sessions); pen release via UI works for remote sessions (POST /api/sessions/{id}/pen routes through NodeClient).
+- **Phase 3f** — Per-node artifacts (list/create/delete/read_content). Artifact bytes base64-encoded over the tunnel.
+
+Tests stayed green at 230 passing throughout. Remote forwarding requires the remote node to be running the new code; nodes started before commit 85b020c need a restart to pick up the new tunnel commands.
+
+### Deferred (originally part of Phase 3, moved to later phases)
+
+- **Per-node scheduler** (`/api/ring0/tasks/*`): each node needs its own `TaskScheduler` instance. Niche use case; defer to "Phase 6+" with the broader hub-event-forwarding design.
+- **Per-node second-screens**: pairing flow is tightly coupled to hub-side WebRTC + browser UI. Today the node's existing `hub_proxy` middleware in `vibr8_node/node_agent.py` already forwards `/api/second-screen/*` to the hub, so remote-node Ring0 can use the hub's screens. Per-node screens needs a UX redesign; revisit only if a concrete use case appears.
+- **ring0_event forwarding** (hub → active node's Ring0) and **speak** (active node → hub TTS): both belong with Phase 6 (hub-side I/O bridging) where the "active node" routing concept gets first-class treatment.
+
+### Pending phases (unchanged)
+
+- **Phase 4** [keystone]: spawn self-node subprocess, delete `LocalNodeClient`, data migration.
+- **Phase 5**: unify browser WebSocket relay through tunnel.
+- **Phase 6**: hub-side I/O bridging — STT routing to active node, NoteMode integration, TTS-text forwarding from active node, ring0_event forwarding.
+- **Phase 7**: frontend node-scoping (the UI doesn't yet pass `nodeId` for fs/git/envs/etc., so the new backend tunnel commands aren't user-visible yet).
+- **Phase 8**: cleanup + docs.
+
 ## Open Questions / Decisions Deferred
 
 - Self-node ID: `self` literal vs hostname-based. (Probably `self` for simplicity; hostname collides if multiple hubs run on same host.)
