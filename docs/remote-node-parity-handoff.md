@@ -28,7 +28,8 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 4c-1 — Migrate remaining session-state routes through NodeClient | ✅ (`routes.py` has zero direct launcher/store/worktree refs) | `9c825e3` |
 | 4c-2 — Migrate session_registry.py (webrtc/main callbacks deferred to 4c-4/Phase 6) | ✅ | `d90bcb5` |
 | 4c-3 — Extract `HubBrowserBridge` from `WsBridge` | ✅ (redundant — folded into 4c-4) | — |
-| **4c-4 — Atomic flip + `HubBrowserBridge`** (spawn self-node by default, drop in-process managers, extract browser bridge, data dir consolidation) | ⏳ KEYSTONE | — |
+| 4c-4 step 1 — `HubBrowserBridge` facade (delegates to WsBridge today; swappable later) | ✅ | `c00ca3a` |
+| **4c-4 step 2+ — Atomic flip** (spawn self-node by default, drop in-process managers, swap facade backing, data dir consolidation) | ⏳ KEYSTONE | — |
 | 4c-5 — Unify browser+CLI WS relays through tunnel | ⏳ | — |
 | 4c-6 — Restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
 | 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` and `speak` tunnel commands) | ⏳ | — |
@@ -99,6 +100,19 @@ What 4c-4 now needs to do:
 7. CLI WS endpoint repointed to the self-node (could be deferred to 4c-5).
 
 This is a sizable single PR (likely 500-1000 LOC delta across server/) and deserves its own focused session. It's the breaking change in the keystone.
+
+### Phase 4c-4 — step 1 landed (commit `c00ca3a`)
+
+`HubBrowserBridge` facade exists. Today it's `__getattr__`-delegating to `WsBridge` for everything; the explicit method list documents the hub-only surface (`broadcast_*`, `set_client_metadata`, `register_device_info`, `get_all_clients`, `get_ring0_prompt_client`, `_broadcast_to_browsers`, plus catch-all). 11 call sites in `routes.py` + 6 in `webrtc.py` migrated from `ws_bridge.foo` → `hub_browser_bridge.foo`. `WebRTCManager` gains `set_hub_browser_bridge(...)`.
+
+This is the *seam* — when Phase 4c-4 step 2 happens (the atomic flip), the swap is `HubBrowserBridge.__init__` (give it real state instead of a `WsBridge` reference), not a refactor of every caller.
+
+**Phase 4c-4 step 2+ (next session)**: do the actual flip.
+1. Make the hub run in one of two modes — default (current behavior) or self-node mode (`VIBR8_SPAWN_SELF_NODE=1`).
+2. In self-node mode: skip the `WsBridge`/`Ring0Manager`/`CliLauncher`/`SessionStore` constructors entirely; give `HubBrowserBridge` real state; spawn self-node; wait for registration; bind `local_node_ops` to `RemoteNodeClient(self_id, tunnel)`; route everything through it.
+3. Move the self-node's data dir from `~/.vibr8-self/` to `~/.vibr8/`; add a one-shot migrator if both directories have data.
+4. Once self-node mode is verified solid, drop the gate and the default path.
+5. CLI WS endpoint repointing (could be a separate 4c-5 commit).
 
 Verify the table against `git log --oneline main` — commits should be on `main` in the order above, after `7ff55c3`.
 
