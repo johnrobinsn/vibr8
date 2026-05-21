@@ -165,6 +165,30 @@ Tests stayed green at 230 passing throughout. Remote forwarding requires the rem
 - **Phase 7**: frontend node-scoping (the UI doesn't yet pass `nodeId` for fs/git/envs/etc., so the new backend tunnel commands aren't user-visible yet).
 - **Phase 8**: cleanup + docs.
 
+### 2026-05-21 — Phase 4 in flight, partial Phase 4c-1
+
+Landed (commits e192292..aafd902):
+
+- **Phase 4a** (`e192292`) — `--self-mode` flag on `vibr8_node`. Self-mode uses `~/.vibr8-self/` today (temporary; will become `~/.vibr8/` in 4c-4) and skips the hub-proxy middleware loop.
+- **Phase 4b** (`3ac81aa`) — Hub-side spawn machinery (gated by `VIBR8_SPAWN_SELF_NODE=1`). Verified live: hub waits for its own listener to bind, issues an ephemeral API key, spawns `python -m vibr8_node --self-mode` with the right scheme, receives registration callback, child establishes tunnel back.
+- **Audit + revised plan** (`6ce896d` + `8f11811`) — Recovery/handoff doc covering operational state, Phase 4c sub-phase staging, and gotchas. Audit found ~38 SESSION-STATE refs vs ~22 HUB-ONLY refs across `server/`; the largest single piece is splitting `WsBridge` into session-state vs hub-only browser/client tracking.
+- **Phase 4c-1 partial** (`5464068` + `aafd902`) — ~70% of session-state routes migrated through `NodeClient` (no behavior change). Added 8 new `NodeOperations` methods. Deleted the legacy `_resolve_session_id` helper. Remaining: `create_session`/`list_sessions` aggregator/`ring0_sessions`/worktree cleanup helpers — all defer-friendly because each is contained.
+
+Tests stayed green at 230 passing throughout. Phase 4b verification left a stale `self` node + bootstrap API key in `~/.vibr8/nodes.json` which were cleaned up; the handoff doc has the recipe.
+
+### Revised Phase 4c plan (in `docs/remote-node-parity-handoff.md`)
+
+The original "Phase 4 keystone" is too big for one commit. Re-staged into:
+
+- **4c-1**: migrate remaining session-state routes through `NodeClient` (no behavior change) ⏳ ~70%
+- **4c-2**: migrate `webrtc.py`, `session_registry.py`, `main.py` event callbacks
+- **4c-3**: extract `HubBrowserBridge` from `WsBridge` (the largest single sub-task)
+- **4c-4**: atomic flip — spawn self-node by default, drop in-process managers, data dir consolidation
+- **4c-5**: unify browser+CLI WS relays through tunnel
+- **4c-6**: restart-on-crash; delete `LocalNodeClient`
+
+4c-1/2/3 are all no-behavior-change refactors. 4c-4 is the actual breaking change, but small in code volume because the earlier sub-phases do the legwork.
+
 ## Open Questions / Decisions Deferred
 
 - Self-node ID: `self` literal vs hostname-based. (Probably `self` for simplicity; hostname collides if multiple hubs run on same host.)

@@ -25,12 +25,46 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 3f — Per-node artifacts (second-screens deferred) | ✅ | `a9f06d0` |
 | 4a — `--self-mode` flag on `vibr8_node` | ✅ | `e192292` |
 | 4b — Hub-side self-node spawn machinery (gated) | ✅ verified live | `3ac81aa` |
-| **4c — Keystone flip** (route default to self-node; delete `LocalNodeClient`; remove in-process managers from `main.py`) | ⏳ NEXT | — |
-| 5 — Unify browser WebSocket relay through tunnel | ⏳ | — |
+| 4c-1 — Migrate remaining session-state routes through NodeClient | ⏳ ~70% (batches 1+2 landed) | `aafd902` |
+| 4c-2 — Migrate webrtc.py, session_registry.py, main.py callbacks | ⏳ | — |
+| 4c-3 — Extract `HubBrowserBridge` from `WsBridge` | ⏳ | — |
+| **4c-4 — Atomic flip** (spawn self-node by default, drop in-process managers, data dir consolidation) | ⏳ KEYSTONE | — |
+| 4c-5 — Unify browser+CLI WS relays through tunnel | ⏳ | — |
+| 4c-6 — Restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
 | 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` and `speak` tunnel commands) | ⏳ | — |
 | 6b — Per-node scheduler (deferred from 3g) | ⏳ | — |
 | 7 — Frontend node-scoping | ⏳ | — |
 | 8 — Cleanup + docs | ⏳ | — |
+
+### Phase 4c-1 — what's done vs deferred
+
+**Done** (batches 1+2 in `5464068` + `aafd902`):
+- `GET /api/sessions/{id}` — via `client.get_session()`
+- `GET /api/sessions/{id}/history-archive` (+ `/dates`) — via `client.get_session_archive()` / `list_session_archive_dates()`
+- `POST /api/ring0/respond-permission` — fallback path via `client.respond_to_permission()`
+- `POST /api/ring0/interrupt` — fallback path via `client.interrupt()`
+- `POST /api/ring0/send-message` — fallback path via `client.submit_message()`
+- `POST /api/ring0/rename-session` — via `client.rename_session()`
+- `POST /api/ring0/set-session-mode` — via `client.set_permission_mode()`
+- `GET /api/ring0/get-session-mode` — via `client.get_session()`
+- `GET /api/ring0/session-output` — fallback via `get_message_history()` + `get_pending_permissions()`
+- `POST /api/ring0/switch-ui` — session resolution via NodeClient (hub broadcast stays)
+- `POST /api/sessions/{session_id}/upload` — fixed pre-existing `bridge` NameError
+- Deleted legacy `_resolve_session_id` helper from `routes.py`
+- Added `NodeOperations`: `get_session`, `get_message_history`, `get_pending_permissions`, `get_pending_permission_count`, `respond_to_permission`, `get_session_archive`, `list_session_archive_dates`, `set_archived`
+
+**Deferred to a 4c-1 batch 3** (these still touch in-process managers directly):
+- `POST /api/sessions` (`create_session`) and `POST /api/ring0/create-session` — heavy hub-orchestration: env resolution, auto-naming setup, worktree creation, computer-use agent registration. Each branch needs deliberate assignment to NodeOps vs hub-side.
+- `GET /api/sessions` (the big aggregator) — Android-node branch, computer-use-targeting branch, terminal-session injection branch each need design.
+- `GET /api/ring0/sessions` — similar to `list_sessions` aggregator.
+- `_cleanup_worktree` helper + `delete_session`/`archive_session` worktree calls — direct `worktree_tracker.*` references.
+- `nodes/all` session count enrichment — minor.
+
+**Hub-only references to ws_bridge** that stay (move to HubBrowserBridge in 4c-3, not 4c-1):
+- `ws_bridge.broadcast_name_update`, `broadcast_ring0_switch_ui`, `_broadcast_to_browsers`
+- `ws_bridge.get_ring0_prompt_client`, `set_client_metadata`, `get_all_clients`
+- `ws_bridge._build_client_list`, `_client_sessions`, `register_device_info`
+- `ws_bridge.register_computer_use_agent`, `attach_adapter`, `get_or_create_session`
 
 Verify the table against `git log --oneline main` — commits should be on `main` in the order above, after `7ff55c3`.
 
