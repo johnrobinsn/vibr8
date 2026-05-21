@@ -120,7 +120,7 @@ class NodeOperations:
 
     async def launch_with_options(
         self,
-        opts: LaunchOptions,
+        opts: LaunchOptions | dict,
         backend_type: str,
         name: str | None = None,
         worktree_mapping: dict | None = None,
@@ -131,7 +131,15 @@ class NodeOperations:
         backend, applies a name, and adds a worktree mapping (if any). The
         existing tunnel `create_session` command is the wire equivalent
         that wraps this for remote nodes.
+
+        `opts` may be either a `LaunchOptions` instance (in-process callers)
+        or a plain dict (tunnel callers — JSON-deserialized field map). The
+        method normalizes to LaunchOptions internally.
         """
+        if isinstance(opts, dict):
+            # Filter to known LaunchOptions fields and rebuild
+            known = {f.name for f in LaunchOptions.__dataclass_fields__.values()}
+            opts = LaunchOptions(**{k: v for k, v in opts.items() if k in known})
         info = self._launcher.launch(opts)
         sid = info.sessionId
         self._bridge.get_or_create_session(sid, backend_type)

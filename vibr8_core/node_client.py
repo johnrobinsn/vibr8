@@ -185,8 +185,13 @@ class RemoteNodeClient:
             raise AttributeError(name)
 
         async def _call(**kwargs: Any) -> dict:
+            import dataclasses
             payload: dict[str, Any] = {"type": name}
             for k, v in kwargs.items():
+                # Convert dataclass kwargs (e.g. LaunchOptions) to plain
+                # dicts so they survive JSON serialization on the wire.
+                if dataclasses.is_dataclass(v) and not isinstance(v, type):
+                    v = {kk: vv for kk, vv in dataclasses.asdict(v).items() if vv is not None}
                 payload[snake_to_camel(k)] = v
             return await self._tunnel.send_command(payload)
 

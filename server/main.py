@@ -905,8 +905,11 @@ def create_app() -> web.Application:
         # the self-node owns ~/.vibr8/ exclusively (hub side skips
         # restore_from_disk below). Default mode keeps ~/.vibr8-self/ so
         # Phase 4b's coexistence pattern still works.
+        # setdefault (not assignment) so a parallel test hub can override
+        # to an isolated dir like ~/.vibr8-test-self/ without colliding
+        # with a live hub's ~/.vibr8/.
         if os.environ.get("VIBR8_USE_SELF_NODE") == "1":
-            env["VIBR8_SELF_NODE_DATA_DIR"] = str(Path.home() / ".vibr8")
+            env.setdefault("VIBR8_SELF_NODE_DATA_DIR", str(Path.home() / ".vibr8"))
         cmd = [
             sys.executable, "-m", "vibr8_node",
             "--hub", hub_ws_url,
