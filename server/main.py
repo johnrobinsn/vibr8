@@ -475,18 +475,19 @@ def create_app() -> web.Application:
     launcher.set_store(session_store)
 
     # Restore persisted state — UNLESS the self-node will own ~/.vibr8/
-    # (VIBR8_USE_SELF_NODE=1). In that mode the self-node subprocess is
-    # the sole owner of the on-disk session/ring0 state; the hub's
-    # in-process managers stay empty and route through the loopback.
-    _use_self_node = os.environ.get("VIBR8_USE_SELF_NODE") == "1"
+    # (default for Option A keystone). In that mode the self-node
+    # subprocess is the sole owner of the on-disk session/ring0 state;
+    # the hub's in-process managers stay empty and route through the
+    # loopback. Set VIBR8_DISABLE_SELF_NODE=1 to fall back to the legacy
+    # in-process path.
+    _use_self_node = os.environ.get("VIBR8_DISABLE_SELF_NODE") != "1"
     if not _use_self_node:
         launcher.restore_from_disk()
         ws_bridge.restore_from_disk()
         logger.info(f"[server] Session persistence: {session_store.directory}")
     else:
         logger.info(
-            "[server] VIBR8_USE_SELF_NODE=1 — skipping hub restore_from_disk; "
-            "self-node will own %s",
+            "[server] Self-node owns %s — skipping hub restore_from_disk",
             session_store.directory,
         )
 
@@ -848,8 +849,8 @@ def create_app() -> web.Application:
             await mdns.start()
 
         # Auto-launch ring0 session if it was previously enabled — but
-        # only when the hub is the session owner. When VIBR8_USE_SELF_NODE=1
-        # the self-node handles Ring0 auto-launch itself.
+        # only when the hub is the session owner. In Option A self-node
+        # mode (default) the self-node handles Ring0 auto-launch itself.
         if ring0_manager.is_enabled and not _use_self_node:
             logger.info("[server] Ring0 was enabled — auto-launching session")
             spawn(ring0_manager.ensure_session(launcher, ws_bridge))
@@ -857,10 +858,13 @@ def create_app() -> web.Application:
         # Start scheduled task runner
         await task_scheduler.start()
 
-        # Phase 4b: optionally spawn the hub's self-node subprocess.
-        # Fire-and-forget so we don't block startup; the subprocess waits
-        # briefly for the hub's listener to bind before connecting.
-        if os.environ.get("VIBR8_SPAWN_SELF_NODE") == "1":
+        # Phase 4c-6 (Option A): self-node spawning is the default. The
+        # in-process WsBridge/Ring0Manager/CliLauncher/SessionStore exist
+        # but are dormant (no restore_from_disk, no auto-launch); the
+        # self-node owns ~/.vibr8/ and routes go through the loopback.
+        # Set VIBR8_DISABLE_SELF_NODE=1 to fall back to the legacy
+        # in-process path.
+        if os.environ.get("VIBR8_DISABLE_SELF_NODE") != "1":
             spawn(_spawn_self_node())
 
     async def _spawn_self_node() -> None:
@@ -914,15 +918,12 @@ def create_app() -> web.Application:
         hub_ws_url = f"{ws_scheme_local}://127.0.0.1:{PORT}"
 
         env = dict(os.environ)
-        # When VIBR8_USE_SELF_NODE=1 we're committed to the keystone path:
-        # the self-node owns ~/.vibr8/ exclusively (hub side skips
-        # restore_from_disk below). Default mode keeps ~/.vibr8-self/ so
-        # Phase 4b's coexistence pattern still works.
+        # Option A keystone: the self-node owns ~/.vibr8/ exclusively;
+        # the hub-side managers skip restore_from_disk above.
         # setdefault (not assignment) so a parallel test hub can override
         # to an isolated dir like ~/.vibr8-test-self/ without colliding
         # with a live hub's ~/.vibr8/.
-        if os.environ.get("VIBR8_USE_SELF_NODE") == "1":
-            env.setdefault("VIBR8_SELF_NODE_DATA_DIR", str(Path.home() / ".vibr8"))
+        env.setdefault("VIBR8_SELF_NODE_DATA_DIR", str(Path.home() / ".vibr8"))
         cmd = [
             sys.executable, "-m", "vibr8_node",
             "--hub", hub_ws_url,
@@ -975,32 +976,30 @@ def create_app() -> web.Application:
                         logger.info("[server] Self-node registered: id=%s", n.id[:8])
                     else:
                         logger.info("[server] Self-node re-registered: id=%s (attempt #%d)", n.id[:8], attempt)
-                    # Phase 4c-4 step 2b: optionally swap local_node_ops to
-                    # route everything through the loopback tunnel. Opt-in
-                    # via VIBR8_USE_SELF_NODE=1.
-                    if os.environ.get("VIBR8_USE_SELF_NODE") == "1":
-                        # Wait briefly for the node's tunnel handshake to
-                        # settle so node.tunnel is populated.
-                        for _w in range(25):
-                            await asyncio.sleep(0.2)
-                            if n.tunnel and getattr(n.tunnel, "connected", False):
-                                break
+                    # Phase 4c-6 (Option A): swap local_node_ops to route
+                    # all node operations through the loopback tunnel.
+                    # Wait briefly for the node's tunnel handshake to
+                    # settle so node.tunnel is populated.
+                    for _w in range(25):
+                        await asyncio.sleep(0.2)
                         if n.tunnel and getattr(n.tunnel, "connected", False):
-                            from vibr8_core.node_client import (
-                                RemoteNodeClient, QualifyingNodeClient,
-                            )
-                            remote = RemoteNodeClient(n.id, n.tunnel)
-                            qualified = QualifyingNodeClient(remote, n.id)
-                            local_node_ops.swap(qualified)
-                            logger.info(
-                                "[server] local_node_ops swapped → QualifyingNodeClient(RemoteNodeClient(self_id=%s))",
-                                n.id[:8],
-                            )
-                        else:
-                            logger.warning(
-                                "[server] Self-node registered but tunnel never connected; "
-                                "skipping local_node_ops swap"
-                            )
+                            break
+                    if n.tunnel and getattr(n.tunnel, "connected", False):
+                        from vibr8_core.node_client import (
+                            RemoteNodeClient, QualifyingNodeClient,
+                        )
+                        remote = RemoteNodeClient(n.id, n.tunnel)
+                        qualified = QualifyingNodeClient(remote, n.id)
+                        local_node_ops.swap(qualified)
+                        logger.info(
+                            "[server] local_node_ops swapped → QualifyingNodeClient(RemoteNodeClient(self_id=%s))",
+                            n.id[:8],
+                        )
+                    else:
+                        logger.warning(
+                            "[server] Self-node registered but tunnel never connected; "
+                            "skipping local_node_ops swap"
+                        )
                     registered = True
                     break
 
