@@ -861,23 +861,17 @@ def create_routes(
             client, raw_sid, is_remote = _resolve_client(sid)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=503)
-        if not is_remote and terminal_manager:
+        # Terminal sessions live on the hub side (TerminalManager isn't
+        # node-scoped); always clean them up regardless of session location.
+        if terminal_manager:
             terminal_manager.close(sid)
-        worktree_result = None
-        if not is_remote:
-            # Worktree cleanup is hub-orchestrated; remote nodes manage their own.
-            await launcher.kill(sid)
-            worktree_result = _cleanup_worktree(sid, worktree_tracker, force=True)
         result = await client.delete_session(session_id=raw_sid)
         if is_remote:
-            # Hub still needs to drop its proxy-session state.
+            # Hub also drops its proxy-session state for remote-prefixed sids.
             await ws_bridge.close_session(sid)
         if "error" in result:
             return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
-        if not is_remote:
-            launcher.remove_session(sid)
-            await ws_bridge.close_session(sid)
-        return web.json_response({"ok": True, "worktree": worktree_result})
+        return web.json_response(result)
 
     @routes.post("/api/sessions/{id}/archive")
     async def archive_session(request: web.Request) -> web.Response:
@@ -887,19 +881,15 @@ def create_routes(
         except Exception:
             body = {}
         try:
-            client, raw_sid, is_remote = _resolve_client(sid)
+            client, raw_sid, _ = _resolve_client(sid)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=503)
-        worktree_result = None
-        if not is_remote:
-            await launcher.kill(sid)
-            worktree_result = _cleanup_worktree(sid, worktree_tracker, force=body.get("force"))
-        result = await client.archive_session(session_id=raw_sid)
+        result = await client.archive_session(
+            session_id=raw_sid, force=body.get("force"),
+        )
         if "error" in result:
             return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
-        if not is_remote:
-            session_store.set_archived(sid, True)
-        return web.json_response({"ok": True, "worktree": worktree_result})
+        return web.json_response(result)
 
     @routes.post("/api/sessions/{id}/unarchive")
     async def unarchive_session(request: web.Request) -> web.Response:
@@ -911,6 +901,8 @@ def create_routes(
         result = await client.unarchive_session(session_id=raw_sid)
         if "error" in result:
             return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
+        # session_store.set_archived for the in-process unarchive — NodeOps
+        # doesn't reset the session_store flag, only the launcher's.
         if not is_remote:
             session_store.set_archived(sid, False)
         return web.json_response({"ok": True})
@@ -3279,35 +3271,3 @@ def create_routes(
     return routes
 
 
-def _cleanup_worktree(
-    session_id: str,
-    worktree_tracker: WorktreeTracker,
-    force: bool | None = None,
-) -> dict[str, Any] | None:
-    mapping = worktree_tracker.get_by_session(session_id)
-    if not mapping:
-        return None
-
-    if worktree_tracker.is_worktree_in_use(mapping.worktreePath, session_id):
-        worktree_tracker.remove_by_session(session_id)
-        return {"cleaned": False, "path": mapping.worktreePath}
-
-    dirty = git_utils.is_worktree_dirty(mapping.worktreePath)
-    if dirty and not force:
-        logger.info(f"[routes] Worktree {mapping.worktreePath} is dirty, not auto-removing")
-        return {"cleaned": False, "dirty": True, "path": mapping.worktreePath}
-
-    branch_to_delete = None
-    if mapping.actualBranch and mapping.actualBranch != mapping.branch:
-        branch_to_delete = mapping.actualBranch
-
-    result = git_utils.remove_worktree(
-        mapping.repoRoot,
-        mapping.worktreePath,
-        force=dirty,
-        branch_to_delete=branch_to_delete,
-    )
-    if result.get("removed"):
-        worktree_tracker.remove_by_session(session_id)
-        logger.info(f"[routes] {'Force-removed dirty' if dirty else 'Auto-removed clean'} worktree {mapping.worktreePath}")
-    return {"cleaned": result.get("removed", False), "path": mapping.worktreePath}

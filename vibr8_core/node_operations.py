@@ -44,6 +44,7 @@ class NodeOperations:
         default_backend: str = "claude",
         work_dir: str = "",
         on_sessions_changed: Optional[SessionsChangedCallback] = None,
+        worktree_tracker: Any | None = None,
     ) -> None:
         self._launcher = launcher
         self._bridge = bridge
@@ -53,6 +54,7 @@ class NodeOperations:
         self._default_backend = default_backend
         self._work_dir = work_dir
         self._on_sessions_changed = on_sessions_changed
+        self._worktree_tracker = worktree_tracker
 
     async def _notify_sessions_changed(self) -> None:
         if self._on_sessions_changed:
@@ -127,19 +129,62 @@ class NodeOperations:
 
     async def delete_session(self, session_id: str = "") -> dict:
         await self._launcher.kill(session_id)
+        worktree_result = self._cleanup_worktree(session_id, force=True)
         self._launcher.remove_session(session_id)
         await self._bridge.close_session(session_id)
         await self._notify_sessions_changed()
-        return {"ok": True}
+        return {"ok": True, "worktree": worktree_result}
 
-    async def archive_session(self, session_id: str = "") -> dict:
+    async def archive_session(self, session_id: str = "", force: bool | None = None) -> dict:
         await self._launcher.kill(session_id)
+        worktree_result = self._cleanup_worktree(session_id, force=force)
         self._launcher.set_archived(session_id, True)
+        # Mirror the legacy hub behaviour of also persisting the archived
+        # flag in the session store.
+        self._store.set_archived(session_id, True)
         await self._notify_sessions_changed()
-        return {"ok": True}
+        return {"ok": True, "worktree": worktree_result}
+
+    def _cleanup_worktree(self, session_id: str, force: bool | None = None) -> dict | None:
+        """Clean up the worktree associated with this session, if any.
+
+        Returns None if no worktree was tracked, or a dict describing what
+        happened: {cleaned: bool, path: str, dirty?: bool}.
+        """
+        if not self._worktree_tracker:
+            return None
+        from vibr8_core import git_utils
+        mapping = self._worktree_tracker.get_by_session(session_id)
+        if not mapping:
+            return None
+        if self._worktree_tracker.is_worktree_in_use(mapping.worktreePath, session_id):
+            self._worktree_tracker.remove_by_session(session_id)
+            return {"cleaned": False, "path": mapping.worktreePath}
+        dirty = git_utils.is_worktree_dirty(mapping.worktreePath)
+        if dirty and not force:
+            logger.info("[node-ops] Worktree %s is dirty, not auto-removing", mapping.worktreePath)
+            return {"cleaned": False, "dirty": True, "path": mapping.worktreePath}
+        branch_to_delete = None
+        if mapping.actualBranch and mapping.actualBranch != mapping.branch:
+            branch_to_delete = mapping.actualBranch
+        result = git_utils.remove_worktree(
+            mapping.repoRoot,
+            mapping.worktreePath,
+            force=dirty,
+            branch_to_delete=branch_to_delete,
+        )
+        if result.get("removed"):
+            self._worktree_tracker.remove_by_session(session_id)
+            logger.info(
+                "[node-ops] %s worktree %s",
+                "Force-removed dirty" if dirty else "Auto-removed clean",
+                mapping.worktreePath,
+            )
+        return {"cleaned": result.get("removed", False), "path": mapping.worktreePath}
 
     async def unarchive_session(self, session_id: str = "") -> dict:
         self._launcher.set_archived(session_id, False)
+        self._store.set_archived(session_id, False)
         await self._notify_sessions_changed()
         return {"ok": True}
 

@@ -415,6 +415,7 @@ def create_app() -> web.Application:
         bridge=ws_bridge,
         store=session_store,
         ring0=ring0_manager,
+        worktree_tracker=worktree_tracker,
         default_backend="claude",
     )
 

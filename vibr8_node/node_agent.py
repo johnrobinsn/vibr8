@@ -101,6 +101,8 @@ class NodeAgent:
             work_dir=ring0_work_dir,
             scheme="http",
         )
+        from vibr8_core.worktree_tracker import WorktreeTracker
+        self._worktree_tracker = WorktreeTracker()
 
         self._bridge.set_store(self._store)
         self._launcher.set_store(self._store)
@@ -141,6 +143,7 @@ class NodeAgent:
             desktop_webrtc=self._desktop_webrtc,
             default_backend=self.default_backend,
             work_dir=self.work_dir,
+            worktree_tracker=self._worktree_tracker,
             on_sessions_changed=_on_sessions_changed,
         )
 
@@ -472,13 +475,13 @@ class NodeAgent:
 
         # Ring0 MCP routes (reuse from server.routes)
         from server.routes import create_routes
-        from vibr8_core.worktree_tracker import WorktreeTracker
         ring0 = self._ring0
         api_routes = create_routes(
             launcher, bridge, self._store,
-            worktree_tracker=WorktreeTracker(),
+            worktree_tracker=self._worktree_tracker,
             ring0_manager=ring0,
             self_node_name=self.name,
+            local_node_ops=self._ops,
         )
         app.router.add_routes(api_routes)
 
