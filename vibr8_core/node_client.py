@@ -69,6 +69,93 @@ class SwappableNodeClient:
         return getattr(self._target, name)
 
 
+class QualifyingNodeClient:
+    """Wraps a NodeClient and qualifies session IDs at the hub boundary.
+
+    The self-node has its own raw session UUIDs (e.g. ``abc-123-...``).
+    The hub-side routing machinery (browser WS forwarding, remote-session
+    proxy in WsBridge, etc.) keys off **qualified** session IDs of the
+    form ``{node_id}:{raw_id}`` to decide whether to dispatch locally
+    or via tunnel. Without that prefix the hub would treat self-node
+    sessions as "local" and fail to forward.
+
+    This wrapper sits between ``SwappableNodeClient`` and the underlying
+    ``RemoteNodeClient`` (or ``NodeOperations``). It:
+      - **Strips** the ``{node_id}:`` prefix from any ``session_id`` kwarg
+        before forwarding, so the inner client always sees raw IDs.
+      - **Rewrites** ``sessionId`` fields in response dicts to be
+        ``{node_id}:{raw_id}``, so the frontend (and the rest of the hub)
+        sees qualified IDs.
+
+    Designed for the self-node specifically, but works for any node-id
+    prefix.
+    """
+
+    # Method names whose response dict is a single session (top-level
+    # sessionId field).
+    _SINGLE_SESSION_METHODS = {
+        "create_session", "launch_with_options", "get_session",
+        "kill_session", "relaunch_session", "delete_session",
+        "archive_session", "unarchive_session", "rename_session",
+        "set_pen", "set_permission_mode",
+    }
+
+    def __init__(self, inner: Any, node_id: str) -> None:
+        self._inner = inner
+        self._node_id = node_id
+        self._prefix = f"{node_id}:"
+
+    @property
+    def node_id(self) -> str:
+        return self._node_id
+
+    def _strip(self, sid: str) -> str:
+        if sid and sid.startswith(self._prefix):
+            return sid[len(self._prefix):]
+        return sid
+
+    def _qualify(self, sid: str) -> str:
+        if sid and ":" not in sid:
+            return f"{self._prefix}{sid}"
+        return sid
+
+    def _qualify_in_dict(self, d: dict) -> None:
+        sid = d.get("sessionId")
+        if isinstance(sid, str):
+            d["sessionId"] = self._qualify(sid)
+
+    def _qualify_response(self, name: str, result: Any) -> Any:
+        if not isinstance(result, dict):
+            return result
+        # list_sessions: {sessions: [{sessionId, ...}, ...]}
+        sessions = result.get("sessions")
+        if isinstance(sessions, list):
+            for s in sessions:
+                if isinstance(s, dict):
+                    self._qualify_in_dict(s)
+        # single-session responses (top-level sessionId)
+        if name in self._SINGLE_SESSION_METHODS or "sessionId" in result:
+            self._qualify_in_dict(result)
+        return result
+
+    def __getattr__(self, name: str) -> Callable[..., Awaitable[Any]]:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        method = getattr(self._inner, name)
+
+        async def _call(**kwargs: Any) -> Any:
+            # Strip our prefix from any session_id kwarg so the inner
+            # client (and the wire format) sees raw IDs.
+            sid = kwargs.get("session_id")
+            if isinstance(sid, str):
+                kwargs["session_id"] = self._strip(sid)
+            result = await method(**kwargs)
+            return self._qualify_response(name, result)
+
+        _call.__name__ = name
+        return _call
+
+
 class RemoteNodeUnavailable(Exception):
     """Raised when a remote node has no live tunnel to handle a request."""
 

@@ -954,11 +954,20 @@ def create_app() -> web.Application:
                         if n.tunnel and getattr(n.tunnel, "connected", False):
                             break
                     if n.tunnel and getattr(n.tunnel, "connected", False):
-                        from vibr8_core.node_client import RemoteNodeClient
+                        from vibr8_core.node_client import (
+                            RemoteNodeClient, QualifyingNodeClient,
+                        )
+                        # QualifyingNodeClient wraps the RemoteNodeClient so
+                        # sessionId fields get prefixed with {self_id}: at the
+                        # hub boundary. With prefixed IDs, the existing
+                        # browser-WS-forwarding code path in WsBridge picks
+                        # up self-node sessions automatically (it dispatches
+                        # via tunnel for anything containing `:`).
                         remote = RemoteNodeClient(n.id, n.tunnel)
-                        local_node_ops.swap(remote)
+                        qualified = QualifyingNodeClient(remote, n.id)
+                        local_node_ops.swap(qualified)
                         logger.info(
-                            "[server] local_node_ops swapped → RemoteNodeClient(self_id=%s)",
+                            "[server] local_node_ops swapped → QualifyingNodeClient(RemoteNodeClient(self_id=%s))",
                             n.id[:8],
                         )
                     else:
