@@ -27,8 +27,8 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 4b — Hub-side self-node spawn machinery (gated) | ✅ verified live | `3ac81aa` |
 | 4c-1 — Migrate remaining session-state routes through NodeClient | ✅ (`routes.py` has zero direct launcher/store/worktree refs) | `9c825e3` |
 | 4c-2 — Migrate session_registry.py (webrtc/main callbacks deferred to 4c-4/Phase 6) | ✅ | `d90bcb5` |
-| 4c-3 — Extract `HubBrowserBridge` from `WsBridge` | ⏳ | — |
-| **4c-4 — Atomic flip** (spawn self-node by default, drop in-process managers, data dir consolidation) | ⏳ KEYSTONE | — |
+| 4c-3 — Extract `HubBrowserBridge` from `WsBridge` | ✅ (redundant — folded into 4c-4) | — |
+| **4c-4 — Atomic flip + `HubBrowserBridge`** (spawn self-node by default, drop in-process managers, extract browser bridge, data dir consolidation) | ⏳ KEYSTONE | — |
 | 4c-5 — Unify browser+CLI WS relays through tunnel | ⏳ | — |
 | 4c-6 — Restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
 | 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` and `speak` tunnel commands) | ⏳ | — |
@@ -78,6 +78,27 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 - `webrtc.py` references to `ring0_manager` (voice routing) + `launcher` (Ring0 lazy-create) → Phase 6 (hub-side I/O bridging to active node).
 - `main.py` event callbacks (`on_cli_session_id`, `on_cli_relaunch_needed`, `on_first_turn_completed`, `on_codex_adapter_created`) → these fire from the hub's in-process `WsBridge`. When 4c-4 removes that bridge, the callbacks become unreachable and the wiring code can be deleted in the same commit. They're not broken now.
 - `ws_bridge.set_*()` wiring calls (`set_store`/`set_webrtc_manager`/`set_ring0_manager`/`set_node_registry`/etc.) → same story; they configure the in-process bridge which is going away.
+
+### Phase 4c-3 — re-scoped: fold into 4c-4
+
+After auditing `WsBridge` (2700 lines, ~117 methods), the planned `HubBrowserBridge` extraction is not a method-renaming exercise — it requires a real redesign of where browser-WS state lives. Specifically, `_broadcast_to_browsers(session, msg)` iterates `session.browser_sockets`, coupling session-state ownership with browser tracking.
+
+After the audit, the cleanest moment to introduce `HubBrowserBridge` is during 4c-4 itself: when the hub stops creating an in-process `WsBridge`, it simultaneously needs a *new* surface for browser-WS+client tracking. Doing the two refactors separately would mean either:
+  (a) keeping a parallel `WsBridge` on the hub purely for browser tracking (wasteful, also leaves a no-op `_sessions` field), or
+  (b) shimming `HubBrowserBridge` over the in-process `WsBridge` and then re-pointing the shim — needless intermediate state.
+
+**Plan**: Skip 4c-3 as a standalone phase. Fold the `HubBrowserBridge` introduction into 4c-4.
+
+What 4c-4 now needs to do:
+1. Always spawn the self-node (drop `VIBR8_SPAWN_SELF_NODE=1` gate).
+2. Self-node uses `~/.vibr8/` (drop `~/.vibr8-self/` temp dir; add one-shot migrator if needed).
+3. Hub stops instantiating in-process `WsBridge`/`Ring0Manager`/`CliLauncher`/`SessionStore`.
+4. Introduce `HubBrowserBridge`: owns `session_id → browser_sockets` map, `client_id → metadata`, broadcast helpers, computer-use agent registry. Receives messages forwarded from the tunnel and fans out to subscribed browsers.
+5. `local_node_ops` becomes `RemoteNodeClient(self_node_id, tunnel)`; route through it once the self-node has registered.
+6. Delete the now-unused hub-side wiring (`ws_bridge.set_*`, `ws_bridge.on_*` callbacks, `launcher.on_*` callbacks).
+7. CLI WS endpoint repointed to the self-node (could be deferred to 4c-5).
+
+This is a sizable single PR (likely 500-1000 LOC delta across server/) and deserves its own focused session. It's the breaking change in the keystone.
 
 Verify the table against `git log --oneline main` — commits should be on `main` in the order above, after `7ff55c3`.
 
