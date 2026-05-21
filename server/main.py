@@ -33,6 +33,7 @@ except ImportError:
 from vibr8_core.ring0 import Ring0Manager
 from vibr8_core.ring0_scheduler import TaskScheduler
 from vibr8_core.ring0_events import Ring0EventRouter
+from vibr8_core.node_operations import NodeOperations
 from server.node_registry import NodeRegistry
 from server.node_tunnel import NodeTunnel
 from server.session_registry import SessionRegistry
@@ -406,6 +407,17 @@ def create_app() -> web.Application:
     node_registry = NodeRegistry()
     session_registry = SessionRegistry(ws_bridge, launcher, node_registry)
 
+    # NodeOperations bound to the hub's in-process managers. This is the
+    # hub's "LocalNodeClient" until Phase 4 spawns a self-node and the hub
+    # talks to itself over a loopback tunnel.
+    local_node_ops = NodeOperations(
+        launcher=launcher,
+        bridge=ws_bridge,
+        store=session_store,
+        ring0=ring0_manager,
+        default_backend="claude",
+    )
+
     try:
         from server.android_registry import AndroidRegistry
         android_registry = AndroidRegistry()
@@ -669,7 +681,7 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/node/{node_id}", handle_node_ws)
 
     # REST API
-    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager, node_registry, session_registry)
+    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager, node_registry, session_registry, local_node_ops=local_node_ops)
     app.router.add_routes(api_routes)
 
     # Production static file serving

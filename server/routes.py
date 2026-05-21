@@ -245,29 +245,32 @@ def create_routes(
     node_registry: Any | None = None,
     session_registry: Any | None = None,
     self_node_name: str = "",
+    local_node_ops: Any | None = None,
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
 
-    async def _forward_to_remote(session_id: str, command_type: str, extra: dict | None = None) -> web.Response | None:
-        """If session_id belongs to a remote node, forward the command via tunnel.
-        Returns a Response if forwarded, or None if the session is local.
-        Strips the node prefix so the remote node receives its raw session ID."""
-        node_id = ws_bridge.get_session_node_id(session_id)
-        if not node_id or not ws_bridge._is_remote_session(session_id):
-            return None
-        if not node_registry:
-            return web.json_response({"error": "Node registry unavailable"}, status=503)
-        node = node_registry.get_node(node_id)
-        if not node or not node.tunnel or not node.tunnel.connected:
-            return web.json_response({"error": "Remote node unavailable"}, status=503)
-        raw_id = ws_bridge._raw_session_id(session_id)
-        cmd: dict[str, Any] = {"type": command_type, "sessionId": raw_id}
-        if extra:
-            cmd.update(extra)
-        result = await node.tunnel.send_command(cmd)
-        if result.get("error"):
-            return web.json_response({"error": result["error"]}, status=500)
-        return web.json_response(result)
+    def _resolve_client(session_id: str):
+        """Return (client, raw_sid, is_remote) for a (possibly prefixed) session id.
+
+        Hub-local sessions return (local_node_ops, session_id, False).
+        Remote sessions return (RemoteNodeClient, raw_sid, True).
+        Raises RemoteNodeUnavailable if the node is offline.
+        """
+        from vibr8_core.node_client import resolve_node_client
+        return resolve_node_client(
+            session_id,
+            local_ops=local_node_ops,
+            node_registry=node_registry,
+            ws_bridge=ws_bridge,
+        )
+
+    def _status_for_error(msg: str) -> int:
+        m = (msg or "").lower()
+        if "not found" in m:
+            return 404
+        if "not enabled" in m or "not available" in m:
+            return 503
+        return 500
 
     # ── Auth ─────────────────────────────────────────────────────────────
 
@@ -780,52 +783,72 @@ def create_routes(
         name = body.get("name", "").strip()
         if not name:
             return web.json_response({"error": "name is required"}, status=400)
-        remote = await _forward_to_remote(sid, "rename_session", {"name": name})
-        if remote:
-            return remote
-        if ring0_manager and ring0_manager.session_id == sid:
+        try:
+            client, raw_sid, is_remote = _resolve_client(sid)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        if not is_remote and ring0_manager and ring0_manager.session_id == sid:
             return web.json_response({"error": "Ring0 session cannot be renamed"}, status=403)
-        session_names.set_name(sid, name, unique=False)
+        result = await client.rename_session(session_id=raw_sid, name=name)
+        if "error" in result:
+            return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
         # Broadcast to all browsers so other tabs/devices see the rename
-        await ws_bridge.broadcast_name_update(sid, name, user_renamed=True)
-        return web.json_response({"ok": True, "name": name})
+        # (hub-only side effect — remote nodes broadcast independently)
+        if not is_remote:
+            await ws_bridge.broadcast_name_update(sid, name, user_renamed=True)
+        return web.json_response(result)
 
     @routes.post("/api/sessions/{id}/kill")
     async def kill_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
-        remote = await _forward_to_remote(sid, "kill_session")
-        if remote:
-            return remote
-        killed = await launcher.kill(sid)
-        if not killed:
+        try:
+            client, raw_sid, _ = _resolve_client(sid)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.kill_session(session_id=raw_sid)
+        if "error" in result:
+            return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
+        if not result.get("ok"):
             return web.json_response({"error": "Session not found or already exited"}, status=404)
         return web.json_response({"ok": True})
 
     @routes.post("/api/sessions/{id}/relaunch")
     async def relaunch_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
-        remote = await _forward_to_remote(sid, "relaunch_session")
-        if remote:
-            return remote
-        ok = await launcher.relaunch(sid)
-        if not ok:
+        try:
+            client, raw_sid, _ = _resolve_client(sid)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.relaunch_session(session_id=raw_sid)
+        if "error" in result:
+            return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
+        if not result.get("ok"):
             return web.json_response({"error": "Session not found"}, status=404)
         return web.json_response({"ok": True})
 
     @routes.delete("/api/sessions/{id}")
     async def delete_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
-        remote = await _forward_to_remote(sid, "delete_session")
-        if remote:
-            await ws_bridge.close_session(sid)
-            return remote
-        # Close terminal session if it exists
-        if terminal_manager:
+        try:
+            client, raw_sid, is_remote = _resolve_client(sid)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        if not is_remote and terminal_manager:
             terminal_manager.close(sid)
-        await launcher.kill(sid)
-        worktree_result = _cleanup_worktree(sid, worktree_tracker, force=True)
-        launcher.remove_session(sid)
-        await ws_bridge.close_session(sid)
+        worktree_result = None
+        if not is_remote:
+            # Worktree cleanup is hub-orchestrated; remote nodes manage their own.
+            await launcher.kill(sid)
+            worktree_result = _cleanup_worktree(sid, worktree_tracker, force=True)
+        result = await client.delete_session(session_id=raw_sid)
+        if is_remote:
+            # Hub still needs to drop its proxy-session state.
+            await ws_bridge.close_session(sid)
+        if "error" in result:
+            return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
+        if not is_remote:
+            launcher.remove_session(sid)
+            await ws_bridge.close_session(sid)
         return web.json_response({"ok": True, "worktree": worktree_result})
 
     @routes.post("/api/sessions/{id}/archive")
@@ -835,23 +858,33 @@ def create_routes(
             body = await request.json()
         except Exception:
             body = {}
-        remote = await _forward_to_remote(sid, "archive_session", {"force": body.get("force", False)})
-        if remote:
-            return remote
-        await launcher.kill(sid)
-        worktree_result = _cleanup_worktree(sid, worktree_tracker, force=body.get("force"))
-        launcher.set_archived(sid, True)
-        session_store.set_archived(sid, True)
+        try:
+            client, raw_sid, is_remote = _resolve_client(sid)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        worktree_result = None
+        if not is_remote:
+            await launcher.kill(sid)
+            worktree_result = _cleanup_worktree(sid, worktree_tracker, force=body.get("force"))
+        result = await client.archive_session(session_id=raw_sid)
+        if "error" in result:
+            return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
+        if not is_remote:
+            session_store.set_archived(sid, True)
         return web.json_response({"ok": True, "worktree": worktree_result})
 
     @routes.post("/api/sessions/{id}/unarchive")
     async def unarchive_session(request: web.Request) -> web.Response:
         sid = request.match_info["id"]
-        remote = await _forward_to_remote(sid, "unarchive_session")
-        if remote:
-            return remote
-        launcher.set_archived(sid, False)
-        session_store.set_archived(sid, False)
+        try:
+            client, raw_sid, is_remote = _resolve_client(sid)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.unarchive_session(session_id=raw_sid)
+        if "error" in result:
+            return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
+        if not is_remote:
+            session_store.set_archived(sid, False)
         return web.json_response({"ok": True})
 
     # ── Message history archive ──────────────────────────────────────────
