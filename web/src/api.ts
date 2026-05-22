@@ -458,11 +458,12 @@ export const api = {
   getIceServers: () =>
     get<{ iceServers: RTCIceServer[] }>("/webrtc/ice-servers"),
 
-  webrtcOffer: (clientId: string, offer: { sdp: string; type: string }, opts?: { playground?: boolean; profileId?: string; desktop?: boolean; desktopRole?: string; nodeId?: string; speakerGateName?: string; speakerGateThreshold?: number; speakerGateTseEnabled?: boolean; speakerGateTseThreshold?: number }) =>
+  webrtcOffer: (clientId: string, offer: { sdp: string; type: string }, opts?: { tabId?: string; playground?: boolean; profileId?: string; desktop?: boolean; desktopRole?: string; nodeId?: string; speakerGateName?: string; speakerGateThreshold?: number; speakerGateTseEnabled?: boolean; speakerGateTseThreshold?: number }) =>
     post<{ sdp: string; type: string }>("/webrtc/offer", {
       clientId,
       sdp: offer.sdp,
       type: offer.type,
+      ...(opts?.tabId ? { tabId: opts.tabId } : {}),
       ...(opts?.playground ? { playground: true } : {}),
       ...(opts?.profileId ? { profileId: opts.profileId } : {}),
       ...(opts?.desktop ? { desktop: true } : {}),

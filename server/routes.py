@@ -1381,6 +1381,7 @@ def create_routes(
             return web.json_response({"error": "Invalid JSON"}, status=400)
 
         client_id = body.get("clientId", "")
+        tab_id = body.get("tabId", "")
         sdp = body.get("sdp")
         sdp_type = body.get("type", "offer")
         session_id = body.get("sessionId", "")
@@ -1442,6 +1443,7 @@ def create_routes(
                 speaker_gate_threshold=speaker_gate_threshold,
                 speaker_gate_tse_enabled=speaker_gate_tse_enabled,
                 speaker_gate_tse_threshold=speaker_gate_tse_threshold,
+                tab_id=tab_id,
             )
             return web.json_response(answer)
         except Exception as e:

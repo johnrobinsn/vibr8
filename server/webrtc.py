@@ -191,29 +191,42 @@ class WebRTCManager:
 
     def __init__(self, ice_servers: list[dict] | None = None) -> None:
         self._ice_servers = ice_servers or []
-        # All dicts keyed by client_id
+        # Per-peer state — keyed by peer_key = f"{client_id}#{tab_id}"
+        # (or just client_id for callers that didn't supply a tab_id, like
+        # native devices). Lets one browser have multiple simultaneous
+        # peers (one per tab) without stepping on each other.
         self._connections: Dict[str, RTCPeerConnection] = {}
         self._stats: Dict[str, AudioStatsLogger] = {}
         self._outgoing_tracks: Dict[str, QueuedAudioTrack] = {}
         self._video_tracks: Dict[str, ScreenShareTrack] = {}
         self._screen_captures: Dict[str, ScreenCapture] = {}
         self._stt_instances: Dict[str, AsyncSTT] = {}
+        self._voice_loggers: Dict[str, VoiceLogger] = {}
+        self._input_injectors: Dict[str, InputInjector] = {}
+        # Per-client (user-level) — voice mode, playground/enrollment WS
+        # endpoints, etc. Keyed by client_id because the relevant WS
+        # endpoints (`/ws/playground/{client_id}`, etc.) and voice-mode
+        # "note" state are conceptually one-per-user.
+        self._voice_modes: Dict[str, VoiceMode] = {}
+        self._playground_ws: Dict[str, object] = {}  # client_id → WS
+        self._enrollment_ws: Dict[str, object] = {}  # client_id → enrollment WS
+        self._enrollment_listeners: Dict[str, object] = {}  # client_id → listener fn
+        # Reverse map for peer → client and forward map for client → peers
+        # so per-client iteration (broadcast TTS, barge-in across tabs) is
+        # cheap without walking the per-peer dicts.
+        self._peer_clients: Dict[str, str] = {}  # peer_key → client_id
+        self._client_peers: Dict[str, set[str]] = {}  # client_id → {peer_keys}
+        # Per-client (user-level) state — applies across all tabs.
         self._stt_muted: set[str] = set()  # client_ids with STT muted
         self._guard_enabled: Dict[str, bool] = {}
         self._tts_muted: Dict[str, bool] = {}
-        self._voice_loggers: Dict[str, VoiceLogger] = {}
-        self._voice_modes: Dict[str, VoiceMode] = {}
-        self._input_injectors: Dict[str, InputInjector] = {}
-        self._playground_ws: Dict[str, object] = {}  # client_id → WS
         self._playground_clients: set[str] = set()  # client_ids that are playground
-        self._enrollment_ws: Dict[str, object] = {}  # client_id → enrollment WS
-        self._enrollment_listeners: Dict[str, object] = {}  # client_id → listener fn
         self._client_usernames: Dict[str, str] = {}  # client_id → username
         self._client_speaker_gates: Dict[str, tuple[str, float]] = {}  # client_id → (speaker_name, threshold)
         # Shared screen capture: one per display, ref-counted across viewers
         self._shared_captures: Dict[str, ScreenCapture] = {}  # display → capture
-        self._shared_capture_refs: Dict[str, set[str]] = {}  # display → {client_ids}
-        self._desktop_viewers: set[str] = set()  # client_ids that are view-only
+        self._shared_capture_refs: Dict[str, set[str]] = {}  # display → {peer_keys}
+        self._desktop_viewers: set[str] = set()  # peer_keys that are view-only
         self._ws_bridge = None
         self._hub_browser_bridge = None  # Set by main.py; hub-only broadcasts
         self._ring0_manager = None
@@ -225,6 +238,34 @@ class WebRTCManager:
         # In legacy mode, populated from the in-process Ring0Manager.
         # Shape: {"enabled": bool, "sessionId": str | None}
         self._ring0_status_cache: dict | None = None
+
+    # ── Peer-key helpers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _peer_key(client_id: str, tab_id: str = "") -> str:
+        return f"{client_id}#{tab_id}" if tab_id else client_id
+
+    @staticmethod
+    def _client_from_peer_key(peer_key: str) -> str:
+        return peer_key.split("#", 1)[0]
+
+    def _peers_for_client(self, client_id: str) -> list[str]:
+        """List peer_keys owned by this client (one per tab)."""
+        return list(self._client_peers.get(client_id, ()))
+
+    def _register_peer(self, peer_key: str, client_id: str) -> None:
+        self._peer_clients[peer_key] = client_id
+        self._client_peers.setdefault(client_id, set()).add(peer_key)
+
+    def _unregister_peer(self, peer_key: str) -> None:
+        client_id = self._peer_clients.pop(peer_key, None)
+        if client_id is None:
+            return
+        peers = self._client_peers.get(client_id)
+        if peers:
+            peers.discard(peer_key)
+            if not peers:
+                self._client_peers.pop(client_id, None)
 
     def get_client_ice_servers(self) -> list[dict]:
         """Return ICE servers in the format the browser RTCPeerConnection expects."""
@@ -311,27 +352,32 @@ class WebRTCManager:
         return bool(self._connections)
 
     def get_outgoing_track(self, client_id: str) -> QueuedAudioTrack | None:
-        """Return the outgoing audio track for *client_id*, or None."""
-        return self._outgoing_tracks.get(client_id)
+        """Return any outgoing audio track for *client_id*, or None.
+
+        A client (browser) may have multiple peers (tabs) with audio
+        active; return the first match. Callers that need to broadcast
+        to every peer should use `_peers_for_client` directly.
+        """
+        for peer_key in self._peers_for_client(client_id):
+            track = self._outgoing_tracks.get(peer_key)
+            if track:
+                return track
+        return None
 
     def get_any_outgoing_track(self) -> tuple[str, QueuedAudioTrack] | None:
         """Return (client_id, track) for any active outgoing track, or None.
 
-        Only one WebRTC connection is active at a time, so this is used as a
-        fallback when the responding session (e.g. Ring0) doesn't own the
-        audio connection directly.
+        Fallback when the responding session (e.g. Ring0) doesn't own the
+        audio connection directly. Returns the client_id (not peer_key)
+        because callers use it for current-session lookup.
         """
-        for cid, track in self._outgoing_tracks.items():
-            return (cid, track)
+        for peer_key, track in self._outgoing_tracks.items():
+            return (self._client_from_peer_key(peer_key), track)
         return None
 
     def _resolve_track(self, client_id: str) -> QueuedAudioTrack | None:
-        """Look up the outgoing track for *client_id*, falling back to any active track.
-
-        Only one WebRTC audio connection is active at a time. When Ring0
-        responds, the track may be registered under a different client.
-        """
-        track = self._outgoing_tracks.get(client_id)
+        """Look up an outgoing track for *client_id*, falling back to any active track."""
+        track = self.get_outgoing_track(client_id)
         if not track:
             fallback = self.get_any_outgoing_track()
             if fallback:
@@ -339,13 +385,21 @@ class WebRTCManager:
         return track
 
     def barge_in(self, client_id: str) -> None:
-        """Handle barge-in: clear queued TTS audio and cancel the TTS stream."""
-        track = self._resolve_track(client_id)
-        if track:
-            track.clear_audio()
-            track.set_thinking(False)
+        """Barge-in across all of this client's peers (every tab with audio)."""
+        peers = self._peers_for_client(client_id)
+        if not peers:
+            # No peers for this client — try any active peer (e.g. Ring0 path).
+            fallback = self.get_any_outgoing_track()
+            if fallback:
+                fallback[1].clear_audio()
+                fallback[1].set_thinking(False)
+        else:
+            for peer_key in peers:
+                track = self._outgoing_tracks.get(peer_key)
+                if track:
+                    track.clear_audio()
+                    track.set_thinking(False)
         if self._ws_bridge:
-            # Cancel TTS for the client's current session
             session_id = self._current_session_for(client_id)
             if session_id:
                 self._ws_bridge.cancel_tts(session_id)
@@ -353,20 +407,21 @@ class WebRTCManager:
 
     def barge_in_any(self) -> None:
         """Barge-in on whatever WebRTC connection is active (convenience for callers without client_id)."""
-        for cid in self._connections:
-            self.barge_in(cid)
+        for peer_key in self._connections:
+            self.barge_in(self._client_from_peer_key(peer_key))
             return
 
     def set_thinking(self, client_id: str, thinking: bool) -> None:
-        """Enable or disable the thinking-tone for *client_id*."""
-        track = self._resolve_track(client_id)
-        if track:
-            track.set_thinking(thinking)
+        """Enable or disable the thinking-tone for every peer of *client_id*."""
+        for peer_key in self._peers_for_client(client_id):
+            track = self._outgoing_tracks.get(peer_key)
+            if track:
+                track.set_thinking(thinking)
 
     def set_thinking_any(self, thinking: bool) -> None:
         """Set thinking on whatever WebRTC connection is active (convenience for callers without client_id)."""
-        for cid in self._connections:
-            self.set_thinking(cid, thinking)
+        for peer_key in self._connections:
+            self.set_thinking(self._client_from_peer_key(peer_key), thinking)
             return
 
     def mute_stt(self, client_id: str) -> None:
@@ -407,31 +462,33 @@ class WebRTCManager:
     def refresh_speaker_gates(self, username: str) -> None:
         """Re-resolve per-client speaker gates after profile changes."""
         from server.speaker_fingerprints import get_speaker_entries
-        for cid, uname in self._client_usernames.items():
+        for cid, uname in list(self._client_usernames.items()):
             if uname != username:
                 continue
             gate = self._client_speaker_gates.get(cid)
             if not gate:
                 continue
-            stt = self._stt_instances.get(cid)
-            if not stt:
+            stts = [self._stt_instances[pk] for pk in self._peers_for_client(cid) if pk in self._stt_instances]
+            if not stts:
                 continue
             speaker_name = gate["speaker_name"]
             entries = get_speaker_entries(username, speaker_name)
             if entries:
-                stt.set_speaker_gate(
-                    entries,
-                    gate["threshold"],
-                    tse_enabled=gate.get("tse_enabled", False),
-                    tse_threshold=gate.get("tse_threshold", 0.35),
-                )
+                for stt in stts:
+                    stt.set_speaker_gate(
+                        entries,
+                        gate["threshold"],
+                        tse_enabled=gate.get("tse_enabled", False),
+                        tse_threshold=gate.get("tse_threshold", 0.35),
+                    )
                 logger.info(
-                    "[webrtc] client %s: speaker gate refreshed (threshold=%.3f, "
+                    "[webrtc] client %s: speaker gate refreshed on %d peer(s) (threshold=%.3f, "
                     "tse=%s, %d entries)",
-                    cid, gate["threshold"], gate.get("tse_enabled", False), len(entries),
+                    cid, len(stts), gate["threshold"], gate.get("tse_enabled", False), len(entries),
                 )
             else:
-                stt.clear_speaker_gate()
+                for stt in stts:
+                    stt.clear_speaker_gate()
                 self._client_speaker_gates.pop(cid, None)
                 logger.info("[webrtc] client %s: speaker gate cleared (profile '%s' no longer exists)", cid, speaker_name)
 
@@ -445,24 +502,28 @@ class WebRTCManager:
         tse_threshold: float = 0.35,
     ) -> bool:
         """Set or clear speaker gate for a specific client. Returns True if applied."""
-        stt = self._stt_instances.get(client_id)
-        if not stt:
+        peers = self._peers_for_client(client_id)
+        stts = [self._stt_instances[pk] for pk in peers if pk in self._stt_instances]
+        if not stts:
             return False
         if not speaker_name:
-            stt.clear_speaker_gate()
+            for stt in stts:
+                stt.clear_speaker_gate()
             self._client_speaker_gates.pop(client_id, None)
             logger.info("[webrtc] client %s: speaker gate cleared", client_id)
             return True
         from server.speaker_fingerprints import get_speaker_entries
         entries = get_speaker_entries(username, speaker_name)
         if not entries:
-            stt.clear_speaker_gate()
+            for stt in stts:
+                stt.clear_speaker_gate()
             self._client_speaker_gates.pop(client_id, None)
             logger.info("[webrtc] client %s: speaker '%s' not found, gate cleared", client_id, speaker_name)
             return False
-        stt.set_speaker_gate(
-            entries, threshold, tse_enabled=tse_enabled, tse_threshold=tse_threshold,
-        )
+        for stt in stts:
+            stt.set_speaker_gate(
+                entries, threshold, tse_enabled=tse_enabled, tse_threshold=tse_threshold,
+            )
         self._client_speaker_gates[client_id] = {
             "speaker_name": speaker_name,
             "threshold": threshold,
@@ -470,9 +531,9 @@ class WebRTCManager:
             "tse_threshold": float(tse_threshold),
         }
         logger.info(
-            "[webrtc] client %s: speaker gate set (speaker='%s', threshold=%.3f, "
+            "[webrtc] client %s: speaker gate set on %d peer(s) (speaker='%s', threshold=%.3f, "
             "tse=%s, %d entries)",
-            client_id, speaker_name, threshold, tse_enabled, len(entries),
+            client_id, len(stts), speaker_name, threshold, tse_enabled, len(entries),
         )
         return True
 
@@ -526,6 +587,7 @@ class WebRTCManager:
         speaker_gate_threshold: float = 0.45,
         speaker_gate_tse_enabled: bool = False,
         speaker_gate_tse_threshold: float = 0.35,
+        tab_id: str = "",
     ) -> dict[str, str]:
         """Process an SDP offer and return an SDP answer.
 
@@ -545,9 +607,13 @@ class WebRTCManager:
         ``"controller"`` (default) gets video + input channel,
         ``"viewer"`` gets video only (no input).
         """
-        # Tear down any pre-existing connection for this client.
-        if client_id in self._connections:
-            await self.close_connection(client_id)
+        peer_key = self._peer_key(client_id, tab_id)
+
+        # Tear down any pre-existing connection for THIS specific peer
+        # (same client_id AND tab_id). Other tabs of the same client keep
+        # their peers — that's the whole point of per-tab keying.
+        if peer_key in self._connections:
+            await self.close_peer(peer_key)
 
         if playground:
             self._playground_clients.add(client_id)
@@ -561,13 +627,14 @@ class WebRTCManager:
                 credential=srv.get("credential"),
             ))
         pc = RTCPeerConnection(RTCConfiguration(iceServers=ice_server_objs))
-        self._connections[client_id] = pc
+        self._connections[peer_key] = pc
+        self._register_peer(peer_key, client_id)
 
         @pc.on("connectionstatechange")
         async def _on_connection_state_change() -> None:
             logger.info(
-                "[webrtc] client %s connection state: %s",
-                client_id,
+                "[webrtc] peer %s connection state: %s",
+                peer_key,
                 pc.connectionState,
             )
             if pc.connectionState == "connected" and desktop:
@@ -577,27 +644,27 @@ class WebRTCManager:
                     for t in pc.getTransceivers():
                         if t.kind == "video" and hasattr(t.sender, "_send_keyframe"):
                             t.sender._send_keyframe()
-                            logger.info("[webrtc] client %s: forced desktop keyframe", client_id)
+                            logger.info("[webrtc] peer %s: forced desktop keyframe", peer_key)
                             break
                 asyncio.ensure_future(_delayed_keyframe())
             elif pc.connectionState in ("failed", "closed"):
-                await self.close_connection(client_id)
+                await self.close_peer(peer_key)
 
         # Desktop connections are video-only (no incoming audio to process).
         if not desktop:
             # Resolve voice profile → STT params
             stt_params = voice_profiles.get_stt_params(username, profile_id)
 
-            # Create STT instance for this client.
+            # Create STT instance for this peer.
             # aiortc typically delivers stereo (2-channel) audio even if source is mono.
             stt = AsyncSTT(sample_rate=48000, num_channels=2, params=stt_params)
 
             if playground:
-                stt.add_listener(self._make_playground_listener(client_id))
+                stt.add_listener(self._make_playground_listener(client_id, peer_key=peer_key))
             else:
-                stt.add_listener(self._make_stt_listener(client_id))
+                stt.add_listener(self._make_stt_listener(client_id, peer_key=peer_key))
 
-            self._stt_instances[client_id] = stt
+            self._stt_instances[peer_key] = stt
             self._client_usernames[client_id] = username
 
             # Apply per-client speaker gate if provided in the offer
@@ -608,27 +675,27 @@ class WebRTCManager:
                     tse_threshold=speaker_gate_tse_threshold,
                 )
             else:
-                logger.info("[webrtc] client %s: no speaker gate requested", client_id)
+                logger.info("[webrtc] peer %s: no speaker gate requested", peer_key)
 
             # Create voice logger for audio persistence
             vl = VoiceLogger(username, session_id or client_id)
-            self._voice_loggers[client_id] = vl
+            self._voice_loggers[peer_key] = vl
             await vl.start_recording()
 
             @pc.on("track")
             def _on_track(track: MediaStreamTrack) -> None:
                 logger.info(
-                    "[webrtc] client %s received %s track", client_id, track.kind
+                    "[webrtc] peer %s received %s track", peer_key, track.kind
                 )
                 if track.kind == "audio":
-                    stats = AudioStatsLogger(client_id, "incoming")
-                    self._stats[client_id] = stats
-                    asyncio.ensure_future(self._consume_audio(client_id, track, stats))
+                    stats = AudioStatsLogger(peer_key, "incoming")
+                    self._stats[peer_key] = stats
+                    asyncio.ensure_future(self._consume_audio(peer_key, track, stats))
 
             # Add outgoing audio track (receives TTS Opus frames via queue).
-            outgoing = QueuedAudioTrack(client_id)
+            outgoing = QueuedAudioTrack(peer_key)
             pc.addTrack(outgoing)
-            self._outgoing_tracks[client_id] = outgoing
+            self._outgoing_tracks[peer_key] = outgoing
 
         # Add outgoing video track for desktop screen sharing.
         if desktop:
@@ -636,16 +703,17 @@ class WebRTCManager:
                 display = os.environ.get("DISPLAY", ":1")
 
                 # Use shared capture: one ScreenCapture per display, ref-counted
+                # by peer_key (so two tabs viewing the same display each hold a ref).
                 if display in self._shared_captures:
                     capture = self._shared_captures[display]
-                    self._shared_capture_refs[display].add(client_id)
-                    logger.info("[webrtc] client %s: reusing shared capture for %s", client_id, display)
+                    self._shared_capture_refs[display].add(peer_key)
+                    logger.info("[webrtc] peer %s: reusing shared capture for %s", peer_key, display)
                 else:
                     capture = ScreenCapture(target_fps=30, max_height=1080)
                     await capture.start()
                     self._shared_captures[display] = capture
-                    self._shared_capture_refs[display] = {client_id}
-                    logger.info("[webrtc] client %s: created shared capture for %s", client_id, display)
+                    self._shared_capture_refs[display] = {peer_key}
+                    logger.info("[webrtc] peer %s: created shared capture for %s", peer_key, display)
 
                 video_track = ScreenShareTrack(capture)
                 pc.addTrack(video_track)
@@ -657,18 +725,18 @@ class WebRTCManager:
                         h264 = [c for c in caps.codecs if "H264" in c.mimeType]
                         if h264:
                             t.setCodecPreferences(h264)
-                            logger.info("[webrtc] client %s: H.264 preferred for desktop", client_id)
+                            logger.info("[webrtc] peer %s: H.264 preferred for desktop", peer_key)
                         break
-                self._video_tracks[client_id] = video_track
-                self._screen_captures[client_id] = capture
+                self._video_tracks[peer_key] = video_track
+                self._screen_captures[peer_key] = capture
                 logger.info(
-                    "[webrtc] client %s: desktop %s track added (%dx%d)",
-                    client_id, desktop_role, capture.capture_width, capture.capture_height,
+                    "[webrtc] peer %s: desktop %s track added (%dx%d)",
+                    peer_key, desktop_role, capture.capture_width, capture.capture_height,
                 )
 
                 if desktop_role == "viewer":
                     # Viewer: video only, no input injection
-                    self._desktop_viewers.add(client_id)
+                    self._desktop_viewers.add(peer_key)
                 else:
                     # Controller: full input channel for mouse/keyboard/clipboard
                     @pc.on("datachannel")
@@ -677,8 +745,8 @@ class WebRTCManager:
                             display, capture.native_width, capture.native_height,
                             screen_size_fn=lambda: (capture.native_width, capture.native_height),
                         )
-                        self._input_injectors[client_id] = injector
-                        logger.info("[webrtc] client %s: input channel '%s' opened", client_id, channel.label)
+                        self._input_injectors[peer_key] = injector
+                        logger.info("[webrtc] peer %s: input channel '%s' opened", peer_key, channel.label)
 
                         @channel.on("message")
                         def on_message(msg):
@@ -694,7 +762,7 @@ class WebRTCManager:
                             except Exception:
                                 pass
             except NoDisplayError as exc:
-                logger.warning("[webrtc] client %s: no display for desktop: %s", client_id, exc)
+                logger.warning("[webrtc] peer %s: no display for desktop: %s", peer_key, exc)
 
         # SDP exchange.
         offer = RTCSessionDescription(sdp=sdp, type=sdp_type)
@@ -719,8 +787,8 @@ class WebRTCManager:
                 await asyncio.wait_for(gathering_done.wait(), timeout=10.0)
             except asyncio.TimeoutError:
                 logger.warning(
-                    "[webrtc] client %s: ICE gathering timed out (state=%s)",
-                    client_id,
+                    "[webrtc] peer %s: ICE gathering timed out (state=%s)",
+                    peer_key,
                     pc.iceGatheringState,
                 )
 
@@ -741,7 +809,7 @@ class WebRTCManager:
                 return (idx, idx + len(word))
         return None
 
-    def _make_stt_listener(self, client_id: str):
+    def _make_stt_listener(self, client_id: str, peer_key: str | None = None):
         """Create an STT event listener that submits transcripts to the agent.
 
         Captures only *client_id*.  The target session is resolved dynamically
@@ -786,7 +854,7 @@ class WebRTCManager:
             if event_type == "segment_confirmed":
                 # Log individual segment audio (moved from final_transcript)
                 audio = data.get("audio")
-                voice_log = self._voice_loggers.get(client_id)
+                voice_log = self._voice_loggers.get(peer_key or client_id)
                 if voice_log and audio is not None:
                     try:
                         await voice_log.log_segment(audio, data)
@@ -1047,7 +1115,7 @@ class WebRTCManager:
 
         return _on_stt_event
 
-    def _make_playground_listener(self, client_id: str):
+    def _make_playground_listener(self, client_id: str, peer_key: str | None = None):
         """Create an STT event listener that sends events to the playground WS."""
 
         async def _on_playground_event(stt, event_type: str, data) -> None:
@@ -1083,7 +1151,7 @@ class WebRTCManager:
                 segment_id = None
                 audio = data.get("audio")
                 if audio is not None:
-                    vl = self._voice_loggers.get(client_id)
+                    vl = self._voice_loggers.get(peer_key or client_id)
                     if vl:
                         segment_id = await vl.log_segment(audio, data)
                 try:
@@ -1190,10 +1258,17 @@ class WebRTCManager:
 
         return _on_enrollment_event
 
+    def _any_stt_for_client(self, client_id: str) -> AsyncSTT | None:
+        for peer_key in self._peers_for_client(client_id):
+            stt = self._stt_instances.get(peer_key)
+            if stt:
+                return stt
+        return None
+
     def register_enrollment_ws(self, client_id: str, ws) -> None:
         """Register an enrollment WebSocket and add enrollment listener to STT."""
         self._enrollment_ws[client_id] = ws
-        stt = self._stt_instances.get(client_id)
+        stt = self._any_stt_for_client(client_id)
         if stt:
             listener = self._make_enrollment_listener(client_id)
             self._enrollment_listeners[client_id] = listener
@@ -1204,7 +1279,7 @@ class WebRTCManager:
         self._enrollment_ws.pop(client_id, None)
         listener = self._enrollment_listeners.pop(client_id, None)
         if listener:
-            stt = self._stt_instances.get(client_id)
+            stt = self._any_stt_for_client(client_id)
             if stt:
                 try:
                     stt.remove_listener(listener)
@@ -1212,10 +1287,11 @@ class WebRTCManager:
                     pass
 
     def update_stt_params(self, client_id: str, params: STTParams) -> None:
-        """Update STT params for a live client (e.g. from playground slider)."""
-        stt = self._stt_instances.get(client_id)
-        if stt:
-            stt.update_params(params)
+        """Update STT params on every peer of a client (e.g. playground slider)."""
+        for peer_key in self._peers_for_client(client_id):
+            stt = self._stt_instances.get(peer_key)
+            if stt:
+                stt.update_params(params)
 
     async def _speak_short(self, client_id: str, phrase: str) -> None:
         """Speak a short acknowledgment phrase via TTS (e.g. 'Guard on').
@@ -1294,15 +1370,17 @@ class WebRTCManager:
 
     async def _consume_audio(
         self,
-        client_id: str,
+        peer_key: str,
         track: MediaStreamTrack,
         stats: AudioStatsLogger,
     ) -> None:
         """Read frames from *track*, log stats, and feed to STT."""
-        stt = self._stt_instances.get(client_id)
+        stt = self._stt_instances.get(peer_key)
         audio_buffer: list[np.ndarray] = []
 
-        voice_log = self._voice_loggers.get(client_id)
+        voice_log = self._voice_loggers.get(peer_key)
+        # STT mute is a per-client (user-level) setting.
+        client_id = self._client_from_peer_key(peer_key)
 
         try:
             while True:
@@ -1317,12 +1395,12 @@ class WebRTCManager:
                         # Log first batch to confirm STT is receiving audio.
                         if not hasattr(self, '_stt_logged'):
                             self._stt_logged = set()
-                        if client_id not in self._stt_logged:
-                            self._stt_logged.add(client_id)
+                        if peer_key not in self._stt_logged:
+                            self._stt_logged.add(peer_key)
                             rms = float(np.sqrt(np.mean(batch.astype(np.float64)**2)))
                             logger.info(
-                                "[webrtc] First STT batch for client %s: shape=%s, rms=%.1f",
-                                client_id, batch.shape, rms,
+                                "[webrtc] First STT batch for peer %s: shape=%s, rms=%.1f",
+                                peer_key, batch.shape, rms,
                             )
                         stt.process_buffer(batch)
 
@@ -1355,14 +1433,18 @@ class WebRTCManager:
                 "[webrtc] incoming audio track ended for client %s", client_id
             )
 
-    async def close_connection(self, client_id: str) -> None:
-        """Close and remove the peer connection for *client_id*."""
-        # Flush active voice mode (deliver interrupted note)
-        mode = self._voice_modes.pop(client_id, None)
+    async def close_peer(self, peer_key: str) -> None:
+        """Close and remove a single peer connection (one tab's WebRTC)."""
+        client_id = self._peer_clients.get(peer_key, self._client_from_peer_key(peer_key))
+
+        # Voice mode is per-client. Only flush it if this was the user's
+        # last peer (otherwise other tabs still hold the mode).
+        is_last_peer = len(self._client_peers.get(client_id, set())) <= 1
+        mode = self._voice_modes.pop(client_id, None) if is_last_peer else None
         if mode and self._ws_bridge:
             result = mode.on_disconnect()
             if result:
-                logger.info("[voice-mode] client %s: flushing on disconnect", client_id)
+                logger.info("[voice-mode] peer %s: flushing on disconnect", peer_key)
                 # Prefer Ring0 via NodeClient (works in self-node mode); fall
                 # through to the active session if Ring0 is disabled.
                 delivered = False
@@ -1380,20 +1462,20 @@ class WebRTCManager:
                     if target_session:
                         await self._ws_bridge.submit_user_message(target_session, result, source_client_id=client_id)
 
-        pc = self._connections.pop(client_id, None)
-        self._stats.pop(client_id, None)
-        self._outgoing_tracks.pop(client_id, None)
-        self._video_tracks.pop(client_id, None)
-        self._input_injectors.pop(client_id, None)
-        self._desktop_viewers.discard(client_id)
-        capture = self._screen_captures.pop(client_id, None)
+        pc = self._connections.pop(peer_key, None)
+        self._stats.pop(peer_key, None)
+        self._outgoing_tracks.pop(peer_key, None)
+        self._video_tracks.pop(peer_key, None)
+        self._input_injectors.pop(peer_key, None)
+        self._desktop_viewers.discard(peer_key)
+        capture = self._screen_captures.pop(peer_key, None)
         if capture:
             # Shared capture ref-counting: only stop when last consumer disconnects
             stopped = False
             for display, cap in list(self._shared_captures.items()):
                 if cap is capture:
                     refs = self._shared_capture_refs.get(display, set())
-                    refs.discard(client_id)
+                    refs.discard(peer_key)
                     if not refs:
                         self._shared_captures.pop(display, None)
                         self._shared_capture_refs.pop(display, None)
@@ -1408,37 +1490,49 @@ class WebRTCManager:
                     await capture.stop()
                 except Exception:
                     pass
-        self._guard_enabled.pop(client_id, None)
-        self._tts_muted.pop(client_id, None)
-        self._playground_clients.discard(client_id)
-        self._enrollment_ws.pop(client_id, None)
-        self._enrollment_listeners.pop(client_id, None)
-        self._client_usernames.pop(client_id, None)
-        self._client_speaker_gates.pop(client_id, None)
-
-        # Clean up playground WS reference
-        self._playground_ws.pop(client_id, None)
+        # enrollment/playground WS are client_id-keyed; only clean on last peer.
+        if is_last_peer:
+            self._enrollment_ws.pop(client_id, None)
+            self._enrollment_listeners.pop(client_id, None)
+            self._playground_ws.pop(client_id, None)
 
         # Clean up STT.
-        stt = self._stt_instances.pop(client_id, None)
+        stt = self._stt_instances.pop(peer_key, None)
         if stt:
             stt.flush()
             stt.stop()
 
         # Clean up voice logger.
-        voice_log = self._voice_loggers.pop(client_id, None)
+        voice_log = self._voice_loggers.pop(peer_key, None)
         if voice_log:
             try:
                 await voice_log.stop_recording()
             except Exception:
                 pass
 
+        self._unregister_peer(peer_key)
+
+        # Per-client state: only clear if this was the user's LAST peer.
+        # Settings like guard/tts_muted persist across sessions of the
+        # same client (they're saved/restored by the frontend), but freeing
+        # them when no peer remains avoids dict growth.
+        if not self._client_peers.get(client_id):
+            self._guard_enabled.pop(client_id, None)
+            self._tts_muted.pop(client_id, None)
+            self._playground_clients.discard(client_id)
+            self._client_usernames.pop(client_id, None)
+            self._client_speaker_gates.pop(client_id, None)
+
         if pc is not None:
             await pc.close()
-            logger.info("[webrtc] closed connection for client %s", client_id)
+            logger.info("[webrtc] closed peer %s", peer_key)
+
+    async def close_connection(self, client_id: str) -> None:
+        """Close every peer (tab) belonging to *client_id*."""
+        for peer_key in self._peers_for_client(client_id):
+            await self.close_peer(peer_key)
 
     async def close_all(self) -> None:
         """Close every active peer connection."""
-        client_ids = list(self._connections.keys())
-        for client_id in client_ids:
-            await self.close_connection(client_id)
+        for peer_key in list(self._connections.keys()):
+            await self.close_peer(peer_key)

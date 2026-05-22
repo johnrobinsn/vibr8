@@ -122,12 +122,15 @@ export async function startWebRTC(opts?: { desktop?: boolean }): Promise<void> {
     });
   }
 
-  // Exchange SDP with the backend — clientId is the primary key
+  // Exchange SDP with the backend. Pass tabId so the server keys this
+  // peer by (clientId, tabId) — opening voice in another tab won't tear
+  // down this one.
   const gateStore = useStore.getState();
   const answer = await api.webrtcOffer(
     clientId,
     { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
     {
+      tabId: gateStore.tabId,
       ...(gateStore.activeSpeakerName ? { speakerGateName: gateStore.activeSpeakerName } : {}),
       ...(gateStore.activeSpeakerName ? { speakerGateThreshold: gateStore.speakerGateThreshold } : {}),
       ...(gateStore.activeSpeakerName ? { speakerGateTseEnabled: gateStore.speakerGateTseEnabled } : {}),
@@ -306,7 +309,7 @@ async function _connectDesktop(): Promise<void> {
   const answer = await api.webrtcOffer(
     desktopClientId,
     { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
-    { desktop: true, nodeId: useStore.getState().activeNodeId },
+    { tabId: useStore.getState().tabId, desktop: true, nodeId: useStore.getState().activeNodeId },
   );
 
   await pc.setRemoteDescription(
@@ -580,7 +583,7 @@ export async function connectDesktopViewer(viewerId: string, nodeId?: string): P
   const answer = await api.webrtcOffer(
     viewerId,
     { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
-    { desktop: true, nodeId: nodeId ?? useStore.getState().activeNodeId },
+    { tabId: useStore.getState().tabId, desktop: true, nodeId: nodeId ?? useStore.getState().activeNodeId },
   );
 
   await pc.setRemoteDescription(
@@ -938,7 +941,7 @@ export async function startPlaygroundWebRTC(profileId?: string): Promise<string>
   const answer = await api.webrtcOffer(
     playgroundClientId,
     { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
-    { playground: true, profileId },
+    { tabId: useStore.getState().tabId, playground: true, profileId },
   );
 
   await pc.setRemoteDescription(
