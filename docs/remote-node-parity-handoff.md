@@ -42,9 +42,9 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 4c-6 step 7 — Delete `LocalNodeClient` alias | ✅ | this batch |
 | 4c-6 — Restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
 | 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` tunnel command) | ✅ | `a303309` + `8574cb0` + `c51f846` |
-| 6b — Per-node scheduler (deferred from 3g) | ⏳ | — |
-| 7 — Frontend node-scoping | ⏳ | — |
-| 8 — Cleanup + docs | ⏳ | — |
+| 6b — Per-node scheduler (deferred from 3g) | ✅ | `6ba29d5` |
+| 7 — Frontend node-scoping | ⏳ foundation landed (`nodeApi` factory) | `4ff65c2` |
+| 8 — Cleanup + docs (CLAUDE.md updated) | ⏳ in progress | `bf21dca` |
 
 ### Phase 4c-1 — what's done vs deferred
 
