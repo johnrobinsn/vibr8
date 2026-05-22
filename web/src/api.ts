@@ -609,3 +609,153 @@ export const api = {
   // Admin
   restartServer: () => post("/admin/restart"),
 };
+
+
+/**
+ * Factory: build a node-scoped slice of the API. Every node-scoped
+ * endpoint (FS, git, envs, artifacts, Ring0 tasks, etc.) is reachable
+ * by appending `?nodeId=...` (or `nodeId` in the body for writes).
+ *
+ * Usage:
+ *   const remote = nodeApi("hermes-node-id-here");
+ *   const dirs = await remote.fs.listDirs("/home/jr");
+ *   const tasks = await remote.scheduler.listTasks();
+ *
+ * Pass `""` to default to the hub's local node (self-node in Option A
+ * mode, in-process managers in legacy mode).
+ */
+export function nodeApi(nodeId: string) {
+  const q = nodeId ? `&nodeId=${encodeURIComponent(nodeId)}` : "";
+  const qOnly = nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : "";
+  const withNode = (body: object) => (nodeId ? { ...body, nodeId } : body);
+
+  return {
+    fs: {
+      listDirs: (path?: string) =>
+        get<DirListResult>(
+          `/fs/list${path ? `?path=${encodeURIComponent(path)}${q}` : qOnly}`,
+        ),
+      getHome: () => get<{ home: string; cwd: string }>(`/fs/home${qOnly}`),
+      tree: (path: string) =>
+        get<{ path: string; tree: TreeNode[] }>(
+          `/fs/tree?path=${encodeURIComponent(path)}${q}`,
+        ),
+      read: (path: string) =>
+        get<{ path: string; content: string }>(
+          `/fs/read?path=${encodeURIComponent(path)}${q}`,
+        ),
+      write: (path: string, content: string) =>
+        put<{ ok: boolean; path: string }>("/fs/write", withNode({ path, content })),
+      mkdir: (path: string) =>
+        post<{ ok: boolean; path: string }>("/fs/mkdir", withNode({ path })),
+      del: (path: string) =>
+        post<{ ok: boolean }>("/fs/delete", withNode({ path })),
+      rename: (oldPath: string, newPath: string) =>
+        post<{ ok: boolean }>("/fs/rename", withNode({ oldPath, newPath })),
+      diff: (path: string) =>
+        get<{ path: string; diff: string }>(
+          `/fs/diff?path=${encodeURIComponent(path)}${q}`,
+        ),
+    },
+    git: {
+      repoInfo: (path: string) =>
+        get<GitRepoInfo>(`/git/repo-info?path=${encodeURIComponent(path)}${q}`),
+      branches: (repoRoot: string) =>
+        get<GitBranchInfo[]>(
+          `/git/branches?repoRoot=${encodeURIComponent(repoRoot)}${q}`,
+        ),
+      worktrees: (repoRoot: string) =>
+        get<GitWorktreeInfo[]>(
+          `/git/worktrees?repoRoot=${encodeURIComponent(repoRoot)}${q}`,
+        ),
+      createWorktree: (
+        repoRoot: string,
+        branch: string,
+        opts?: { baseBranch?: string; createBranch?: boolean },
+      ) => post<WorktreeCreateResult>(
+        "/git/worktree", withNode({ repoRoot, branch, ...opts }),
+      ),
+      removeWorktree: (repoRoot: string, worktreePath: string, force?: boolean) =>
+        del<{ removed: boolean; reason?: string }>(
+          "/git/worktree", withNode({ repoRoot, worktreePath, force }),
+        ),
+      fetch: (repoRoot: string) =>
+        post<{ success: boolean; output: string }>(
+          "/git/fetch", withNode({ repoRoot }),
+        ),
+      pull: (cwd: string) =>
+        post<{
+          success: boolean;
+          output: string;
+          git_ahead: number;
+          git_behind: number;
+        }>("/git/pull", withNode({ cwd })),
+    },
+    envs: {
+      list: () => get<Vibr8Env[]>(`/envs${qOnly}`),
+      get: (slug: string) =>
+        get<Vibr8Env>(`/envs/${encodeURIComponent(slug)}${qOnly}`),
+      create: (name: string, variables: Record<string, string>) =>
+        post<Vibr8Env>("/envs", withNode({ name, variables })),
+      update: (
+        slug: string,
+        data: { name?: string; variables?: Record<string, string> },
+      ) => put<Vibr8Env>(`/envs/${encodeURIComponent(slug)}`, withNode(data)),
+      del: (slug: string) =>
+        del(`/envs/${encodeURIComponent(slug)}${qOnly}`),
+    },
+    artifacts: {
+      list: (sessionId?: string) =>
+        get<Artifact[]>(
+          sessionId
+            ? `/artifacts?sessionId=${encodeURIComponent(sessionId)}${q}`
+            : `/artifacts${qOnly}`,
+        ),
+      create: (data: { title: string; type: string; content: string; sourceSessionId?: string; sourceSessionName?: string; filename?: string }) =>
+        post<Artifact>("/artifacts", withNode(data)),
+      del: (id: string) =>
+        del(`/artifacts/${encodeURIComponent(id)}${qOnly}`),
+    },
+    ring0: {
+      status: () =>
+        get<{ enabled: boolean; sessionId: string | null; model?: string; backendType?: string; eventsMuted?: boolean }>(
+          `/ring0/status${qOnly}`,
+        ),
+      toggle: (enabled: boolean, backendType?: string) =>
+        post<{ ok: boolean; enabled: boolean; sessionId?: string; backendType?: string }>(
+          "/ring0/toggle", withNode({ enabled, backendType }),
+        ),
+      switchBackend: (backendType: string) =>
+        post<{ ok: boolean; backendType: string; previous: string; changed: boolean }>(
+          "/ring0/switch-backend", withNode({ backendType }),
+        ),
+      switchModel: (model: string) =>
+        post<{ ok: boolean; model: string; previous: string }>(
+          "/ring0/switch-model", withNode({ model }),
+        ),
+      muteEvents: (muted: boolean) =>
+        post<{ ok: boolean; eventsMuted: boolean }>(
+          "/ring0/mute-events", withNode({ muted }),
+        ),
+    },
+    scheduler: {
+      listTasks: () => get<unknown[]>(`/ring0/tasks${qOnly}`),
+      createTask: (data: { name: string; prompt: string; schedule?: string; priority?: string; schedule_hour?: number; schedule_minute?: number; schedule_day?: number; project_dir?: string; model?: string; run_if_missed?: boolean }) =>
+        post("/ring0/tasks", withNode(data)),
+      updateTask: (taskId: string, updates: object) =>
+        put(`/ring0/tasks/${encodeURIComponent(taskId)}`, withNode(updates)),
+      deleteTask: (taskId: string) =>
+        del(`/ring0/tasks/${encodeURIComponent(taskId)}${qOnly}`),
+      runTask: (taskId: string) =>
+        post(`/ring0/tasks/${encodeURIComponent(taskId)}/run${qOnly}`),
+      listQueue: (status: "pending" | "reviewed" | "all" = "pending") =>
+        get<unknown[]>(
+          `/ring0/queue?status=${encodeURIComponent(status)}${q}`,
+        ),
+      getQueueItem: (resultId: string) =>
+        get(`/ring0/queue/${encodeURIComponent(resultId)}${qOnly}`),
+      reviewQueueItem: (resultId: string, action: "done" | "defer" | "delegate" | "followup") =>
+        post(`/ring0/queue/${encodeURIComponent(resultId)}/review`, withNode({ action })),
+    },
+  };
+}
