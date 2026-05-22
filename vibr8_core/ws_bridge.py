@@ -323,6 +323,15 @@ class WsBridge:
     def set_ring0_event_router(self, router: Any) -> None:
         self._ring0_event_router = router
 
+    def set_event_forwarder(self, forwarder: Any) -> None:
+        """Install a coroutine(event) that intercepts emit_ring0_event.
+
+        Used by the hub in Option A self-node mode to forward events to
+        the active node's Ring0 via local_node_ops.emit_ring0_event,
+        bypassing the hub's own (dormant) Ring0Manager + event router.
+        """
+        self._event_forwarder = forwarder
+
     def set_node_registry(self, registry: Any) -> None:
         self._node_registry = registry
 
@@ -2030,7 +2039,21 @@ class WsBridge:
         Two orthogonal knobs from the config rule:
           - send: whether to submit to Ring0 CLI as a user message
           - ui: how (or whether) the browser renders it
+
+        In Option A self-node mode, the hub's WsBridge has no Ring0 of
+        its own — the self-node owns the Ring0 CLI session. If a
+        forwarder is registered (set via ``set_event_forwarder``), the
+        event is sent there instead and this method returns early; the
+        local-Ring0 path is for legacy in-process mode.
         """
+        forwarder = getattr(self, "_event_forwarder", None)
+        if forwarder is not None:
+            try:
+                await forwarder(event)
+            except Exception:
+                logger.exception("[ws-bridge] ring0 event forwarder failed")
+            return
+
         ring0 = self._ring0_manager
         if not ring0 or not ring0.is_enabled or not ring0.session_id:
             return

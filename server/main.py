@@ -464,6 +464,19 @@ def create_app() -> web.Application:
     ws_bridge.set_node_registry(node_registry)
     ws_bridge.set_task_scheduler(task_scheduler)
     ws_bridge.set_session_registry(session_registry)
+
+    # Phase 6: in Option A self-node mode, hub-side Ring0 event emissions
+    # (user_returned, note_mode_ended, second_screen_*, task_completed)
+    # need to reach the *self-node's* Ring0 — the hub's own is dormant.
+    # Install a forwarder that pipes events through local_node_ops, which
+    # is the self-node tunnel after the swap fires.
+    if os.environ.get("VIBR8_DISABLE_SELF_NODE") != "1":
+        async def _forward_event_to_active_node(event: Any) -> None:
+            try:
+                await local_node_ops.emit_ring0_event(event_fields=dict(event.fields))
+            except Exception:
+                logger.exception("[server] failed to forward Ring0 event to self-node")
+        ws_bridge.set_event_forwarder(_forward_event_to_active_node)
     task_scheduler.set_dependencies(launcher, ws_bridge)
     if webrtc_manager:
         webrtc_manager.set_ws_bridge(ws_bridge)

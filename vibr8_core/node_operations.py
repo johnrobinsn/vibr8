@@ -385,6 +385,27 @@ class NodeOperations:
         )
         return {"ok": True}
 
+    async def emit_ring0_event(self, event_fields: dict | None = None) -> dict:
+        """Deliver a hub-side event to this node's Ring0 event router.
+
+        ``event_fields`` is the dict that lives on Ring0Event.fields
+        (must include ``type``; extra keys depend on the event type).
+        The node-side WsBridge.emit_ring0_event handles the rest: rule
+        processing through Ring0EventRouter, submission to the local
+        Ring0 CLI session if applicable, and any browser fanout.
+
+        This is the bridge that lets hub-generated events (user_returned,
+        note_mode_ended, second_screen_*, task_completed) reach the
+        active node's Ring0 in Option A mode, where the hub's own
+        Ring0Manager has stale state.
+        """
+        from vibr8_core.ring0_events import Ring0Event
+        if not event_fields:
+            return {"error": "event_fields required"}
+        event = Ring0Event(fields=event_fields)
+        await self._bridge.emit_ring0_event(event)
+        return {"ok": True}
+
     # ── Filesystem ────────────────────────────────────────────────────────
     #
     # Each method operates on this node's local filesystem. The hub forwards
