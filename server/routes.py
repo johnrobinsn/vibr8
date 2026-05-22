@@ -2918,24 +2918,22 @@ def create_routes(
 
     @routes.post("/api/nodes/{node_id}/activate")
     async def activate_node(request: web.Request) -> web.Response:
-        """Switch the active node.
+        """Switch a client's active node (Ring0-callable wrapper).
 
-        When called by Ring0 (with a clientId in the body or in the local
-        Ring0 prompt context), broadcasts ring0_switch_node so the target
-        browser flips its UI to match.
+        Resolves the target client (from body `clientId` or the current
+        Ring0 prompt context), updates that client's per-client active
+        node, and broadcasts `ring0_switch_node` so the browser's UI
+        flips to match. Per-client state is the source of truth — see
+        `POST /api/clients/{client_id}/active-node` for the direct form.
         """
         if node_registry is None:
             return web.json_response({"error": "Node registry not available"}, status=503)
         node_id = request.match_info["node_id"]
-        try:
-            node_registry.active_node_id = node_id
-        except ValueError as e:
-            return web.json_response({"error": str(e)}, status=404)
         node = node_registry.get_node(node_id)
-        name = node.name if node else node_id
-        logger.info("[nodes] Active node switched to %r (%s)", name, node_id[:8])
+        if not node:
+            return web.json_response({"error": f"Unknown node: {node_id}"}, status=404)
+        name = node.name
 
-        # Notify the relevant browser so its UI flips active-node selection.
         try:
             body = await request.json()
         except Exception:
@@ -2944,20 +2942,28 @@ def create_routes(
         if not client_id:
             client_id = hub_browser_bridge.get_ring0_prompt_client()
         if client_id:
+            hub_browser_bridge.set_client_active_node(client_id, node_id)
             await hub_browser_bridge.broadcast_ring0_switch_node(node_id, client_id=client_id)
+            logger.info("[nodes] client %s active node → %r (%s)", client_id[:8], name, node_id[:8])
+        else:
+            logger.warning("[nodes] activate %s called without a client context — no-op", node_id[:8])
 
         return web.json_response({"ok": True, "nodeId": node_id, "name": name})
 
-    @routes.get("/api/nodes/active")
-    async def get_active_node(request: web.Request) -> web.Response:
-        """Get the currently active node."""
-        if node_registry is None:
-            return web.json_response({"nodeId": "local", "name": "Local", "status": "online"})
-        node_id = node_registry.active_node_id
-        node = node_registry.get_node(node_id)
-        if not node:
-            node = node_registry.local_node
-        return web.json_response({"nodeId": node.id, "name": node.name, "status": node.status})
+    @routes.post("/api/clients/{client_id}/active-node")
+    async def set_client_active_node(request: web.Request) -> web.Response:
+        """Set the active node for a specific browser client.
+
+        Per-client (and eventually per-tab) active node replaces the
+        hub-wide `node_registry.active_node_id`. Voice routing and UI
+        operations should read from this map.
+        """
+        client_id = request.match_info["client_id"]
+        body = await request.json() if request.content_length else {}
+        node_id = (body.get("nodeId") if isinstance(body, dict) else "") or "local"
+        hub_browser_bridge.set_client_active_node(client_id, node_id)
+        logger.info("[nodes] client %s active node → %s", client_id[:8], node_id[:8] if node_id != "local" else "local")
+        return web.json_response({"ok": True, "clientId": client_id, "nodeId": node_id})
 
     @routes.post("/api/nodes/hub-name")
     async def set_hub_name(request: web.Request) -> web.Response:

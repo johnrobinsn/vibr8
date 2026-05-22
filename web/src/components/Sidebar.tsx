@@ -214,12 +214,10 @@ export function Sidebar() {
     // (e.g., when the dropdown's onChange races with a ring0_switch_node
     // broadcast that already updated the store).
     if (nodeId === useStore.getState().activeNodeId) return;
-    const changed = applyLocalNodeSwitch(nodeId);
-    if (!changed) return;
-    // User-initiated: tell the hub so voice/Ring0 routing follows.
-    api.activateNode(nodeId).catch((err) => {
-      console.warn("[sidebar] Failed to activate node:", err);
-    });
+    applyLocalNodeSwitch(nodeId);
+    // applyLocalNodeSwitch → store.setActiveNode POSTs the per-client
+    // active node to /api/clients/{id}/active-node, which is the source
+    // of truth for voice/UI routing (Phase 8).
   }
 
   // Focus edit input when entering edit mode

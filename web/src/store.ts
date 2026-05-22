@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { SessionState, PermissionRequest, ChatMessage, SdkSessionInfo, TaskItem, NodeInfo, AndroidDeviceInfo, Artifact } from "./types.js";
+import { api } from "./api.js";
 
 function getClientId(): string {
   if (typeof window === "undefined") return crypto.randomUUID();
@@ -305,7 +306,7 @@ function getInitialNotificationSound(): boolean {
   return true;
 }
 
-export const useStore = create<AppState>((set) => ({
+export const useStore = create<AppState>((set, get) => ({
   clientId: getClientId(),
   tabId: getTabId(),
   clientRole: "primary",
@@ -843,6 +844,9 @@ export const useStore = create<AppState>((set) => ({
   setActiveNode: (nodeId) => {
     persistActiveNodeId(nodeId);
     set({ activeNodeId: nodeId });
+    // Tell the backend so voice routing and per-client UI ops follow.
+    const clientId = get().clientId;
+    api.setClientActiveNode(clientId, nodeId).catch(() => {});
   },
   setAndroidDevices: (devices) => set({ androidDevices: devices }),
   clearSessionState: () => {

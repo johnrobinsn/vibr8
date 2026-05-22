@@ -540,12 +540,11 @@ export const api = {
 
   // Nodes
   listNodes: () => get<NodeInfo[]>("/nodes"),
-  activateNode: (nodeId: string) =>
-    post<{ ok: boolean; nodeId: string; name: string }>(
-      `/nodes/${encodeURIComponent(nodeId)}/activate`,
+  setClientActiveNode: (clientId: string, nodeId: string) =>
+    post<{ ok: boolean; clientId: string; nodeId: string }>(
+      `/clients/${encodeURIComponent(clientId)}/active-node`,
+      { nodeId },
     ),
-  getActiveNode: () =>
-    get<{ nodeId: string; name: string; status: string }>("/nodes/active"),
 
   // Node API keys
   generateNodeKey: (name: string) =>

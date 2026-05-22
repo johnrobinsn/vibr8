@@ -30,6 +30,11 @@ class HubBrowserBridge:
         # Today: backed by the in-process WsBridge. Phase 4c-4 will replace
         # this with the real implementation that owns its own state.
         self._ws_bridge = ws_bridge
+        # Per-client active node. Each browser client (and eventually each
+        # tab) picks its own active node; voice routing and node-scoped UI
+        # operations read this map. Replaces hub-wide
+        # `node_registry.active_node_id`.
+        self._client_active_nodes: dict[str, str] = {}
 
     # Enumerated explicitly for IDE discovery and to document the surface;
     # __getattr__ below handles anything we missed.
@@ -73,6 +78,21 @@ class HubBrowserBridge:
 
     def get_ring0_prompt_client(self) -> str:
         return self._ws_bridge.get_ring0_prompt_client()
+
+    # ── Per-client active node ───────────────────────────────────────────
+
+    def set_client_active_node(self, client_id: str, node_id: str) -> None:
+        if not client_id:
+            return
+        self._client_active_nodes[client_id] = node_id or "local"
+
+    def get_client_active_node(self, client_id: str, default: str = "local") -> str:
+        if not client_id:
+            return default
+        return self._client_active_nodes.get(client_id, default)
+
+    def clear_client_active_node(self, client_id: str) -> None:
+        self._client_active_nodes.pop(client_id, None)
 
     # ── Catch-all ────────────────────────────────────────────────────────
 

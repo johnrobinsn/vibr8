@@ -131,6 +131,7 @@ export default function App() {
   // Reflect the per-tab active node in document.title so each browser tab
   // is identifiable in the tab strip.
   const activeNodeId = useStore((s) => s.activeNodeId);
+  const clientId = useStore((s) => s.clientId);
   const nodes = useStore((s) => s.nodes);
   useEffect(() => {
     const name = activeNodeId === "local"
@@ -138,6 +139,12 @@ export default function App() {
       : nodes.find((n) => n.id === activeNodeId)?.name ?? null;
     document.title = name ? `vibr8 · ${name}` : "vibr8";
   }, [activeNodeId, nodes]);
+
+  // Sync the per-client active node to the backend so voice routing
+  // and node-scoped UI ops follow this tab's selection.
+  useEffect(() => {
+    api.setClientActiveNode(clientId, activeNodeId).catch(() => {});
+  }, [clientId, activeNodeId]);
 
   // Auto-reconnect audio if it was active before reload
   const audioReconnectedRef = useRef(false);

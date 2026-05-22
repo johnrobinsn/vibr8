@@ -431,7 +431,9 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
     }
 
     case "ring0_switch_node": {
-      // Hub initiated this — local state only, NO api.activateNode POST.
+      // Hub initiated. applyLocalNodeSwitch → store.setActiveNode posts
+      // the per-client active node back to the hub; that endpoint does
+      // not re-broadcast, so no feedback loop.
       console.log(`[ws] ring0_switch_node → applying local switch to ${(data.nodeId as string).slice(0, 8)}`);
       applyLocalNodeSwitch(data.nodeId as string);
       break;

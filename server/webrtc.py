@@ -280,6 +280,20 @@ class WebRTCManager:
             return self._ring0_manager.session_id
         return ""
 
+    def _client_active_node(self, client_id: str) -> str:
+        """Resolve the active node for a browser client.
+
+        Reads from HubBrowserBridge's per-client map (set by the
+        `/api/clients/{id}/active-node` endpoint when the user changes
+        the node selector in the UI). Falls back to "local".
+        """
+        if self._hub_browser_bridge is not None:
+            try:
+                return self._hub_browser_bridge.get_client_active_node(client_id, "local")
+            except Exception:
+                pass
+        return "local"
+
     def set_ring0_manager(self, manager) -> None:
         """Set a reference to Ring0Manager for voice routing."""
         self._ring0_manager = manager
@@ -755,11 +769,10 @@ class WebRTCManager:
                     return
                 target_sid = None
                 if self.is_ring0_enabled():
-                    if self._node_registry:
-                        active_nid = self._node_registry.active_node_id
-                        if active_nid != "local":
-                            from vibr8_core.ws_bridge import WsBridge
-                            target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
+                    active_nid = self._client_active_node(client_id)
+                    if active_nid and active_nid != "local":
+                        from vibr8_core.ws_bridge import WsBridge
+                        target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
                     if not target_sid:
                         target_sid = self.ring0_session_id()
                 if not target_sid:
@@ -792,10 +805,10 @@ class WebRTCManager:
                     logger.info("[stt] SUBMIT to model: client=%s text=%r eou=%.4f",
                                 client_id, text, data.get("eouProb", -1))
 
-                    # Check if a remote node is active — route to its Ring0 via its tunnel.
+                    # Check if a remote node is active for this client — route to its Ring0 via its tunnel.
                     if self._node_registry:
-                        active_nid = self._node_registry.active_node_id
-                        node = self._node_registry.get_node(active_nid)
+                        active_nid = self._client_active_node(client_id)
+                        node = self._node_registry.get_node(active_nid) if active_nid else None
                         if node and node.id != "local":
                             if node.tunnel and node.status == "online":
                                 logger.info("[stt] Routing to remote node %r (id=%s)", node.name, node.id[:8])
@@ -1014,12 +1027,11 @@ class WebRTCManager:
                     return
                 target_sid = None
                 if self.is_ring0_enabled():
-                    # Route preview to remote node's Ring0 if active
-                    if self._node_registry:
-                        active_nid = self._node_registry.active_node_id
-                        if active_nid != "local":
-                            from vibr8_core.ws_bridge import WsBridge
-                            target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
+                    # Route preview to this client's active node's Ring0
+                    active_nid = self._client_active_node(client_id)
+                    if active_nid and active_nid != "local":
+                        from vibr8_core.ws_bridge import WsBridge
+                        target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
                     if not target_sid:
                         target_sid = self.ring0_session_id()
                 if not target_sid:
@@ -1238,16 +1250,17 @@ class WebRTCManager:
         local_node = self._node_registry.local_node
         hub_name = local_node.name
         is_hub = name_lower in ("local", "hub") or name_lower in hub_name.lower()
+        current_nid = self._client_active_node(client_id)
         if is_hub:
-            if self._node_registry.active_node_id == local_node.id:
+            if current_nid == local_node.id or current_nid == "local":
                 asyncio.ensure_future(self._speak_short(client_id, f"Already on {hub_name}"))
                 return
-            self._node_registry.active_node_id = local_node.id
-            logger.info("[voice] Switched to local node (%s) via voice command", hub_name)
+            self._hub_browser_bridge.set_client_active_node(client_id, local_node.id)
+            logger.info("[voice] client %s switched to local node (%s) via voice command", client_id[:8], hub_name)
             asyncio.ensure_future(self._speak_short(client_id, f"Switched to {hub_name}"))
             if self._ws_bridge:
                 asyncio.ensure_future(
-                    self._hub_browser_bridge.broadcast_node_switch(local_node.id, hub_name)
+                    self._hub_browser_bridge.broadcast_ring0_switch_node(local_node.id, client_id=client_id)
                 )
             return
 
@@ -1261,19 +1274,19 @@ class WebRTCManager:
             return
 
         target = matches[0]
-        if self._node_registry.active_node_id == target.id:
+        if current_nid == target.id:
             asyncio.ensure_future(self._speak_short(client_id, f"Already on {target.name}"))
             return
         if target.status != "online":
             asyncio.ensure_future(self._speak_short(client_id, f"{target.name} is offline"))
             return
 
-        self._node_registry.active_node_id = target.id
-        logger.info("[voice] Switched to node %r (id=%s) via voice command", target.name, target.id[:8])
+        self._hub_browser_bridge.set_client_active_node(client_id, target.id)
+        logger.info("[voice] client %s switched to node %r (id=%s) via voice command", client_id[:8], target.name, target.id[:8])
         asyncio.ensure_future(self._speak_short(client_id, f"Switched to node {target.name}"))
         if self._ws_bridge:
             asyncio.ensure_future(
-                self._hub_browser_bridge.broadcast_node_switch(target.id, target.name)
+                self._hub_browser_bridge.broadcast_ring0_switch_node(target.id, client_id=client_id)
             )
 
     async def _consume_audio(
