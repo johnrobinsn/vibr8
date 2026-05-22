@@ -1,14 +1,14 @@
 """NodeClient — uniform interface for hub-side code to invoke node operations.
 
-Both the hub's in-process node (today: LocalNodeClient = NodeOperations bound
-to hub managers) and any remote node (RemoteNodeClient = tunnel transport)
-expose the same surface. Hub-side code (routes, voice routing, computer-use,
-etc.) never branches on local vs remote — it gets a NodeClient and calls
-methods on it.
+Both the hub's in-process node (NodeOperations bound to in-process managers)
+and any remote node (RemoteNodeClient = tunnel transport) expose the same
+surface. Hub-side code (routes, voice routing, computer-use, etc.) never
+branches on local vs remote — it gets a NodeClient and calls methods on it.
 
-In Phase 4 the hub will stop instantiating its own NodeOperations and instead
-talk to its own self-node over a loopback tunnel. At that point every
-NodeClient is a RemoteNodeClient.
+In Phase 4c-6 (Option A) the hub spawns a self-node subprocess at startup
+and retargets local_node_ops at it via SwappableNodeClient.swap(). After
+that swap, every NodeClient operation on the hub flows through the loopback
+tunnel.
 """
 
 from __future__ import annotations
@@ -36,11 +36,6 @@ class NodeClient(Protocol):
     async def archive_session(self, session_id: str = "") -> dict: ...
     async def unarchive_session(self, session_id: str = "") -> dict: ...
     async def rename_session(self, session_id: str = "", name: str = "") -> dict: ...
-
-
-# NodeOperations already implements the protocol structurally — it IS a
-# NodeClient when bound to in-process managers. Exporting an alias for clarity.
-LocalNodeClient = NodeOperations
 
 
 class SwappableNodeClient:

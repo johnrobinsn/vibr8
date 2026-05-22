@@ -408,10 +408,11 @@ def create_app() -> web.Application:
     task_scheduler = TaskScheduler()
     node_registry = NodeRegistry()
 
-    # NodeOperations bound to the hub's in-process managers. This is the
-    # hub's "LocalNodeClient" until Phase 4 spawns a self-node and the hub
-    # talks to itself over a loopback tunnel. Constructed before
-    # SessionRegistry so the registry can route through it.
+    # NodeOperations bound to the hub's in-process managers — the initial
+    # target for local_node_ops. After the self-node registers, the
+    # SwappableNodeClient retargets at RemoteNodeClient(self_id, tunnel)
+    # via QualifyingNodeClient. Constructed before SessionRegistry so
+    # the registry can route through it.
     _in_process_ops = NodeOperations(
         launcher=launcher,
         bridge=ws_bridge,

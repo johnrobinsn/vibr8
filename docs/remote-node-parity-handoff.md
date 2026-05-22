@@ -36,7 +36,10 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 4c-6 step 1 — Self-node restart-on-crash w/ exp backoff | ✅ verified live | `ff1b7d2` |
 | 4c-6 step 2 — Flip default to self-node mode (drop env-var gates) | ✅ verified live | `82fd425` |
 | 4c-6 step 3 — Voice transcript routing via local_node_ops | ✅ | `8428afb` |
-| **4c-6 step 4+ — Remove residual in-process refs + delete managers** (Option A choice) | ⏳ NEXT | — |
+| 4c-6 step 4 — Voice commands + disconnect-flush via local_node_ops | ✅ | `b67bab2` |
+| 4c-6 step 5 — Tests for SwappableNodeClient + QualifyingNodeClient | ✅ | `706f99c` |
+| 4c-6 step 6 — Ring0 status cache for WebRTCManager | ✅ | `36e106a` |
+| 4c-6 step 7 — Delete `LocalNodeClient` alias | ✅ | this batch |
 | 4c-6 — Restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
 | 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` and `speak` tunnel commands) | ⏳ | — |
 | 6b — Per-node scheduler (deferred from 3g) | ⏳ | — |
@@ -402,7 +405,11 @@ uv run pytest server/tests/ --ignore=server/tests/test_video_track.py
 # Imports should resolve cleanly with no side effects in the import path.
 uv run python -c "
 from vibr8_core.node_operations import NodeOperations
-from vibr8_core.node_client import NodeClient, RemoteNodeClient, LocalNodeClient, resolve_node_client
+from vibr8_core.node_client import (
+    NodeClient, RemoteNodeClient, SwappableNodeClient,
+    QualifyingNodeClient, resolve_node_client,
+)
+from vibr8_core.hub_browser_bridge import HubBrowserBridge
 from vibr8_node.node_agent import NodeAgent
 from server import main
 print('OK')
@@ -412,7 +419,7 @@ print('OK')
 uv run python -m vibr8_node --help | grep -- --self-mode
 ```
 
-Expected: 230 tests pass, all imports succeed, `--self-mode` appears in help.
+Expected: 240+ tests pass, all imports succeed, `--self-mode` appears in help.
 
 ---
 
