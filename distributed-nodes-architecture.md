@@ -274,10 +274,14 @@ WS     /ws/node/{nodeId}            # Persistent node connection
 
 **New REST endpoints for the UI (browser-facing, auth-required):**
 ```
-GET    /api/nodes                   # List nodes with status
-POST   /api/nodes/{nodeId}/activate # Switch active node
-GET    /api/nodes/active            # Get currently active node
+GET    /api/nodes                            # List nodes with status
+POST   /api/clients/{clientId}/active-node   # Set this client/tab's active node
+POST   /api/nodes/{nodeId}/activate          # Ring0-callable: set active node for the
+                                             # client identified by body.clientId
+                                             # (or the current Ring0 prompt client)
 ```
+
+Active node is **per-client (and per-tab)** — there is no hub-wide active node. The frontend persists `activeNodeId` in `sessionStorage` and POSTs to `/api/clients/{id}/active-node`. The hub stores the map in `HubBrowserBridge._client_active_nodes`. Voice routing and hub-side Ring0-event forwarding read from this map.
 
 ### 3.5 Message Routing
 

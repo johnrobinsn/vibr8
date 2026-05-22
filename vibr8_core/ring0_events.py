@@ -34,8 +34,15 @@ class Ring0Event:
 
     All event data lives in `fields` as a flat dict.  The `type` key is
     conventional but not special — match rules treat every key uniformly.
+
+    `source_client_id` is metadata used at the hub boundary to route
+    hub-originated events (voice, second-screen) to the right node's
+    Ring0 via that client's per-tab active node. It is not part of the
+    event payload itself and is dropped before the event reaches Ring0
+    rules.
     """
     fields: dict[str, Any] = field(default_factory=dict)
+    source_client_id: str | None = None
 
 
 @dataclass

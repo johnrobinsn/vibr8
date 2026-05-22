@@ -122,17 +122,6 @@ class TestNodeRegistry:
         assert registry.unregister(nid) is True
         assert registry.get_node(nid) is None
 
-    def test_unregister_active_node_reverts_to_local(self, registry):
-        raw_key, _ = registry.generate_api_key("temp-node")
-        node = registry.register("temp-node", raw_key)
-        registry.active_node_id = node.id
-        registry.unregister(node.id)
-        assert registry.active_node_id == "local"
-
-    def test_set_active_unknown_node_raises(self, registry):
-        with pytest.raises(ValueError):
-            registry.active_node_id = "nonexistent-id"
-
     def test_revoke_api_key(self, registry):
         raw_key, entry = registry.generate_api_key("revokable")
         assert registry.validate_standalone_key(raw_key) is not None

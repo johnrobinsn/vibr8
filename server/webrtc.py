@@ -879,11 +879,14 @@ class WebRTCManager:
                                     delivered = True
                                     if isinstance(mode, NoteMode):
                                         # Forwarded through ws_bridge.emit_ring0_event,
-                                        # which (Phase 6) pipes to active node's Ring0
-                                        # router via local_node_ops.emit_ring0_event.
+                                        # which routes to this client's active node's
+                                        # Ring0 via the per-client map (Phase 8).
                                         from vibr8_core.ring0_events import Ring0Event
                                         await self._ws_bridge.emit_ring0_event(
-                                            Ring0Event(fields={"type": "note_mode_ended"})
+                                            Ring0Event(
+                                                fields={"type": "note_mode_ended"},
+                                                source_client_id=client_id,
+                                            )
                                         )
                             except Exception:
                                 logger.exception("[stt] ring0_input on done failed")

@@ -43,8 +43,12 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 4c-6 — Restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
 | 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` tunnel command) | ✅ | `a303309` + `8574cb0` + `c51f846` |
 | 6b — Per-node scheduler (deferred from 3g) | ✅ | `6ba29d5` |
-| 7 — Frontend node-scoping | ⏳ foundation landed (`nodeApi` factory) | `4ff65c2` |
-| 8 — Cleanup + docs (CLAUDE.md updated) | ⏳ in progress | `bf21dca` |
+| 7a — Frontend node-scoping foundation (`nodeApi` factory, per-tab `activeNodeId`) | ✅ | `4ff65c2` |
+| 7a — Content panels (Editor/Env/Artifacts/FolderPicker) routed via `nodeApi(activeNodeId)` | ✅ | (this batch) |
+| 7b — Per-client active node on backend (HubBrowserBridge); voice routing reads it | ✅ | (this batch) |
+| 7c — HomePage + Composer use `nodeApi(activeNodeId)`; `nodeId` flows to `createSession` | ✅ | (this batch) |
+| 8 — Retire hub-wide `node_registry.active_node_id`; Ring0 events route via `event.source_client_id` → per-client active node | ✅ | (this batch) |
+| 8 deferred — `list_backends` on `NodeOperations`; `uploadToSession` over tunnel; WebRTC peer-per-tab | ⏳ | — |
 
 ### Phase 4c-1 — what's done vs deferred
 
@@ -236,6 +240,9 @@ to the active node:
   to self-node (`local_node_ops`) when active = local; routes to the
   remote node's tunnel directly (`send_fire_and_forget` with
   `emit_ring0_event`) when active is a remote node like Hermes.
+  **(superseded in Phase 8 — forwarder now reads
+  `event.source_client_id` → `hub_browser_bridge.get_client_active_node`;
+  hub-wide active node is gone.)**
 
 **TTS for remote-node Ring0 already works** via the existing
 `WsBridge.handle_remote_session_message` TTS path (line 451): when a

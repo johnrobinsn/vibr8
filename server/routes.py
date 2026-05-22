@@ -454,10 +454,13 @@ def create_routes(
                     pair_msg["deviceToken"] = device_token
                 await ws.send_str(json.dumps(pair_msg))
             from vibr8_core.ring0_events import Ring0Event
-            await ws_bridge.emit_ring0_event(Ring0Event(fields={
-                "type": "second_screen_paired",
-                "clientId": client_id[:8], "user": username,
-            }))
+            await ws_bridge.emit_ring0_event(Ring0Event(
+                fields={
+                    "type": "second_screen_paired",
+                    "clientId": client_id[:8], "user": username,
+                },
+                source_client_id=client_id,
+            ))
             logger.info("[pairing] Paired second-screen %s → user=%s", client_id[:8], username)
         else:
             logger.info("[pairing] Paired native device '%s' → user=%s", name, username)
@@ -2753,10 +2756,13 @@ def create_routes(
                 pair_msg["deviceToken"] = device_token
             await ws.send_str(json.dumps(pair_msg))
         from vibr8_core.ring0_events import Ring0Event
-        await ws_bridge.emit_ring0_event(Ring0Event(fields={
-            "type": "second_screen_paired",
-            "clientId": client_id[:8], "user": username,
-        }))
+        await ws_bridge.emit_ring0_event(Ring0Event(
+            fields={
+                "type": "second_screen_paired",
+                "clientId": client_id[:8], "user": username,
+            },
+            source_client_id=client_id,
+        ))
         logger.info(f"[second-screen] Paired {client_id[:8]} → user={username}")
         return web.json_response({"ok": True, "secondScreenClientId": client_id})
 
@@ -2812,6 +2818,7 @@ def create_routes(
             from vibr8_core.ring0_events import Ring0Event
             await ws_bridge.emit_ring0_event(Ring0Event(
                 fields={"type": "second_screen_unpaired", "clientId": client_id[:8]},
+                source_client_id=client_id,
             ))
 
             logger.info(f"[second-screen] Unpaired {client_id[:8]}")
@@ -2857,6 +2864,7 @@ def create_routes(
         action = "enabled" if enabled else "disabled"
         await ws_bridge.emit_ring0_event(Ring0Event(
             fields={"type": f"second_screen_{action}", "clientId": client_id[:8]},
+            source_client_id=client_id,
         ))
 
         logger.info(f"[second-screen] {'Enabled' if enabled else 'Disabled'} {client_id[:8]}")

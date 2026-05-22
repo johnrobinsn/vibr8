@@ -466,17 +466,19 @@ def create_app() -> web.Application:
     ws_bridge.set_task_scheduler(task_scheduler)
     ws_bridge.set_session_registry(session_registry)
 
-    # Phase 6: in Option A self-node mode, hub-side Ring0 event emissions
-    # (user_returned, note_mode_ended, second_screen_*, task_completed)
-    # need to reach the *active node's* Ring0 — the hub's own is dormant.
-    # The active node is whichever node the user has selected (defaults
-    # to "local" = self-node; can be a remote like Hermes after
-    # "vibr8 node hermes" voice command).
+    # Phase 6/8: in Option A self-node mode, hub-side Ring0 event emissions
+    # (note_mode_ended, second_screen_*, etc.) need to reach the *event
+    # source's active node* Ring0 — the hub's own is dormant. Source is
+    # resolved per-event via `event.source_client_id` →
+    # `hub_browser_bridge.get_client_active_node(client_id)`. Events
+    # without a source client fall back to the self-node (Phase 8 replaces
+    # the hub-wide `node_registry.active_node_id` with this per-client map).
     if os.environ.get("VIBR8_DISABLE_SELF_NODE") != "1":
         async def _forward_event_to_active_node(event) -> None:
             try:
-                active_nid = (
-                    node_registry.active_node_id if node_registry else "local"
+                source_cid = getattr(event, "source_client_id", None) or ""
+                active_nid = hub_browser_bridge.get_client_active_node(
+                    source_cid, default="local",
                 )
                 if not active_nid or active_nid == "local":
                     # Self-node — go through local_node_ops (which targets
@@ -486,7 +488,7 @@ def create_app() -> web.Application:
                     )
                     return
                 # Remote node — forward via its tunnel directly.
-                node = node_registry.get_node(active_nid)
+                node = node_registry.get_node(active_nid) if node_registry else None
                 if node and node.tunnel and getattr(node.tunnel, "connected", False):
                     await node.tunnel.send_fire_and_forget({
                         "type": "emit_ring0_event",
@@ -494,9 +496,12 @@ def create_app() -> web.Application:
                     })
                 else:
                     logger.warning(
-                        "[server] Active node %s not routable for Ring0 event %s",
+                        "[server] Active node %s not routable for Ring0 event %s — falling back to self-node",
                         active_nid[:8] if active_nid else "?",
                         event.fields.get("type", "?"),
+                    )
+                    await local_node_ops.emit_ring0_event(
+                        event_fields=dict(event.fields),
                     )
             except Exception:
                 logger.exception("[server] failed to forward Ring0 event")

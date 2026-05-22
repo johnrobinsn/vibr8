@@ -90,9 +90,11 @@ Every vibr8 instance is a "node" — including the hub-host. The hub spawns its 
 
 **Ring0 on nodes**: Each node runs its own Ring0 instance locally, auto-launched on startup if enabled. The hub-host's self-node runs Ring0 just like any other node.
 
-**Voice routing**: Voice transcripts route to the active node's Ring0 via `local_node_ops.ring0_input` (which targets the self-node by default, or a remote node after `vibr8 node {name}` voice command).
+**Active node (per-client)**: Each browser client (and each browser tab — `tabId` in sessionStorage) picks its own active node. The frontend persists it in `sessionStorage["vibr8_active_node_id"]` and POSTs to `/api/clients/{client_id}/active-node` whenever it changes. The hub holds the map in `HubBrowserBridge._client_active_nodes`. There is no hub-wide active node.
 
-**Hub-side events**: `user_returned`, `note_mode_ended`, `second_screen_*`, `task_completed` etc. are emitted on the hub but forwarded to the active node's Ring0 event router via `local_node_ops.emit_ring0_event` (or that node's tunnel directly when the active node is remote).
+**Voice routing**: Voice transcripts route to the originating WebRTC client's per-client active node. `server/webrtc.py` resolves the target via `HubBrowserBridge.get_client_active_node(client_id)` (falls back to the self-node). Remote-node targets go via that node's tunnel; the self-node goes through `local_node_ops.ring0_input`.
+
+**Hub-side events**: `note_mode_ended`, `second_screen_*` etc. are emitted on the hub and forwarded to the source client's active node's Ring0. Callers populate `Ring0Event.source_client_id`; the forwarder in `server/main.py` calls `HubBrowserBridge.get_client_active_node(source_client_id)` and routes via `local_node_ops.emit_ring0_event` (self-node) or the remote tunnel directly. Events without a source client fall back to the self-node. Session-bound events (`user_returned`, `task_completed`, scheduler `task_due`) fire on the *node-side* WsBridge and reach that node's own Ring0 without going through the forwarder.
 
 **Key files**: `server/main.py` (self-node spawn + swap), `vibr8_core/node_client.py` (SwappableNodeClient + QualifyingNodeClient), `vibr8_core/node_operations.py` (canonical per-node ops), `vibr8_node/node_agent.py`, `server/node_tunnel.py`, `server/node_registry.py`, `install-node.sh`, `Dockerfile.node*`
 
@@ -138,9 +140,9 @@ Guard word **"vibr8"** (or **"vibrate"**) triggers commands only when followed b
 
 **Note mode** (`vibr8 note`): Accumulates speech silently, mutes Ring0 TTS. Only `vibr8 done` exits. On exit, submits `[voice note]` and sends `[note_mode ended]` to Ring0. Pre-text before "vibr8 done" is added as a final fragment.
 
-**Node switching** (`vibr8 node {name}`): Switches the active node for Ring0 routing. Matches node name from the registry.
+**Node switching** (`vibr8 node {name}`): Switches **this voice client's** active node for Ring0 routing. Updates `HubBrowserBridge._client_active_nodes[client_id]` and broadcasts `ring0_switch_node` to that client so its UI flips. Other browser clients/tabs are unaffected. Matches node name from the registry.
 
-**Ring0 routing:** When Ring0 is enabled, all voice input routes to Ring0 instead of the active session. If a remote node is the active node, voice transcripts are forwarded to that node's Ring0 via the `ring0_input` tunnel command. Falls back to local Ring0 if no remote node is active or the node is offline.
+**Ring0 routing:** When Ring0 is enabled, all voice input routes to Ring0 instead of the active session. The target node is the originating client's per-client active node. If that's a remote node, voice transcripts are forwarded via its `ring0_input` tunnel command; if it's the self-node, they go via `local_node_ops.ring0_input`. Falls back to the self-node if the per-client choice is unset or the chosen remote is offline.
 
 See `README.md` for full voice command documentation.
 

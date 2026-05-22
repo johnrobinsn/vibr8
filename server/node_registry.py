@@ -121,7 +121,6 @@ class NodeRegistry:
     def __init__(self) -> None:
         self._nodes: dict[str, RegisteredNode] = {}  # node_id → node
         self._api_keys: dict[str, ApiKeyEntry] = {}  # key_id → entry
-        self._active_node_id: str = self.LOCAL_NODE_ID
         self._hub_name: str = platform.node() or "Local"
         self._load()
         # Ensure the local node always has an entry
@@ -154,17 +153,6 @@ class NodeRegistry:
     def hub_name(self, name: str) -> None:
         self._hub_name = name.strip() or platform.node() or "Local"
         self.local_node.name = self._hub_name
-        self._save()
-
-    @property
-    def active_node_id(self) -> str:
-        return self._active_node_id
-
-    @active_node_id.setter
-    def active_node_id(self, node_id: str) -> None:
-        if node_id not in self._nodes:
-            raise ValueError(f"Unknown node: {node_id}")
-        self._active_node_id = node_id
         self._save()
 
     def register(
@@ -213,9 +201,6 @@ class NodeRegistry:
         node = self._nodes.pop(node_id, None)
         if not node:
             return False
-        # If this was the active node, revert to local
-        if self._active_node_id == node_id:
-            self._active_node_id = self.LOCAL_NODE_ID
         self._save()
         logger.info("[nodes] Unregistered node %r (id=%s)", node.name, node_id[:8])
         return True
@@ -359,7 +344,6 @@ class NodeRegistry:
             for node_data in data.get("nodes", {}).values():
                 node = RegisteredNode.from_dict(node_data)
                 self._nodes[node.id] = node
-            self._active_node_id = data.get("activeNodeId", self.LOCAL_NODE_ID)
             if data.get("hubName"):
                 self._hub_name = data["hubName"]
             for key_data in data.get("apiKeys", {}).values():
@@ -375,7 +359,6 @@ class NodeRegistry:
         data = {
             "nodes": {nid: n.to_dict() for nid, n in self._nodes.items() if nid != self.LOCAL_NODE_ID},
             "apiKeys": {kid: k.to_dict() for kid, k in self._api_keys.items()},
-            "activeNodeId": self._active_node_id,
             "hubName": self._hub_name,
         }
         NODES_FILE.write_text(json.dumps(data, indent=2))
