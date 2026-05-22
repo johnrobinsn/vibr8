@@ -25,26 +25,36 @@ Frontend typecheck: `cd web && bun run typecheck`
 
 ## Architecture
 
-### Backend (`server/`)
+The codebase is split into three Python packages:
 
-Python 3.11+, aiohttp, asyncio-heavy. Key modules:
+- **`vibr8_core/`** — Shared node-scoped modules. Both the hub's self-node subprocess and every remote node import from here. The single canonical implementation of every node operation lives here.
+- **`server/`** — Hub-only modules. Browser WebSockets, WebRTC, STT/TTS, node registry, tunnel server, auth.
+- **`vibr8_node/`** — Node agent process. Connects to the hub via tunnel; on startup, the hub spawns its own as the "self-node" (via `--self-mode`).
 
-- **`main.py`** — App factory, startup/shutdown hooks, serves built frontend in production
-- **`ws_bridge.py`** — Central message router: Claude Code CLI ↔ browser WebSocket. NDJSON protocol. Two WS endpoints: `/ws/cli/{session_id}` and `/ws/browser/{session_id}`
-- **`cli_launcher.py`** — Spawns/manages Claude Code CLI subprocesses per session. Auto-relaunches when browser reconnects to an offline session
-- **`routes.py`** — 40+ REST endpoints under `/api/` for sessions, git, filesystem, environments, usage limits, WebRTC signaling
-- **`webrtc.py`** — WebRTC peer connections with bidirectional audio (aiortc)
-- **`stt.py`** — Speech-to-text via Whisper + Silero VAD, with prompt accumulation (multi-segment utterances)
-- **`tts.py`** — Text-to-speech via OpenAI API
-- **`audio_track.py`** — `QueuedAudioTrack` for outgoing TTS frames (48kHz, 20ms/frame)
-- **`session_store.py`** / **`session_types.py`** — Session persistence and TypedDict message types
-- **`node_tunnel.py`** — Bidirectional NDJSON command channel over WebSocket between hub and remote nodes
-- **`node_registry.py`** — Remote node registration, status tracking, persistence (`~/.vibr8/nodes.json`)
-- **`computer_use_agent.py`** — `ComputerUseAgent` protocol (interface for desktop/Android agents)
-- **`ui_tars_agent.py`** — UI-TARS VLM agent: Act mode (goal-directed actions) and Watch mode (periodic observation)
-- **`ui_tars_actions.py`** — Action parsing (model output → `ParsedAction`) and execution (device-agnostic)
-- **`desktop_target.py`** — WebRTC peer that receives desktop video and sends input events (used by computer-use agent)
-- **`vlm.py`** — VLM model loading (UI-TARS-7B-DPO, Qwen2-VL, BitsAndBytes int4 quantization)
+### `vibr8_core/` — shared node code
+
+- **`node_operations.py`** — `NodeOperations`: single canonical implementation of every per-node action (sessions, FS, git, envs, artifacts, Ring0 control, scheduler, ring0_events). Both hub and node import this. Methods are tunnel-callable; the node-side dispatcher routes `_cmd_*` → `NodeOperations.method` via generic `getattr`.
+- **`node_client.py`** — `NodeClient` protocol + `RemoteNodeClient` (tunnel via `__getattr__` generic dispatch) + `SwappableNodeClient` + `QualifyingNodeClient` (rewrites sessionId at the hub boundary so self-node sessions appear as remote-prefixed IDs).
+- **`hub_browser_bridge.py`** — `HubBrowserBridge`: hub-only browser/client tracking + broadcasts. Today delegates to `WsBridge` via `__getattr__`; designed so its backing can be swapped during a future code-purity refactor.
+- **`ws_bridge.py`** — Per-node session router: sessions dict, pen system, message routing CLI↔browser, Ring0 event emission. On the hub it operates in proxy-only mode (browser-tracking + tunneled session forwarding). On the node it owns real session state.
+- **`ring0.py`**, **`ring0_events.py`**, **`ring0_scheduler.py`**, **`ring0_mcp.py`** — Ring0 manager + event router + scheduler + MCP server (all per-node).
+- **`cli_launcher.py`** — Spawns/manages Claude/Codex/OpenCode/Hermes CLI subprocesses.
+- **`session_store.py`**, **`session_types.py`**, **`session_names.py`** — Session persistence and shared TypedDicts.
+- **`env_manager.py`**, **`artifacts.py`**, **`worktree_tracker.py`**, **`git_utils.py`** — Per-node resource managers.
+- **`{codex,hermes,opencode}_adapter.py`** — Backend ACP/JSON-RPC adapters used by `CliLauncher`.
+
+### `server/` — hub-only modules
+
+- **`main.py`** — App factory, startup/shutdown hooks, **spawns the self-node subprocess** at boot, swaps `local_node_ops` to point at the loopback tunnel once registered, restart-on-crash for the self-node.
+- **`routes.py`** — REST API. Handlers are manager-free: they resolve a `NodeClient` via `_resolve_client(session_id)` or `_resolve_node_client(node_id)` and call the same `NodeClient` methods regardless of whether the target is hub-self or remote.
+- **`webrtc.py`** — WebRTC peer connections, audio I/O. Voice routing forwards transcripts to the active node via `local_node_ops.ring0_input`. Ring0 status cached from periodic `local_node_ops.ring0_status()` calls.
+- **`stt.py`** — Speech-to-text via Whisper + Silero VAD, with prompt accumulation.
+- **`tts.py`** — Text-to-speech via OpenAI API.
+- **`audio_track.py`** — `QueuedAudioTrack` for outgoing TTS frames (48kHz, 20ms/frame).
+- **`node_tunnel.py`** — Hub-side WebSocket tunnel server. NDJSON with request/response correlation.
+- **`node_registry.py`** — Remote node registration, status tracking, persistence (`~/.vibr8/nodes.json`).
+- **`session_registry.py`** — Qualified ↔ raw session ID mapping; `LocalSessionRouter` (wraps `NodeOperations`) + `TunneledSessionRouter` (wraps a remote node's tunnel).
+- **`computer_use_agent.py`**, **`ui_tars_agent.py`**, **`ui_tars_actions.py`**, **`desktop_target.py`**, **`vlm.py`** — Computer-use VLM and its targets (VLM stays hub-side because the GPU is here).
 
 ### Frontend (`web/src/`)
 
@@ -58,25 +68,33 @@ React 19, TypeScript, Vite, Tailwind CSS 4, Zustand for state.
 
 ### Communication Flow
 
-Browser ↔ (WebSocket NDJSON) ↔ `WsBridge` ↔ (WebSocket NDJSON) ↔ Claude Code CLI subprocess
+```
+Browser ↔ WS NDJSON ↔ Hub WsBridge (proxy) ↔ tunnel NDJSON ↔ Self-node WsBridge ↔ WS NDJSON ↔ CLI subprocess
+```
 
-The WebSocket protocol is reverse-engineered and documented in `WEBSOCKET_PROTOCOL_REVERSED.md`.
+The hub spawns its own `vibr8_node` subprocess at startup (the **self-node**). All node-scoped operations flow through the loopback tunnel, including operations on the hub-host's "local" sessions. The hub itself owns no session state — only browser WebSockets, WebRTC, and auth.
 
-### Remote Nodes
+Set `VIBR8_DISABLE_SELF_NODE=1` to fall back to the legacy in-process path (no subprocess; hub directly owns session state).
 
-vibr8 supports remote nodes (Docker containers, EC2 instances, macOS machines, etc.) that can host Claude Code sessions and desktop environments.
+The WebSocket protocol is reverse-engineered and documented in `WEBSOCKET_PROTOCOL_REVERSED.md`. The node parity refactor is in `docs/remote-node-parity.md` (plan) and `docs/remote-node-parity-handoff.md` (recovery guide).
 
-**Communication**: Nodes connect to the hub via plain WebSocket — outbound from the node to `wss://{hub_url}/ws/node/{node_id}?apiKey=...`. Internet-traversable, no SSH or local network access required. The hub never initiates connections to nodes. Protocol is NDJSON over WebSocket with request/response correlation (`node_tunnel.py`).
+### Nodes (hub-host's self-node + remote nodes)
 
-**Session creation**: When a `nodeId` is specified for a Claude/Codex session, the creation request is forwarded via the WebSocket tunnel to the remote node (`routes.py:353-367`). The remote node spawns the Claude CLI locally on itself using its own `CliLauncher`. The host never spawns the CLI for remote sessions. Session IDs are qualified with the node prefix (`{node_id}:{session_id}`) for routing.
+Every vibr8 instance is a "node" — including the hub-host. The hub spawns its own `vibr8_node` subprocess (the **self-node**) and treats it like any other remote node from the routing perspective. Hermes-style remote nodes (Docker containers, EC2 instances, etc.) connect the same way.
 
-**Computer-use sessions**: VLM inference always runs on the host (in-process, local GPU). The `nodeId` only determines which remote desktop to target for WebRTC screen capture and input injection. The remote node is a "dumb terminal" — it captures screen frames and injects input events.
+**Communication**: Nodes connect to the hub via WebSocket — outbound from the node to `wss://{hub_url}/ws/node/{node_id}?apiKey=...`. Internet-traversable, no SSH required. The hub never initiates connections to nodes. Protocol is NDJSON over WebSocket with request/response correlation (`server/node_tunnel.py`).
 
-**Ring0 on nodes**: Each remote node runs its own Ring0 instance locally, auto-launched on startup. The node advertises `ring0Enabled` in heartbeats.
+**Session creation**: Every `create_session` (regardless of target) flows through `local_node_ops.launch_with_options()` → tunnel → target node's `NodeOperations.launch_with_options` → that node's `CliLauncher`. The host never spawns CLIs for non-self sessions. Session IDs are qualified at the hub boundary (`{node_id}:{raw_id}`) by `QualifyingNodeClient` so browser/CLI WebSockets can route via the tunnel.
 
-**Voice routing**: When a remote node is the active node (selected via UI or `vibr8 node {name}` voice command), voice transcripts are forwarded to that node's Ring0 via the `ring0_input` tunnel command. Falls back to local Ring0 if no remote node is active.
+**Computer-use sessions**: VLM inference always runs on the hub (GPU lives there). The `nodeId` determines which remote desktop to target for WebRTC screen capture and input injection. The remote node is a "dumb terminal" — captures screen frames and injects input events.
 
-**Key files**: `server/node_tunnel.py`, `server/node_registry.py`, `vibr8_node/node_agent.py`, `install-node.sh`, `Dockerfile.node*`
+**Ring0 on nodes**: Each node runs its own Ring0 instance locally, auto-launched on startup if enabled. The hub-host's self-node runs Ring0 just like any other node.
+
+**Voice routing**: Voice transcripts route to the active node's Ring0 via `local_node_ops.ring0_input` (which targets the self-node by default, or a remote node after `vibr8 node {name}` voice command).
+
+**Hub-side events**: `user_returned`, `note_mode_ended`, `second_screen_*`, `task_completed` etc. are emitted on the hub but forwarded to the active node's Ring0 event router via `local_node_ops.emit_ring0_event` (or that node's tunnel directly when the active node is remote).
+
+**Key files**: `server/main.py` (self-node spawn + swap), `vibr8_core/node_client.py` (SwappableNodeClient + QualifyingNodeClient), `vibr8_core/node_operations.py` (canonical per-node ops), `vibr8_node/node_agent.py`, `server/node_tunnel.py`, `server/node_registry.py`, `install-node.sh`, `Dockerfile.node*`
 
 ### Computer-Use Pipeline
 
