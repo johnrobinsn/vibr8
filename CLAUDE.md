@@ -69,10 +69,43 @@ React 19, TypeScript, Vite, Tailwind CSS 4, Zustand for state.
 ### Communication Flow
 
 ```
-Browser ↔ WS NDJSON ↔ Hub WsBridge (proxy) ↔ tunnel NDJSON ↔ Self-node WsBridge ↔ WS NDJSON ↔ CLI subprocess
+                                    ┌──────── Hub host (Python/aiohttp, port 3456) ────────┐
+                                    │                                                       │
+ Browser tab A ─ WS NDJSON ─────────▶  ┌──────────────────────┐                            │
+   (clientId, tabId, activeNode=Hermes)│ Hub WsBridge (proxy) │                            │
+                                    │  │ HubBrowserBridge     │   ┌─ Self-node subprocess ─┐
+ Browser tab B ─ WS NDJSON ─────────▶  │ (per-client active   │   │ vibr8_node --self-mode │
+   (same clientId, different tabId,    │  node map; per-tab   │   │ NodeOperations         │
+   activeNode=local)                   │  active node lookup  │   │ WsBridge (real state)  │
+                                    │  └────────┬─────────────┘   │ CliLauncher → CLIs     │
+                                    │           │ tunnel NDJSON   │ Ring0Manager           │
+                                    │           │ (loopback) ────▶│ env/artifacts/git/fs   │
+                                    │           │                 │ scheduler              │
+                                    │           │                 └────────────────────────┘
+                                    │           │ tunnel NDJSON       (owns ~/.vibr8/)
+                                    │           │ (wss://) ────────▶ ┌─ Remote node (Hermes,
+                                    │           │                    │  Docker, EC2, …)
+                                    │           │                    │ vibr8_node
+                                    │  ┌────────▼─────────────┐      │ NodeOperations
+                                    │  │ WebRTC peers keyed   │      │ CliLauncher → CLIs
+ Browser tab A ─ WebRTC ─◀──────────▶─│ by peer_key =        │      │ Ring0Manager
+ Browser tab B ─ WebRTC ─◀──────────▶─│ clientId#tabId       │      │ ...
+                                    │  │ STT/TTS per peer     │      └─────────────────────┘
+                                    │  │ Ring0EventForwarder  │
+                                    │  │  → event.source_     │
+                                    │  │    client_id →       │
+                                    │  │    active node       │
+                                    │  └──────────────────────┘
+                                    └───────────────────────────────────────────────────────┘
 ```
 
-The hub spawns its own `vibr8_node` subprocess at startup (the **self-node**). All node-scoped operations flow through the loopback tunnel, including operations on the hub-host's "local" sessions. The hub itself owns no session state — only browser WebSockets, WebRTC, and auth.
+Three things to notice:
+
+1. **The hub owns no node-scoped state.** Sessions, Ring0, FS, git, envs, artifacts, scheduler all live on a node. The hub spawns its own `vibr8_node` subprocess at startup (the **self-node**) and reaches it via a loopback tunnel; remote nodes (Hermes, Docker, EC2, …) use the same NDJSON-over-WebSocket protocol over the public internet. Session IDs are qualified at the hub boundary as `{node_id}:{raw_id}` so the browser sees one flat namespace.
+
+2. **The active node is per-client, per-tab.** Each browser tab has its own `activeNodeId` (sessionStorage) and POSTs it to `/api/clients/{client_id}/active-node`. Voice routing reads the originating client's active node; Ring0 events route via `event.source_client_id`. There is no hub-wide active node.
+
+3. **WebRTC peers are per-tab.** Per-peer state (PC, STT, outgoing track, video, screen capture, input injector) is keyed by `peer_key = "{client_id}#{tab_id}"`. User-level state (guard, tts_muted, voice modes, speaker gates, usernames) stays keyed by `client_id`. Two tabs of the same browser can run independent voice connections.
 
 Set `VIBR8_DISABLE_SELF_NODE=1` to fall back to the legacy in-process path (no subprocess; hub directly owns session state).
 
