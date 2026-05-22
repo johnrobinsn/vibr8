@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useStore } from "../store.js";
 import { sendToSession } from "../ws.js";
-import { api } from "../api.js";
+import { api, nodeApi } from "../api.js";
 import { toggleGuard } from "../webrtc.js";
 import { ShieldIcon } from "./ShieldIcon.js";
 
@@ -47,6 +47,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const cliConnected = useStore((s) => s.cliConnected);
   const sessionData = useStore((s) => s.sessions.get(sessionId));
   const previousMode = useStore((s) => s.previousPermissionMode.get(sessionId) || "acceptEdits");
+  const activeNodeId = useStore((s) => s.activeNodeId);
 
   const isConnected = cliConnected.get(sessionId) ?? false;
 
@@ -407,7 +408,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
                       onClick={() => {
                         const cwd = sessionData.repo_root || sessionData.cwd;
                         if (!cwd) return;
-                        api.gitPull(cwd).then((r) => {
+                        const nid = activeNodeId === "local" ? "" : activeNodeId;
+                        nodeApi(nid).git.pull(cwd).then((r) => {
                           useStore.getState().updateSession(sessionId, {
                             git_ahead: r.git_ahead,
                             git_behind: r.git_behind,

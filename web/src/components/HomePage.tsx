@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useStore } from "../store.js";
-import { api, type Vibr8Env, type GitRepoInfo, type GitBranchInfo, type BackendInfo } from "../api.js";
+import { api, nodeApi, type Vibr8Env, type GitRepoInfo, type GitBranchInfo, type BackendInfo } from "../api.js";
 import { connectSession, waitForConnection, sendToSession } from "../ws.js";
 import { disconnectSession } from "../ws.js";
 import { generateUniqueSessionName } from "../utils/names.js";
@@ -100,16 +100,19 @@ export function HomePage() {
     }
   }, [pendingFocus]);
 
-  // Load server home/cwd and available backends on mount
+  // Load home/cwd, envs, backends. fs+envs target the active node so the
+  // home/cwd reflects the node where the new session will actually run.
+  // Backends are still hub-checked for now (see deferred work).
   useEffect(() => {
-    api.getHome().then(({ home, cwd: serverCwd }) => {
+    const nid = activeNodeId === "local" ? "" : activeNodeId;
+    nodeApi(nid).fs.getHome().then(({ home, cwd: serverCwd }) => {
       if (!cwd) {
         setCwd(serverCwd || home);
       }
     }).catch(() => {});
-    api.listEnvs().then(setEnvs).catch(() => {});
+    nodeApi(nid).envs.list().then(setEnvs).catch(() => {});
     api.getBackends().then(setBackends).catch(() => {});
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // When backend changes, reset model and mode to defaults
   function switchBackend(newBackend: BackendType) {
@@ -176,29 +179,32 @@ export function HomePage() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [showModelDropdown, showModeDropdown, showEnvDropdown, showBranchDropdown, showFolderPicker]);
 
-  // Detect git repo when cwd changes
+  // Detect git repo when cwd changes (on the active node's filesystem).
   useEffect(() => {
     if (!cwd) {
       setGitRepoInfo(null);
       return;
     }
-    api.getRepoInfo(cwd).then((info) => {
+    const nid = activeNodeId === "local" ? "" : activeNodeId;
+    const git = nodeApi(nid).git;
+    git.repoInfo(cwd).then((info) => {
       setGitRepoInfo(info);
       setUseWorktree(false);
       setWorktreeBranch(info.currentBranch);
       setIsNewBranch(false);
-      api.listBranches(info.repoRoot).then(setBranches).catch(() => setBranches([]));
+      git.branches(info.repoRoot).then(setBranches).catch(() => setBranches([]));
     }).catch(() => {
       setGitRepoInfo(null);
     });
-  }, [cwd]);
+  }, [cwd, activeNodeId]);
 
   // Fetch branches when git repo changes
   useEffect(() => {
     if (gitRepoInfo) {
-      api.listBranches(gitRepoInfo.repoRoot).then(setBranches).catch(() => setBranches([]));
+      const nid = activeNodeId === "local" ? "" : activeNodeId;
+      nodeApi(nid).git.branches(gitRepoInfo.repoRoot).then(setBranches).catch(() => setBranches([]));
     }
-  }, [gitRepoInfo]);
+  }, [gitRepoInfo, activeNodeId]);
 
 
   const selectedModel = MODELS.find((m) => m.value === model) || MODELS[0];
@@ -574,10 +580,11 @@ export function HomePage() {
               <button
                 onClick={() => {
                   if (!showBranchDropdown && gitRepoInfo) {
-                    api.gitFetch(gitRepoInfo.repoRoot)
+                    const git = nodeApi(activeNodeId === "local" ? "" : activeNodeId).git;
+                    git.fetch(gitRepoInfo.repoRoot)
                       .catch(() => {})
                       .finally(() => {
-                        api.listBranches(gitRepoInfo.repoRoot).then(setBranches).catch(() => setBranches([]));
+                        git.branches(gitRepoInfo.repoRoot).then(setBranches).catch(() => setBranches([]));
                       });
                   }
                   setShowBranchDropdown(!showBranchDropdown);
@@ -729,7 +736,8 @@ export function HomePage() {
             <button
               onClick={() => {
                 if (!showEnvDropdown) {
-                  api.listEnvs().then(setEnvs).catch(() => {});
+                  const nid = activeNodeId === "local" ? "" : activeNodeId;
+                  nodeApi(nid).envs.list().then(setEnvs).catch(() => {});
                 }
                 setShowEnvDropdown(!showEnvDropdown);
               }}
@@ -894,7 +902,8 @@ export function HomePage() {
         <EnvManager
           onClose={() => {
             setShowEnvManager(false);
-            api.listEnvs().then(setEnvs).catch(() => {});
+            const nid = activeNodeId === "local" ? "" : activeNodeId;
+            nodeApi(nid).envs.list().then(setEnvs).catch(() => {});
           }}
         />
       )}
