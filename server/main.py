@@ -419,6 +419,7 @@ def create_app() -> web.Application:
         store=session_store,
         ring0=ring0_manager,
         worktree_tracker=worktree_tracker,
+        task_scheduler=task_scheduler,
         default_backend="claude",
     )
     local_node_ops = SwappableNodeClient(_in_process_ops)

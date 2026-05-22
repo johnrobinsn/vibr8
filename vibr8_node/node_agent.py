@@ -106,6 +106,10 @@ class NodeAgent:
         )
         from vibr8_core.worktree_tracker import WorktreeTracker
         self._worktree_tracker = WorktreeTracker()
+        # Per-node TaskScheduler — scheduled Ring0 tasks run on this node.
+        from vibr8_core.ring0_scheduler import TaskScheduler
+        self._scheduler = TaskScheduler()
+        self._scheduler.set_dependencies(self._launcher, self._bridge)
 
         self._bridge.set_store(self._store)
         self._launcher.set_store(self._store)
@@ -147,6 +151,7 @@ class NodeAgent:
             default_backend=self.default_backend,
             work_dir=self.work_dir,
             worktree_tracker=self._worktree_tracker,
+            task_scheduler=self._scheduler,
             on_sessions_changed=_on_sessions_changed,
         )
 
@@ -171,6 +176,9 @@ class NodeAgent:
             self._bridge.set_ring0_manager(self._ring0)
             logger.info("Ring0 enabled — auto-launching session (backend=%s)", self.default_backend)
             await self._ring0.ensure_session(self._launcher, self._bridge, backend_type=self.default_backend)
+
+        # Start the per-node TaskScheduler (scheduled Ring0 background tasks).
+        await self._scheduler.start()
 
         # Connect tunnel with auto-reconnect
         try:
@@ -499,6 +507,11 @@ class NodeAgent:
         """Clean shutdown."""
         if self._desktop_webrtc:
             await self._desktop_webrtc.close_all()
+        if self._scheduler:
+            try:
+                await self._scheduler.stop()
+            except Exception:
+                logger.exception("Scheduler stop failed")
         if self._bridge:
             self._bridge.flush_to_disk()
         if self._launcher:

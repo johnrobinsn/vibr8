@@ -45,6 +45,7 @@ class NodeOperations:
         work_dir: str = "",
         on_sessions_changed: Optional[SessionsChangedCallback] = None,
         worktree_tracker: Any | None = None,
+        task_scheduler: Any | None = None,
     ) -> None:
         self._launcher = launcher
         self._bridge = bridge
@@ -55,6 +56,7 @@ class NodeOperations:
         self._work_dir = work_dir
         self._on_sessions_changed = on_sessions_changed
         self._worktree_tracker = worktree_tracker
+        self._scheduler = task_scheduler
 
     async def _notify_sessions_changed(self) -> None:
         if self._on_sessions_changed:
@@ -384,6 +386,82 @@ class NodeOperations:
             r0sid, text, source_client_id=source_client_id,
         )
         return {"ok": True}
+
+    # ── Ring0 scheduler (per-node) ────────────────────────────────────────
+    #
+    # Each node owns its own TaskScheduler — scheduled background Ring0
+    # tasks run on the node where they're created. The hub forwards
+    # /api/ring0/tasks /api/ring0/queue calls here via the tunnel.
+
+    async def scheduler_create_task(self, **kwargs) -> dict:
+        if self._scheduler is None:
+            return {"error": "Scheduler not available on this node"}
+        try:
+            task = self._scheduler.create_task(**{
+                k: v for k, v in kwargs.items() if v is not None
+            })
+            return task.to_dict()
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def scheduler_list_tasks(self) -> dict:
+        if self._scheduler is None:
+            return {"tasks": []}
+        return {"tasks": [t.to_dict() for t in self._scheduler.list_tasks()]}
+
+    async def scheduler_update_task(self, task_id: str = "", **updates) -> dict:
+        if self._scheduler is None:
+            return {"error": "Scheduler not available on this node"}
+        task = self._scheduler.update_task(task_id, **updates)
+        if not task:
+            return {"error": "Task not found"}
+        return task.to_dict()
+
+    async def scheduler_delete_task(self, task_id: str = "") -> dict:
+        if self._scheduler is None:
+            return {"error": "Scheduler not available on this node"}
+        ok = self._scheduler.delete_task(task_id)
+        if not ok:
+            return {"error": "Task not found"}
+        return {"ok": True}
+
+    async def scheduler_run_task(self, task_id: str = "") -> dict:
+        if self._scheduler is None:
+            return {"error": "Scheduler not available on this node"}
+        err = await self._scheduler.execute_task_now(task_id)
+        if err:
+            return {"error": err}
+        return {"ok": True, "message": "Task execution started"}
+
+    async def scheduler_list_queue(self, status: str = "pending") -> dict:
+        if self._scheduler is None:
+            return {"results": []}
+        if status == "pending":
+            results = self._scheduler.queue.list_pending()
+        elif status == "reviewed":
+            results = self._scheduler.queue.list_reviewed()
+        else:
+            results = self._scheduler.queue.list_all()
+        return {"results": [r.to_dict() for r in results]}
+
+    async def scheduler_get_queue_item(self, result_id: str = "") -> dict:
+        if self._scheduler is None:
+            return {"error": "Scheduler not available on this node"}
+        result = self._scheduler.queue.get(result_id)
+        if not result:
+            return {"error": "Result not found"}
+        return result.to_dict()
+
+    async def scheduler_review_queue_item(
+        self, result_id: str = "", action: str = "done",
+    ) -> dict:
+        if self._scheduler is None:
+            return {"error": "Scheduler not available on this node"}
+        if action not in ("done", "defer", "delegate", "followup"):
+            return {"error": "Invalid action"}
+        if not self._scheduler.queue.mark_reviewed(result_id, action):
+            return {"error": "Result not found"}
+        return {"ok": True, "action": action}
 
     async def emit_ring0_event(self, event_fields: dict | None = None) -> dict:
         """Deliver a hub-side event to this node's Ring0 event router.
