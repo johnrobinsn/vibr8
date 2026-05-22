@@ -868,6 +868,23 @@ def create_app() -> web.Application:
         # in-process path.
         if os.environ.get("VIBR8_DISABLE_SELF_NODE") != "1":
             spawn(_spawn_self_node())
+            # Refresh the WebRTC Ring0 status cache periodically so voice
+            # broadcasts (mode change, audio off, etc.) target the
+            # self-node's Ring0 session with the correct qualified id.
+            # QualifyingNodeClient already qualifies sessionId in the
+            # response, so the cache holds {self_id}:ring0 directly.
+            if webrtc_manager:
+                async def _refresh_ring0_status_cache() -> None:
+                    backoff = 1.0
+                    while not _restart["requested"]:
+                        try:
+                            status = await local_node_ops.ring0_status()
+                            webrtc_manager.update_ring0_status_cache(status)
+                            backoff = 1.0
+                        except Exception:
+                            backoff = min(backoff * 2, 30.0)
+                        await asyncio.sleep(3.0 if backoff == 1.0 else backoff)
+                spawn(_refresh_ring0_status_cache())
 
     async def _spawn_self_node() -> None:
         """Self-node lifecycle loop: spawn → wait for crash → respawn.

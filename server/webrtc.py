@@ -220,6 +220,11 @@ class WebRTCManager:
         self._launcher = None  # Set by main.py for Ring0 lazy-create
         self._node_registry = None  # Set by main.py for distributed nodes
         self._local_node_ops = None  # Set by main.py; routes through self-node tunnel
+        # Cache of the active node's Ring0 status. In Option A self-node
+        # mode, refreshed periodically from local_node_ops.ring0_status().
+        # In legacy mode, populated from the in-process Ring0Manager.
+        # Shape: {"enabled": bool, "sessionId": str | None}
+        self._ring0_status_cache: dict | None = None
 
     def get_client_ice_servers(self) -> list[dict]:
         """Return ICE servers in the format the browser RTCPeerConnection expects."""
@@ -241,6 +246,39 @@ class WebRTCManager:
         transcripts to the self-node's Ring0 via tunnel.
         """
         self._local_node_ops = ops
+
+    def update_ring0_status_cache(self, status: dict | None) -> None:
+        """Update the cached Ring0 status (called by a periodic poller).
+
+        ``status`` is the shape returned by NodeOperations.ring0_status():
+        {"enabled": bool, "sessionId": str | None, "model": ..., ...}.
+        For Option A self-node mode, QualifyingNodeClient has already
+        qualified the sessionId (e.g. ``{self_id}:ring0``) — exactly what
+        the hub's broadcast targeting + browser proxy-session keying
+        wants.
+        """
+        self._ring0_status_cache = status
+
+    def is_ring0_enabled(self) -> bool:
+        """Best-effort read of Ring0 enabled state.
+
+        Prefers the cache (refreshed by main.py from local_node_ops);
+        falls back to the in-process Ring0Manager for legacy mode.
+        """
+        if self._ring0_status_cache is not None:
+            return bool(self._ring0_status_cache.get("enabled", False))
+        if self._ring0_manager:
+            return self._ring0_manager.is_enabled
+        return False
+
+    def ring0_session_id(self) -> str:
+        """Best-effort read of the active Ring0 session id (qualified)."""
+        if self._ring0_status_cache is not None:
+            sid = self._ring0_status_cache.get("sessionId")
+            return sid or ""
+        if self._ring0_manager:
+            return self._ring0_manager.session_id
+        return ""
 
     def set_ring0_manager(self, manager) -> None:
         """Set a reference to Ring0Manager for voice routing."""
@@ -444,15 +482,15 @@ class WebRTCManager:
             asyncio.ensure_future(
                 self._hub_browser_bridge.broadcast_voice_mode("", mode_name, client_id=client_id)
             )
-            if self._ring0_manager and self._ring0_manager.is_enabled:
-                ring0_sid = self._ring0_manager.session_id
+            if self.is_ring0_enabled():
+                ring0_sid = self.ring0_session_id()
                 if ring0_sid:
                     asyncio.ensure_future(
                         self._hub_browser_bridge.broadcast_voice_mode(ring0_sid, mode_name)
                     )
 
         # Mute/unmute Ring0 TTS during note mode so it doesn't talk over dictation
-        if self._ring0_manager and self._ring0_manager.is_enabled:
+        if self.is_ring0_enabled():
             is_note = isinstance(mode, NoteMode)
             pair = self.get_any_outgoing_track()
             if pair:
@@ -716,14 +754,14 @@ class WebRTCManager:
                 if not self._ws_bridge:
                     return
                 target_sid = None
-                if self._ring0_manager and self._ring0_manager.is_enabled:
+                if self.is_ring0_enabled():
                     if self._node_registry:
                         active_nid = self._node_registry.active_node_id
                         if active_nid != "local":
                             from vibr8_core.ws_bridge import WsBridge
                             target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
                     if not target_sid:
-                        target_sid = self._ring0_manager.session_id
+                        target_sid = self.ring0_session_id()
                 if not target_sid:
                     target_sid = _resolve_session()
                 if target_sid:
@@ -815,8 +853,8 @@ class WebRTCManager:
                             return
                         asyncio.ensure_future(self._speak_short(client_id, "Done"))
                         # Deliver via ring0 if enabled, otherwise to current session
-                        if self._ring0_manager and self._ring0_manager.is_enabled:
-                            ring0_sid = self._ring0_manager.session_id
+                        if self.is_ring0_enabled():
+                            ring0_sid = self.ring0_session_id()
                             if ring0_sid:
                                 await self._ws_bridge.submit_user_message(ring0_sid, result, source_client_id=client_id)
                                 if isinstance(mode, NoteMode):
@@ -959,7 +997,7 @@ class WebRTCManager:
                 if not self._ws_bridge:
                     return
                 target_sid = None
-                if self._ring0_manager and self._ring0_manager.is_enabled:
+                if self.is_ring0_enabled():
                     # Route preview to remote node's Ring0 if active
                     if self._node_registry:
                         active_nid = self._node_registry.active_node_id
@@ -967,7 +1005,7 @@ class WebRTCManager:
                             from vibr8_core.ws_bridge import WsBridge
                             target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
                     if not target_sid:
-                        target_sid = self._ring0_manager.session_id
+                        target_sid = self.ring0_session_id()
                 if not target_sid:
                     target_sid = _resolve_session()
                 if target_sid:
