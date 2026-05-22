@@ -100,9 +100,8 @@ export function HomePage() {
     }
   }, [pendingFocus]);
 
-  // Load home/cwd, envs, backends. fs+envs target the active node so the
-  // home/cwd reflects the node where the new session will actually run.
-  // Backends are still hub-checked for now (see deferred work).
+  // Load home/cwd, envs, backends. All target the active node so the
+  // new-session form reflects the node's filesystem + installed CLIs.
   useEffect(() => {
     const nid = activeNodeId === "local" ? "" : activeNodeId;
     nodeApi(nid).fs.getHome().then(({ home, cwd: serverCwd }) => {
@@ -111,7 +110,7 @@ export function HomePage() {
       }
     }).catch(() => {});
     nodeApi(nid).envs.list().then(setEnvs).catch(() => {});
-    api.getBackends().then(setBackends).catch(() => {});
+    nodeApi(nid).backends.list().then(setBackends).catch(() => {});
   }, [activeNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // When backend changes, reset model and mode to defaults
@@ -129,7 +128,8 @@ export function HomePage() {
       setDynamicModels(null);
       return;
     }
-    api.getBackendModels(backend).then((models) => {
+    const nid = activeNodeId === "local" ? "" : activeNodeId;
+    nodeApi(nid).backends.models(backend).then((models) => {
       if (models.length > 0) {
         const options = toModelOptions(models);
         setDynamicModels(options);
@@ -141,7 +141,7 @@ export function HomePage() {
     }).catch(() => {
       // Fall back to hardcoded models silently
     });
-  }, [backend]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [backend, activeNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Close dropdowns on outside click
   useEffect(() => {

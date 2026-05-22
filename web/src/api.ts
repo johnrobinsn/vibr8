@@ -386,11 +386,6 @@ export const api = {
       git_behind: number;
     }>("/git/pull", { cwd }),
 
-  // Backends
-  getBackends: () => get<BackendInfo[]>("/backends"),
-  getBackendModels: (backendId: string) =>
-    get<BackendModelInfo[]>(`/backends/${encodeURIComponent(backendId)}/models`),
-
   // Editor
   startEditor: (sessionId: string) =>
     post<{ url: string }>(
@@ -755,6 +750,13 @@ export function nodeApi(nodeId: string) {
         get(`/ring0/queue/${encodeURIComponent(resultId)}${qOnly}`),
       reviewQueueItem: (resultId: string, action: "done" | "defer" | "delegate" | "followup") =>
         post(`/ring0/queue/${encodeURIComponent(resultId)}/review`, withNode({ action })),
+    },
+    backends: {
+      list: () => get<BackendInfo[]>(`/backends${qOnly}`),
+      models: (backendId: string) =>
+        get<BackendModelInfo[]>(
+          `/backends/${encodeURIComponent(backendId)}/models${qOnly}`,
+        ),
     },
   };
 }

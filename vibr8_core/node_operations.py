@@ -692,6 +692,39 @@ class NodeOperations:
     # Each node reads/writes its own ~/.vibr8/envs/ directory (per-node since
     # remote nodes use isolated data dirs).
 
+    # ── Backends ─────────────────────────────────────────────────────────
+    # The set of installed CLI binaries (claude / codex / opencode / hermes)
+    # is per-node — these checks run against the node's PATH, not the hub's.
+
+    async def list_backends(self) -> dict:
+        """List CLI backends available on this node (by PATH)."""
+        import shutil
+        backends = [
+            {"id": "claude", "name": "Claude Code", "available": shutil.which("claude") is not None},
+            {"id": "codex", "name": "Codex", "available": shutil.which("codex") is not None},
+            {"id": "opencode", "name": "OpenCode", "available": shutil.which("opencode") is not None},
+            {"id": "hermes", "name": "Hermes", "available": shutil.which("hermes") is not None},
+            {"id": "computer-use", "name": "Computer Use", "available": True},
+            {"id": "terminal", "name": "Terminal", "available": True},
+        ]
+        return {"backends": backends}
+
+    async def get_backend_models(self, backend_id: str = "") -> dict:
+        """Return the available models for a backend on this node.
+
+        Codex pulls from ~/.codex/models_cache.json; OpenCode shells out to
+        `opencode models`; Hermes reads ~/.hermes/config.yaml. All paths
+        resolve against the node's home / PATH.
+        """
+        from vibr8_core import backend_models
+        if backend_id == "codex":
+            return backend_models.get_codex_models()
+        if backend_id == "opencode":
+            return {"models": await backend_models.get_opencode_models()}
+        if backend_id == "hermes":
+            return {"models": backend_models.get_hermes_models()}
+        return {"error": "Use frontend defaults for this backend"}
+
     async def env_list(self) -> dict:
         from vibr8_core import env_manager
         try:
