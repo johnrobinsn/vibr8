@@ -467,15 +467,38 @@ def create_app() -> web.Application:
 
     # Phase 6: in Option A self-node mode, hub-side Ring0 event emissions
     # (user_returned, note_mode_ended, second_screen_*, task_completed)
-    # need to reach the *self-node's* Ring0 — the hub's own is dormant.
-    # Install a forwarder that pipes events through local_node_ops, which
-    # is the self-node tunnel after the swap fires.
+    # need to reach the *active node's* Ring0 — the hub's own is dormant.
+    # The active node is whichever node the user has selected (defaults
+    # to "local" = self-node; can be a remote like Hermes after
+    # "vibr8 node hermes" voice command).
     if os.environ.get("VIBR8_DISABLE_SELF_NODE") != "1":
-        async def _forward_event_to_active_node(event: Any) -> None:
+        async def _forward_event_to_active_node(event) -> None:
             try:
-                await local_node_ops.emit_ring0_event(event_fields=dict(event.fields))
+                active_nid = (
+                    node_registry.active_node_id if node_registry else "local"
+                )
+                if not active_nid or active_nid == "local":
+                    # Self-node — go through local_node_ops (which targets
+                    # the loopback tunnel after the swap fires).
+                    await local_node_ops.emit_ring0_event(
+                        event_fields=dict(event.fields),
+                    )
+                    return
+                # Remote node — forward via its tunnel directly.
+                node = node_registry.get_node(active_nid)
+                if node and node.tunnel and getattr(node.tunnel, "connected", False):
+                    await node.tunnel.send_fire_and_forget({
+                        "type": "emit_ring0_event",
+                        "eventFields": dict(event.fields),
+                    })
+                else:
+                    logger.warning(
+                        "[server] Active node %s not routable for Ring0 event %s",
+                        active_nid[:8] if active_nid else "?",
+                        event.fields.get("type", "?"),
+                    )
             except Exception:
-                logger.exception("[server] failed to forward Ring0 event to self-node")
+                logger.exception("[server] failed to forward Ring0 event")
         ws_bridge.set_event_forwarder(_forward_event_to_active_node)
     task_scheduler.set_dependencies(launcher, ws_bridge)
     if webrtc_manager:
