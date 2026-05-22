@@ -433,11 +433,12 @@ def create_app() -> web.Application:
     # away in favor of the self-node.
     hub_browser_bridge = HubBrowserBridge(ws_bridge)
 
-    # Phase 4b: self-node subprocess machinery (gated, OFF by default).
-    # When VIBR8_SPAWN_SELF_NODE=1, the hub spawns its own vibr8_node child
-    # process at startup that connects back via the tunnel. The subprocess
-    # is not USED for routing yet — that switch flips in Phase 4c. Today it
-    # just proves the spawn handshake works.
+    # Phase 4c-6 (Option A): the hub spawns a vibr8_node child process at
+    # startup that connects back via the loopback tunnel. After it
+    # registers, local_node_ops is retargeted at it (RemoteNodeClient
+    # wrapped in QualifyingNodeClient) and all node-scoped operations
+    # flow through the tunnel. Set VIBR8_DISABLE_SELF_NODE=1 to fall
+    # back to the legacy in-process path.
     self_node_state: dict[str, object] = {"proc": None, "node_id": "", "api_key": ""}
 
     try:
@@ -871,16 +872,16 @@ def create_app() -> web.Application:
     async def _spawn_self_node() -> None:
         """Self-node lifecycle loop: spawn → wait for crash → respawn.
 
-        The first attempt waits for the hub listener to bind, generates an
-        ephemeral API key, spawns the subprocess, waits for it to register,
-        and (if VIBR8_USE_SELF_NODE=1) swaps local_node_ops. Subsequent
-        attempts reuse the same API key and respawn with exponential
-        backoff (capped at 30s). Exits cleanly on hub shutdown.
+        The first attempt waits for the hub listener to bind, generates
+        an ephemeral API key, spawns the subprocess, waits for it to
+        register, and swaps local_node_ops to point at the loopback
+        tunnel. Subsequent attempts reuse the same API key and respawn
+        with exponential backoff (capped at 30s). Exits cleanly on hub
+        shutdown via _restart["requested"].
 
-        Today the subprocess uses ~/.vibr8-self/ (separate from the hub's
-        ~/.vibr8/) so it can run safely alongside the hub's in-process
-        managers. Phase 4c+ will remove the in-process managers and merge
-        the data dirs.
+        The subprocess owns ~/.vibr8/ exclusively (the hub's in-process
+        managers skip restore_from_disk in default mode). Parallel test
+        hubs can override the data dir via VIBR8_SELF_NODE_DATA_DIR.
         """
         import socket
         import subprocess

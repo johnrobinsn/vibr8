@@ -76,12 +76,12 @@ class NodeAgent:
     async def run(self) -> None:
         """Main entry point — register, start local server, connect tunnel."""
         if self.self_mode:
-            # Default to ~/.vibr8-self/ so a self-mode subprocess can run
-            # safely alongside the hub's in-process managers (Phase 4a/b
-            # behavior). The hub opts into the consolidated layout by
-            # spawning us with VIBR8_SELF_NODE_DATA_DIR=~/.vibr8 (and only
-            # when VIBR8_USE_SELF_NODE=1, which also makes the hub skip
-            # restore_from_disk so we're the sole owner of that dir).
+            # Self-mode: in Option A this is the hub's loopback child.
+            # The hub passes VIBR8_SELF_NODE_DATA_DIR=~/.vibr8 by default
+            # (so we own the hub-host's existing data dir exclusively;
+            # hub skips its own restore_from_disk). Falls back to
+            # ~/.vibr8-self/ if the env var is unset — used by parallel
+            # test hubs to avoid colliding with a live production dir.
             import os as _os
             override = _os.environ.get("VIBR8_SELF_NODE_DATA_DIR", "").strip()
             node_dir = Path(override).expanduser() if override else (Path.home() / ".vibr8-self")
