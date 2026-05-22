@@ -852,18 +852,34 @@ class WebRTCManager:
                             asyncio.ensure_future(self._speak_short(client_id, "Empty note"))
                             return
                         asyncio.ensure_future(self._speak_short(client_id, "Done"))
-                        # Deliver via ring0 if enabled, otherwise to current session
-                        if self.is_ring0_enabled():
-                            ring0_sid = self.ring0_session_id()
-                            if ring0_sid:
-                                await self._ws_bridge.submit_user_message(ring0_sid, result, source_client_id=client_id)
-                                if isinstance(mode, NoteMode):
-                                    from vibr8_core.ring0_events import Ring0Event
-                                    await self._ws_bridge.emit_ring0_event(Ring0Event(fields={"type": "note_mode_ended"}))
-                                return
-                        target_session = _resolve_session()
-                        if target_session:
-                            await self._ws_bridge.submit_user_message(target_session, result, source_client_id=client_id)
+                        # Deliver via Ring0 (self-node in Option A) if enabled,
+                        # otherwise to the active session. Voice text goes via
+                        # local_node_ops.ring0_input so it reaches whichever
+                        # node owns Ring0 today.
+                        delivered = False
+                        if self._local_node_ops:
+                            try:
+                                r = await self._local_node_ops.ring0_input(
+                                    text=result, source_client_id=client_id,
+                                )
+                                if "error" not in r:
+                                    delivered = True
+                                    if isinstance(mode, NoteMode):
+                                        # Forwarded through ws_bridge.emit_ring0_event,
+                                        # which (Phase 6) pipes to active node's Ring0
+                                        # router via local_node_ops.emit_ring0_event.
+                                        from vibr8_core.ring0_events import Ring0Event
+                                        await self._ws_bridge.emit_ring0_event(
+                                            Ring0Event(fields={"type": "note_mode_ended"})
+                                        )
+                            except Exception:
+                                logger.exception("[stt] ring0_input on done failed")
+                        if not delivered:
+                            target_session = _resolve_session()
+                            if target_session and self._ws_bridge:
+                                await self._ws_bridge.submit_user_message(
+                                    target_session, result, source_client_id=client_id,
+                                )
                         return
 
                     # In voice mode (e.g. note mode), only "done" is recognized.
