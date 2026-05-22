@@ -41,7 +41,7 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 4c-6 step 6 — Ring0 status cache for WebRTCManager | ✅ | `36e106a` |
 | 4c-6 step 7 — Delete `LocalNodeClient` alias | ✅ | this batch |
 | 4c-6 — Restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
-| 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` and `speak` tunnel commands) | ⏳ | — |
+| 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` tunnel command) | ✅ | `a303309` + `8574cb0` + `c51f846` |
 | 6b — Per-node scheduler (deferred from 3g) | ⏳ | — |
 | 7 — Frontend node-scoping | ⏳ | — |
 | 8 — Cleanup + docs | ⏳ | — |
@@ -219,6 +219,33 @@ The remaining work to drop the in-process path entirely is real:
 Estimated 500-1000 LOC across `vibr8_core/hub_browser_bridge.py`,
 `server/main.py`, `server/webrtc.py`, `vibr8_core/ws_bridge.py`,
 plus tests.
+
+### Phase 6 — Hub-side I/O bridging landed
+
+Three commits cover the hub-side concerns for routing voice + events
+to the active node:
+
+- `a303309` — `NodeOperations.emit_ring0_event(event_fields)` tunnel
+  command + `WsBridge.set_event_forwarder` hook. Hub-side
+  `emit_ring0_event` delegates to the forwarder instead of trying to
+  process locally (its in-process Ring0Manager is dormant in Option A).
+- `8574cb0` — `vibr8 done` voice command's note flush routes through
+  `local_node_ops.ring0_input` so the accumulated text reaches whatever
+  node owns Ring0.
+- `c51f846` — Forwarder consults `node_registry.active_node_id`. Routes
+  to self-node (`local_node_ops`) when active = local; routes to the
+  remote node's tunnel directly (`send_fire_and_forget` with
+  `emit_ring0_event`) when active is a remote node like Hermes.
+
+**TTS for remote-node Ring0 already works** via the existing
+`WsBridge.handle_remote_session_message` TTS path (line 451): when a
+remote node forwards an `assistant` message via `session_message`, the
+hub triggers TTS through its `_webrtc_manager`. The self-node is just
+another remote node from this perspective, so no new `speak` tunnel
+command was needed — the path was already there.
+
+Voice transcript routing (active-node aware) landed earlier in Phase
+4c-6 step 3 (`8428afb`).
 
 ### Phase 4c-6 — Option A landed (functional)
 
