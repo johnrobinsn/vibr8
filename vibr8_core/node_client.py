@@ -38,6 +38,32 @@ class NodeClient(Protocol):
     async def rename_session(self, session_id: str = "", name: str = "") -> dict: ...
 
 
+class _NotReadyNodeClient:
+    """Placeholder used by SwappableNodeClient before the real target is set.
+
+    Returns ``{"error": "Self-node not ready"}`` for any method call so
+    callers degrade gracefully during the short startup window between
+    hub boot and self-node registration. Replaced via
+    ``SwappableNodeClient.swap()`` once the loopback tunnel is up.
+    """
+
+    _ERROR_MSG = "Self-node not ready"
+
+    def __getattr__(self, name: str) -> Callable[..., Awaitable[dict]]:
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        async def _call(**kwargs: Any) -> dict:
+            return {"error": self._ERROR_MSG}
+
+        _call.__name__ = name
+        return _call
+
+
+# Module-level singleton.
+NOT_READY = _NotReadyNodeClient()
+
+
 class SwappableNodeClient:
     """NodeClient wrapper whose backing target can be replaced at runtime.
 

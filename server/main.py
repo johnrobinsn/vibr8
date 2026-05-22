@@ -421,9 +421,6 @@ def create_app() -> web.Application:
         worktree_tracker=worktree_tracker,
         default_backend="claude",
     )
-    # Wrap in a SwappableNodeClient so Phase 4c-4 step 2b can atomically
-    # re-target this at a RemoteNodeClient pointing at the self-node tunnel
-    # once it has registered. Routes capture the wrapper in closure.
     local_node_ops = SwappableNodeClient(_in_process_ops)
     session_registry = SessionRegistry(
         ws_bridge, launcher, node_registry, local_node_ops=local_node_ops,

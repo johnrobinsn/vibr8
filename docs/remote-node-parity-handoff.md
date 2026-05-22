@@ -220,7 +220,47 @@ Estimated 500-1000 LOC across `vibr8_core/hub_browser_bridge.py`,
 `server/main.py`, `server/webrtc.py`, `vibr8_core/ws_bridge.py`,
 plus tests.
 
-### Phase 4c-6 step 2+ — Option A in progress
+### Phase 4c-6 — Option A landed (functional)
+
+Self-node mode is the default startup path. All node operations
+(session-CRUD, FS, git, envs, Ring0 control, artifacts, voice
+transcript routing, voice enable/disable commands, disconnect flush)
+flow through the loopback tunnel to the self-node subprocess.
+
+Final state across this phase:
+
+- `82fd425` — default = self-node mode (env-var flip)
+- `8428afb` — voice transcript routing via `local_node_ops.ring0_input`
+- `b67bab2` — voice commands + disconnect flush via `local_node_ops`
+- `706f99c` — 10 new tests for `SwappableNodeClient` + `QualifyingNodeClient`
+- `36e106a` — Ring0 status cache on `WebRTCManager` (broadcasts work after toggle)
+- `1b67624` — Delete `LocalNodeClient` alias (only one target ever now)
+
+**Architectural goal achieved**: the original user goal — Hermes (or any
+remote node) is a first-class equivalent of the hub-host — is met.
+Hermes works just like always; the hub-host's self-node demonstrates
+the same code path on the local machine. `routes.py` is manager-free;
+voice routing is manager-free; the only direct in-process manager
+references on the hub are dormant pieces in `main.py` (event callback
+wirings, `ws_bridge.set_*` plumbing) that fire only in legacy
+`VIBR8_DISABLE_SELF_NODE=1` mode.
+
+**Optional remaining purity work (no user-visible impact):**
+1. Skip the dormant event-callback wirings (`on_cli_session_id`,
+   `on_codex_adapter_created`, etc.) and `ws_bridge.set_*` calls when
+   in self-node mode. Lines 461-512 in `server/main.py`.
+2. Make in-process `Ring0Manager`/`CliLauncher`/`SessionStore`
+   construction conditional on `VIBR8_DISABLE_SELF_NODE=1`. Currently
+   they're always constructed but dormant in self-node mode.
+3. Remove `VIBR8_DISABLE_SELF_NODE` legacy path entirely. Single code
+   path. Cost: no fallback if self-node fails to spawn at startup.
+
+None of these change user-visible behavior. They're cleanup that can
+happen organically.
+
+---
+
+### Phase 4c-6 step-by-step history
 
 Self-node mode is now the default startup path (commit `82fd425`).
 Set `VIBR8_DISABLE_SELF_NODE=1` to fall back to legacy in-process
