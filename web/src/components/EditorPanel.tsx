@@ -270,6 +270,10 @@ function DiffView({ diff }: { diff: string }) {
 
 export function EditorPanel({ sessionId }: { sessionId: string }) {
   const darkMode = useStore((s) => s.darkMode);
+  const activeNodeId = useStore((s) => s.activeNodeId);
+  // FS calls in this panel target the tab's active node. nodeApi("")
+  // is the hub-local default; anything else hits the named node via tunnel.
+  const fs = nodeApi(activeNodeId === "local" ? "" : activeNodeId).fs;
   const session = useStore((s) => s.sessions.get(sessionId));
   const sdkSession = useStore((s) => s.sdkSessions.find((sdk) => sdk.sessionId === sessionId));
   const openFilePath = useStore((s) => s.editorOpenFile.get(sessionId) ?? null);
@@ -311,7 +315,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     if (!cwd) return;
     setTreeLoading(true);
-    api.getFileTree(cwd).then((res) => {
+    fs.tree(cwd).then((res) => {
       setTree(res.tree);
       setTreeLoading(false);
     }).catch(() => setTreeLoading(false));
@@ -329,7 +333,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
     }
     setFileLoading(true);
     setSaveStatus(null);
-    api.readFile(openFilePath).then((res) => {
+    fs.read(openFilePath).then((res) => {
       setFileContent(res.content);
       setSavedContent(res.content);
       setFileLoading(false);
@@ -360,7 +364,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     if (!diffMode || !openFilePath || !changedFiles.has(openFilePath)) return;
     setDiffLoading(true);
-    api.getFileDiff(openFilePath).then((res) => {
+    fs.diff(openFilePath).then((res) => {
       setDiffContent(res.diff);
       setDiffLoading(false);
     }).catch(() => { setDiffContent(""); setDiffLoading(false); });
@@ -381,7 +385,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
 
   const refreshTree = useCallback(() => {
     if (!cwd) return Promise.resolve();
-    return api.getFileTree(cwd).then((res) => setTree(res.tree)).catch(() => {});
+    return fs.tree(cwd).then((res) => setTree(res.tree)).catch(() => {});
   }, [cwd]);
 
 
@@ -417,7 +421,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
     const name = nextUntitledName(dir);
     const fullPath = `${dir}/${name}`;
     try {
-      await api.mkdir(fullPath);
+      await fs.mkdir(fullPath);
       refreshTree();
       setSelectedDir(fullPath);
       setTimeout(() => setRenamingPath(fullPath), 100);
@@ -431,7 +435,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
     const name = nextUntitledName(dir);
     const fullPath = `${dir}/${name}`;
     try {
-      await api.writeFile(fullPath, "");
+      await fs.write(fullPath, "");
       refreshTree();
       setTimeout(() => setRenamingPath(fullPath), 100);
     } catch (e) {
@@ -443,7 +447,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
     const parentDir = oldPath.substring(0, oldPath.lastIndexOf("/"));
     const newPath = `${parentDir}/${newName}`;
     try {
-      await api.rename(oldPath, newPath);
+      await fs.rename(oldPath, newPath);
       setRenamingPath(null);
       refreshTree();
       // If the renamed item was open in editor, update the open file
@@ -477,7 +481,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
     const parentDir = openFilePath.substring(0, openFilePath.lastIndexOf("/"));
     const newPath = `${parentDir}/${newName.trim()}`;
     try {
-      await api.rename(openFilePath, newPath);
+      await fs.rename(openFilePath, newPath);
       setEditorOpenFile(sessionId, newPath);
       refreshTree();
     } catch (e) {
@@ -494,7 +498,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
     const name = openFilePath.split("/").pop() ?? openFilePath;
     if (!window.confirm(`Delete "${name}"?`)) return;
     try {
-      await api.deleteFile(openFilePath);
+      await fs.del(openFilePath);
       setEditorOpenFile(sessionId, "");
       setFileContent("");
       setSavedContent("");
@@ -518,7 +522,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
     if (!openFilePath || !isDirty) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     setSaveStatus("saving");
-    api.writeFile(openFilePath, fileContent).then(() => {
+    fs.write(openFilePath, fileContent).then(() => {
       setSavedContent(fileContent);
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus(null), 2000);
@@ -818,7 +822,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
           ) : fileName && isImageFile(fileName) ? (
             <div className="h-full flex items-center justify-center p-8 overflow-auto bg-[repeating-conic-gradient(var(--color-cc-border)_0%_25%,transparent_0%_50%)_0_0/20px_20px]">
               <img
-                src={`/api/fs/raw?path=${encodeURIComponent(openFilePath)}`}
+                src={`/api/fs/raw?path=${encodeURIComponent(openFilePath)}${activeNodeId && activeNodeId !== "local" ? `&nodeId=${encodeURIComponent(activeNodeId)}` : ""}`}
                 alt={fileName}
                 className="max-w-full max-h-full object-contain rounded shadow-lg"
                 onError={(e) => {

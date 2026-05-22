@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-import { api, type Vibr8Env } from "../api.js";
+import { nodeApi, type Vibr8Env } from "../api.js";
+import { useStore } from "../store.js";
 
 interface Props {
   onClose: () => void;
@@ -12,6 +13,8 @@ interface VarRow {
 }
 
 export function EnvManager({ onClose }: Props) {
+  const activeNodeId = useStore((s) => s.activeNodeId);
+  const envs_api = nodeApi(activeNodeId === "local" ? "" : activeNodeId).envs;
   const [envs, setEnvs] = useState<Vibr8Env[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingSlug, setEditingSlug] = useState<string | null>(null);
@@ -27,7 +30,7 @@ export function EnvManager({ onClose }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null);
 
   const refresh = () => {
-    api.listEnvs().then(setEnvs).catch(() => {}).finally(() => setLoading(false));
+    envs_api.list().then(setEnvs).catch(() => {}).finally(() => setLoading(false));
   };
 
   useEffect(() => { refresh(); }, []);
@@ -83,7 +86,7 @@ export function EnvManager({ onClose }: Props) {
       if (k) variables[k] = row.value;
     }
     try {
-      await api.updateEnv(editingSlug, { name: editName.trim() || undefined, variables });
+      await envs_api.update(editingSlug, { name: editName.trim() || undefined, variables });
       setEditingSlug(null);
       setError("");
       refresh();
@@ -94,7 +97,7 @@ export function EnvManager({ onClose }: Props) {
 
   async function handleDelete(slug: string) {
     try {
-      await api.deleteEnv(slug);
+      await envs_api.del(slug);
       if (editingSlug === slug) setEditingSlug(null);
       refresh();
     } catch (e: unknown) {
@@ -112,7 +115,7 @@ export function EnvManager({ onClose }: Props) {
       if (k) variables[k] = row.value;
     }
     try {
-      await api.createEnv(name, variables);
+      await envs_api.create(name, variables);
       setNewName("");
       setNewVars([{ key: "", value: "" }]);
       setError("");

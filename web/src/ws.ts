@@ -1014,8 +1014,9 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
     }
 
     case "artifacts_changed": {
-      import("./api.js").then(({ api }) => {
-        api.getArtifacts().then((a) => store.setArtifacts(a)).catch(() => {});
+      import("./api.js").then(({ nodeApi }) => {
+        const nid = store.activeNodeId === "local" ? "" : store.activeNodeId;
+        nodeApi(nid).artifacts.list().then((a) => store.setArtifacts(a as typeof store.artifacts)).catch(() => {});
       });
       break;
     }
