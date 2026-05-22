@@ -928,31 +928,30 @@ def create_routes(
     @routes.post("/api/sessions/{session_id}/upload")
     async def session_upload(request: web.Request) -> web.Response:
         session_id = request.match_info["session_id"]
-        # Fix pre-existing `bridge` typo (was NameError); use ws_bridge.
-        # NOTE: writes to the hub's filesystem at the session's cwd. Remote
-        # sessions' cwds live on the remote node, so this only works for
-        # hub-local sessions today. Future: forward as fs_write tunnel cmd.
-        session = ws_bridge.get_session(session_id)
-        if not session:
-            return web.json_response({"error": "Session not found"}, status=404)
-        cwd = session.state.get("cwd", "")
-        if not cwd:
-            return web.json_response({"error": "Session has no cwd"}, status=400)
         reader = await request.multipart()
         field = await reader.next()
         if not field or field.name != "file":
             return web.json_response({"error": "No file field"}, status=400)
         filename = field.filename or f"upload-{int(time.time())}"
-        tmp_dir = Path(cwd) / ".vibr8-uploads"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        dest = tmp_dir / filename
-        with open(dest, "wb") as f:
-            while True:
-                chunk = await field.read_chunk()
-                if not chunk:
-                    break
-                f.write(chunk)
-        return web.json_response({"ok": True, "path": str(dest)})
+        buf = bytearray()
+        while True:
+            chunk = await field.read_chunk()
+            if not chunk:
+                break
+            buf.extend(chunk)
+        import base64
+        content_b64 = base64.b64encode(bytes(buf)).decode("ascii")
+        try:
+            client, raw_sid, _ = _resolve_client(session_id)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        result = await client.upload_to_session(
+            session_id=raw_sid, filename=filename, content_b64=content_b64,
+        )
+        if result.get("error"):
+            status = 404 if result["error"] == "Session not found" else 400
+            return web.json_response({"error": result["error"]}, status=status)
+        return web.json_response(result)
 
     @routes.post("/api/fs/mkdir")
     async def fs_mkdir(request: web.Request) -> web.Response:

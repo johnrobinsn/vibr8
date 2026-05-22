@@ -553,6 +553,40 @@ class NodeOperations:
         except Exception as e:
             return {"error": str(e)}
 
+    async def upload_to_session(
+        self,
+        session_id: str = "",
+        filename: str = "",
+        content_b64: str = "",
+    ) -> dict:
+        """Decode `content_b64` and write to {session.cwd}/.vibr8-uploads/{filename}.
+
+        Resolves the session on the local node; returns {ok, path} or
+        {error}. Binary safe; transports base64 over NDJSON.
+        """
+        import base64
+        from pathlib import Path
+        if not session_id or not filename:
+            return {"error": "sessionId and filename required"}
+        session = self._bridge.get_session(session_id) if self._bridge else None
+        if not session:
+            return {"error": "Session not found"}
+        cwd = session.state.get("cwd", "")
+        if not cwd:
+            return {"error": "Session has no cwd"}
+        try:
+            data = base64.b64decode(content_b64)
+        except Exception as e:
+            return {"error": f"Invalid base64: {e}"}
+        try:
+            tmp_dir = Path(cwd) / ".vibr8-uploads"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            dest = tmp_dir / filename
+            dest.write_bytes(data)
+            return {"ok": True, "path": str(dest)}
+        except Exception as e:
+            return {"error": str(e)}
+
     async def fs_mkdir(self, path: str = "") -> dict:
         from pathlib import Path
         if not path:
