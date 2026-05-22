@@ -39,14 +39,13 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 4c-6 step 4 — Voice commands + disconnect-flush via local_node_ops | ✅ | `b67bab2` |
 | 4c-6 step 5 — Tests for SwappableNodeClient + QualifyingNodeClient | ✅ | `706f99c` |
 | 4c-6 step 6 — Ring0 status cache for WebRTCManager | ✅ | `36e106a` |
-| 4c-6 step 7 — Delete `LocalNodeClient` alias | ✅ | this batch |
-| 4c-6 — Restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
+| 4c-6 step 7 — Delete `LocalNodeClient` alias | ✅ | (folded into earlier 4c-6 batch) |
 | 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` tunnel command) | ✅ | `a303309` + `8574cb0` + `c51f846` |
 | 6b — Per-node scheduler (deferred from 3g) | ✅ | `6ba29d5` |
-| 7a — Frontend node-scoping foundation (`nodeApi` factory, per-tab `activeNodeId`) | ✅ | `4ff65c2` |
-| 7a — Content panels (Editor/Env/Artifacts/FolderPicker) routed via `nodeApi(activeNodeId)` | ✅ | (this batch) |
-| 7b — Per-client active node on backend (HubBrowserBridge); voice routing reads it | ✅ | (this batch) |
-| 7c — HomePage + Composer use `nodeApi(activeNodeId)`; `nodeId` flows to `createSession` | ✅ | (this batch) |
+| 7a — Frontend node-scoping foundation (`nodeApi` factory, per-tab `activeNodeId`) | ✅ | `4ff65c2` + `e45f97b` |
+| 7a — Content panels (Editor/Env/Artifacts/FolderPicker) routed via `nodeApi(activeNodeId)` | ✅ | `6f95d20` |
+| 7b — Per-client active node on backend (HubBrowserBridge); voice routing reads it | ✅ | `250b6de` |
+| 7c — HomePage + Composer use `nodeApi(activeNodeId)`; `nodeId` flows to `createSession` | ✅ | `c3a5c44` |
 | 8 — Retire hub-wide `node_registry.active_node_id`; Ring0 events route via `event.source_client_id` → per-client active node | ✅ | `75dd507` |
 | deferred-1 — `list_backends` + `get_backend_models` on `NodeOperations` (per-node PATH/home) | ✅ | `73356f8` |
 | deferred-2 — `uploadToSession` over tunnel (base64-over-NDJSON) | ✅ | `35c0f41` |
