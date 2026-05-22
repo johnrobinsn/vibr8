@@ -34,7 +34,7 @@ from vibr8_core.ring0 import Ring0Manager
 from vibr8_core.ring0_scheduler import TaskScheduler
 from vibr8_core.ring0_events import Ring0EventRouter
 from vibr8_core.node_operations import NodeOperations
-from vibr8_core.node_client import SwappableNodeClient
+from vibr8_core.node_client import SwappableNodeClient, NOT_READY
 from vibr8_core.hub_browser_bridge import HubBrowserBridge
 from server.node_registry import NodeRegistry
 from server.node_tunnel import NodeTunnel
@@ -408,21 +408,29 @@ def create_app() -> web.Application:
     task_scheduler = TaskScheduler()
     node_registry = NodeRegistry()
 
-    # NodeOperations bound to the hub's in-process managers — the initial
-    # target for local_node_ops. After the self-node registers, the
-    # SwappableNodeClient retargets at RemoteNodeClient(self_id, tunnel)
-    # via QualifyingNodeClient. Constructed before SessionRegistry so
-    # the registry can route through it.
-    _in_process_ops = NodeOperations(
-        launcher=launcher,
-        bridge=ws_bridge,
-        store=session_store,
-        ring0=ring0_manager,
-        worktree_tracker=worktree_tracker,
-        task_scheduler=task_scheduler,
-        default_backend="claude",
-    )
-    local_node_ops = SwappableNodeClient(_in_process_ops)
+    _use_self_node = os.environ.get("VIBR8_DISABLE_SELF_NODE") != "1"
+
+    # SwappableNodeClient's initial target:
+    #
+    # - Self-node mode (default): use the NOT_READY sentinel. Any call
+    #   before the self-node registers returns {"error": "Self-node not
+    #   ready"} — preferable to silently executing dormant in-process
+    #   code paths that don't reflect the node's actual state.
+    # - Legacy mode (VIBR8_DISABLE_SELF_NODE=1): build NodeOperations
+    #   against the hub's in-process managers, which then own session
+    #   state for the lifetime of the process.
+    if _use_self_node:
+        local_node_ops = SwappableNodeClient(NOT_READY)
+    else:
+        local_node_ops = SwappableNodeClient(NodeOperations(
+            launcher=launcher,
+            bridge=ws_bridge,
+            store=session_store,
+            ring0=ring0_manager,
+            worktree_tracker=worktree_tracker,
+            task_scheduler=task_scheduler,
+            default_backend="claude",
+        ))
     session_registry = SessionRegistry(
         ws_bridge, launcher, node_registry, local_node_ops=local_node_ops,
     )
@@ -506,15 +514,23 @@ def create_app() -> web.Application:
             except Exception:
                 logger.exception("[server] failed to forward Ring0 event")
         ws_bridge.set_event_forwarder(_forward_event_to_active_node)
-    task_scheduler.set_dependencies(launcher, ws_bridge)
+
     if webrtc_manager:
         webrtc_manager.set_ws_bridge(ws_bridge)
         webrtc_manager.set_hub_browser_bridge(hub_browser_bridge)
         webrtc_manager.set_local_node_ops(local_node_ops)
-        webrtc_manager.set_ring0_manager(ring0_manager)
-        webrtc_manager.set_launcher(launcher)
         webrtc_manager.set_node_registry(node_registry)
-    launcher.set_store(session_store)
+
+    # Legacy in-process wiring — only meaningful when the hub itself owns
+    # session state. In self-node mode (default) these managers are
+    # dormant: their callbacks never fire and webrtc.py reads Ring0 state
+    # from the status cache populated by polling local_node_ops.
+    if not _use_self_node:
+        task_scheduler.set_dependencies(launcher, ws_bridge)
+        launcher.set_store(session_store)
+        if webrtc_manager:
+            webrtc_manager.set_ring0_manager(ring0_manager)
+            webrtc_manager.set_launcher(launcher)
 
     # Restore persisted state — UNLESS the self-node will own ~/.vibr8/
     # (default for Option A keystone). In that mode the self-node
@@ -522,7 +538,6 @@ def create_app() -> web.Application:
     # the hub's in-process managers stay empty and route through the
     # loopback. Set VIBR8_DISABLE_SELF_NODE=1 to fall back to the legacy
     # in-process path.
-    _use_self_node = os.environ.get("VIBR8_DISABLE_SELF_NODE") != "1"
     if not _use_self_node:
         launcher.restore_from_disk()
         ws_bridge.restore_from_disk()
@@ -533,22 +548,26 @@ def create_app() -> web.Application:
             session_store.directory,
         )
 
-    # ── Callbacks ─────────────────────────────────────────────────────────
+    # ── Callbacks (legacy in-process mode only) ──────────────────────────
+    # In self-node mode the local launcher never spawns CLIs, so these
+    # callbacks would never fire. The self-node has its own callbacks
+    # wired up inside its subprocess.
 
-    # When the CLI reports its internal session_id, store it for --resume
-    def on_cli_session_id(session_id: str, cli_session_id: str) -> None:
-        launcher.set_cli_session_id(session_id, cli_session_id)
-        # Persist Ring0's CLI session ID for --resume across restarts
-        if ring0_manager and session_id == ring0_manager.session_id:
-            ring0_manager.on_cli_session_id(cli_session_id)
+    if not _use_self_node:
+        # When the CLI reports its internal session_id, store it for --resume
+        def on_cli_session_id(session_id: str, cli_session_id: str) -> None:
+            launcher.set_cli_session_id(session_id, cli_session_id)
+            # Persist Ring0's CLI session ID for --resume across restarts
+            if ring0_manager and session_id == ring0_manager.session_id:
+                ring0_manager.on_cli_session_id(cli_session_id)
 
-    ws_bridge.on_cli_session_id_received(on_cli_session_id)
+        ws_bridge.on_cli_session_id_received(on_cli_session_id)
 
-    # When an adapter (Codex/OpenCode) is created, attach it to the WsBridge
-    def on_adapter_created(session_id: str, adapter: object, backend_type: str = "codex") -> None:
-        ws_bridge.attach_adapter(session_id, adapter, backend_type)
+        # When an adapter (Codex/OpenCode) is created, attach it to the WsBridge
+        def on_adapter_created(session_id: str, adapter: object, backend_type: str = "codex") -> None:
+            ws_bridge.attach_adapter(session_id, adapter, backend_type)
 
-    launcher.on_codex_adapter_created(on_adapter_created)
+        launcher.on_codex_adapter_created(on_adapter_created)
 
     # When a computer-use session is created, spin up the agent and register it
     try:
