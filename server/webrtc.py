@@ -868,16 +868,29 @@ class WebRTCManager:
                         if after_word.startswith("ring zero on") or after_word.startswith("ring 0 on"):
                             if pre_text:
                                 await _submit_text(pre_text)
-                            if self._ring0_manager:
+                            # Route through NodeClient so the self-node sees
+                            # the toggle (the hub's in-process Ring0Manager
+                            # is dormant in Option A self-node mode).
+                            if self._local_node_ops:
+                                try:
+                                    await self._local_node_ops.ring0_toggle(enabled=True)
+                                except Exception:
+                                    logger.exception("[stt] ring0_toggle(True) failed")
+                            elif self._ring0_manager:
                                 self._ring0_manager.enable()
-                                asyncio.ensure_future(self._speak_short(client_id, "Ring zero on"))
+                            asyncio.ensure_future(self._speak_short(client_id, "Ring zero on"))
                             return
                         if after_word.startswith("ring zero off") or after_word.startswith("ring 0 off"):
                             if pre_text:
                                 await _submit_text(pre_text)
-                            if self._ring0_manager:
+                            if self._local_node_ops:
+                                try:
+                                    await self._local_node_ops.ring0_toggle(enabled=False)
+                                except Exception:
+                                    logger.exception("[stt] ring0_toggle(False) failed")
+                            elif self._ring0_manager:
                                 self._ring0_manager.disable()
-                                asyncio.ensure_future(self._speak_short(client_id, "Ring zero off"))
+                            asyncio.ensure_future(self._speak_short(client_id, "Ring zero off"))
                             return
                         if after_word.startswith("note"):
                             if pre_text:
@@ -1280,9 +1293,19 @@ class WebRTCManager:
             result = mode.on_disconnect()
             if result:
                 logger.info("[voice-mode] client %s: flushing on disconnect", client_id)
-                if self._ring0_manager and self._ring0_manager.is_enabled and self._ring0_manager.session_id:
-                    await self._ws_bridge.submit_user_message(self._ring0_manager.session_id, result, source_client_id=client_id)
-                else:
+                # Prefer Ring0 via NodeClient (works in self-node mode); fall
+                # through to the active session if Ring0 is disabled.
+                delivered = False
+                if self._local_node_ops:
+                    try:
+                        ring0_result = await self._local_node_ops.ring0_input(
+                            text=result, source_client_id=client_id,
+                        )
+                        if "error" not in ring0_result:
+                            delivered = True
+                    except Exception:
+                        logger.exception("[voice-mode] ring0_input failed; falling through")
+                if not delivered:
                     target_session = self._current_session_for(client_id)
                     if target_session:
                         await self._ws_bridge.submit_user_message(target_session, result, source_client_id=client_id)
