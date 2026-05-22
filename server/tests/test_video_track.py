@@ -16,6 +16,10 @@ def _make_mock_capture(width=1920, height=1080, fps=30):
     capture.target_fps = fps
     capture.capture_width = width
     capture.capture_height = height
+    # ScreenShareTrack reads `_frames_captured` for diagnostics; the
+    # default MagicMock would make `> 0` raise TypeError, so stub it
+    # with a real int.
+    capture._frames_captured = 0
 
     # Generate a yuv420p frame
     frame = av.VideoFrame(width, height, "yuv420p")
