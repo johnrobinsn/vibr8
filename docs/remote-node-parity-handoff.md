@@ -47,8 +47,11 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 7a — Content panels (Editor/Env/Artifacts/FolderPicker) routed via `nodeApi(activeNodeId)` | ✅ | (this batch) |
 | 7b — Per-client active node on backend (HubBrowserBridge); voice routing reads it | ✅ | (this batch) |
 | 7c — HomePage + Composer use `nodeApi(activeNodeId)`; `nodeId` flows to `createSession` | ✅ | (this batch) |
-| 8 — Retire hub-wide `node_registry.active_node_id`; Ring0 events route via `event.source_client_id` → per-client active node | ✅ | (this batch) |
-| 8 deferred — `list_backends` on `NodeOperations`; `uploadToSession` over tunnel; WebRTC peer-per-tab | ⏳ | — |
+| 8 — Retire hub-wide `node_registry.active_node_id`; Ring0 events route via `event.source_client_id` → per-client active node | ✅ | `75dd507` |
+| deferred-1 — `list_backends` + `get_backend_models` on `NodeOperations` (per-node PATH/home) | ✅ | `73356f8` |
+| deferred-2 — `uploadToSession` over tunnel (base64-over-NDJSON) | ✅ | `35c0f41` |
+| deferred-3 — Hub purity: skip dormant in-process wiring in self-node mode (`NOT_READY` initial target) | ✅ | `bd29a01` |
+| deferred-4 — WebRTC peer-per-tab via `peer_key = clientId#tabId` | ✅ | `ea97025` |
 
 ### Phase 4c-1 — what's done vs deferred
 
