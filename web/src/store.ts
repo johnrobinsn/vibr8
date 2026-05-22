@@ -12,9 +12,38 @@ function getClientId(): string {
   return id;
 }
 
+// Per-tab identity. Lives in sessionStorage so each browser tab has its
+// own stable identity (survives F5 within the tab; lost when the tab
+// closes). Distinct from clientId (cross-tab user identity, localStorage).
+function getTabId(): string {
+  if (typeof window === "undefined") return crypto.randomUUID();
+  const key = "vibr8_tab_id";
+  let id = sessionStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    sessionStorage.setItem(key, id);
+  }
+  return id;
+}
+
+// Per-tab active node selection. sessionStorage so each tab can point
+// at a different node simultaneously (Hermes in one tab, neo in another)
+// and survives refresh within the tab.
+function getInitialActiveNodeId(): string {
+  if (typeof window === "undefined") return "local";
+  return sessionStorage.getItem("vibr8_active_node_id") || "local";
+}
+
+function persistActiveNodeId(nodeId: string): void {
+  if (typeof window === "undefined") return;
+  sessionStorage.setItem("vibr8_active_node_id", nodeId);
+}
+
 interface AppState {
-  // Per-app client identity
+  // Per-app client identity (stable across tabs of the same browser).
   clientId: string;
+  // Per-tab identity (unique per browser tab; survives refresh).
+  tabId: string;
   clientRole: "primary" | "secondscreen";
 
   // Sessions
@@ -278,6 +307,7 @@ function getInitialNotificationSound(): boolean {
 
 export const useStore = create<AppState>((set) => ({
   clientId: getClientId(),
+  tabId: getTabId(),
   clientRole: "primary",
   sessions: new Map(),
   sdkSessions: [],
@@ -341,7 +371,7 @@ export const useStore = create<AppState>((set) => ({
   })(),
   secondScreenDarkMode: localStorage.getItem("cc-second-screen-dark-mode") !== "false",
   nodes: [],
-  activeNodeId: "local",
+  activeNodeId: getInitialActiveNodeId(),
   androidDevices: [],
   playgroundActive: false,
   playgroundSessionId: null,
@@ -810,7 +840,10 @@ export const useStore = create<AppState>((set) => ({
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
   setNodes: (nodes) => set({ nodes }),
-  setActiveNode: (nodeId) => set({ activeNodeId: nodeId }),
+  setActiveNode: (nodeId) => {
+    persistActiveNodeId(nodeId);
+    set({ activeNodeId: nodeId });
+  },
   setAndroidDevices: (devices) => set({ androidDevices: devices }),
   clearSessionState: () => {
     console.log(`[store] clearSessionState — resetting cliConnected/connectionStatus maps`);

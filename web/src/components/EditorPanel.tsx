@@ -9,7 +9,7 @@ import { html } from "@codemirror/lang-html";
 import { css } from "@codemirror/lang-css";
 import { markdown } from "@codemirror/lang-markdown";
 import { useStore } from "../store.js";
-import { api, type TreeNode } from "../api.js";
+import { api, nodeApi, type TreeNode } from "../api.js";
 
 /** Custom CodeMirror theme that uses cc-* CSS variables for warm light/dark backgrounds */
 const warmTheme = EditorView.theme({

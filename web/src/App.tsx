@@ -128,6 +128,17 @@ export default function App() {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
 
+  // Reflect the per-tab active node in document.title so each browser tab
+  // is identifiable in the tab strip.
+  const activeNodeId = useStore((s) => s.activeNodeId);
+  const nodes = useStore((s) => s.nodes);
+  useEffect(() => {
+    const name = activeNodeId === "local"
+      ? null
+      : nodes.find((n) => n.id === activeNodeId)?.name ?? null;
+    document.title = name ? `vibr8 · ${name}` : "vibr8";
+  }, [activeNodeId, nodes]);
+
   // Auto-reconnect audio if it was active before reload
   const audioReconnectedRef = useRef(false);
   useEffect(() => {

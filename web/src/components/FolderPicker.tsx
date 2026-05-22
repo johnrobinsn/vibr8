@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { api, type DirEntry } from "../api.js";
+import { nodeApi, type DirEntry } from "../api.js";
+import { useStore } from "../store.js";
 import { getRecentDirs, addRecentDir } from "../utils/recent-dirs.js";
 
 interface FolderPickerProps {
@@ -10,6 +11,7 @@ interface FolderPickerProps {
 }
 
 export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerProps) {
+  const activeNodeId = useStore((s) => s.activeNodeId);
   const [browsePath, setBrowsePath] = useState("");
   const [browseDirs, setBrowseDirs] = useState<DirEntry[]>([]);
   const [browseLoading, setBrowseLoading] = useState(false);
@@ -41,7 +43,10 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
   const loadDirs = useCallback(async (path?: string) => {
     setBrowseLoading(true);
     try {
-      const result = await api.listDirs(path);
+      // Bare nodeId === "local" maps to the hub's local_node_ops in
+      // the backend; everything else hits the named node via tunnel.
+      const nid = activeNodeId === "local" ? "" : activeNodeId;
+      const result = await nodeApi(nid).fs.listDirs(path);
       setBrowsePath(result.path);
       setBrowseDirs(result.dirs);
     } catch {
@@ -49,7 +54,7 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
     } finally {
       setBrowseLoading(false);
     }
-  }, []);
+  }, [activeNodeId]);
 
   useEffect(() => {
     loadDirs(initialPath || undefined);
