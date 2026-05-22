@@ -853,7 +853,7 @@ def create_app() -> web.Application:
         # Auto-launch ring0 session if it was previously enabled — but
         # only when the hub is the session owner. In Option A self-node
         # mode (default) the self-node handles Ring0 auto-launch itself.
-        if ring0_manager.is_enabled and not _use_self_node:
+        if ring0_manager and ring0_manager.is_enabled and not _use_self_node:
             logger.info("[server] Ring0 was enabled — auto-launching session")
             spawn(ring0_manager.ensure_session(launcher, ws_bridge))
 
