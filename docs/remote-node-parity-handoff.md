@@ -34,7 +34,9 @@ The user wants remote nodes (e.g. the "Hermes" node) to be first-class equivalen
 | 4c-4 step 2c — Data-dir consolidation (`~/.vibr8/`) + skip hub restore when full self-node mode | ✅ | `8866492` |
 | 4c-5 — `QualifyingNodeClient` for session-id prefix at hub boundary | ✅ verified live | `448287f` + `c4a75df` |
 | 4c-6 step 1 — Self-node restart-on-crash w/ exp backoff | ✅ verified live | `ff1b7d2` |
-| **4c-6 step 2+ — Production flip** (drop env-var gates, extract `HubBrowserBridge` real state, remove in-process managers, delete `LocalNodeClient`) | ⏳ DEFERRED (see decision section below) | — |
+| 4c-6 step 2 — Flip default to self-node mode (drop env-var gates) | ✅ verified live | `82fd425` |
+| 4c-6 step 3 — Voice transcript routing via local_node_ops | ✅ | `8428afb` |
+| **4c-6 step 4+ — Remove residual in-process refs + delete managers** (Option A choice) | ⏳ NEXT | — |
 | 4c-6 — Restart-on-crash; delete `LocalNodeClient` | ⏳ | — |
 | 6 — Hub-side I/O bridging (STT/NoteMode/TTS to active node; `ring0_event` and `speak` tunnel commands) | ⏳ | — |
 | 6b — Per-node scheduler (deferred from 3g) | ⏳ | — |
@@ -214,6 +216,70 @@ The remaining work to drop the in-process path entirely is real:
 Estimated 500-1000 LOC across `vibr8_core/hub_browser_bridge.py`,
 `server/main.py`, `server/webrtc.py`, `vibr8_core/ws_bridge.py`,
 plus tests.
+
+### Phase 4c-6 step 2+ — Option A in progress
+
+Self-node mode is now the default startup path (commit `82fd425`).
+Set `VIBR8_DISABLE_SELF_NODE=1` to fall back to legacy in-process
+mode for debugging.
+
+Voice transcript routing (commit `8428afb`): the hub's WebRTC pipeline
+now calls `local_node_ops.ring0_input(text, source_client_id)` for
+local Ring0 — which in self-node mode tunnels to the self-node. If
+Ring0 is disabled on the self-node, `ring0_input` returns
+`{"error": ...}` and the hub falls through to the active-session
+path. The remote-node branch (active_node != "local") is unchanged.
+
+**Step 4 (remaining work)** — residual hub-side refs to in-process
+managers, in priority order:
+
+1. **`webrtc.py` ring0_manager reads** (lines 447, 455, 719, 726, 818,
+   819, 949, 957). These gate "broadcast voice mode to Ring0 session"
+   and similar. Today they read the hub's Ring0Manager.is_enabled +
+   session_id, which is stale in self-node mode (Ring0Manager loads
+   ring0.json on init, doesn't re-read). Options:
+   - Make Ring0Manager.is_enabled re-read ring0.json on call (cheap
+     stat+parse). Simplest.
+   - Or query `local_node_ops.ring0_status()` with a small TTL cache.
+   - Or skip the broadcast entirely if `_ring0_manager is None`.
+
+2. **`webrtc.py` ring0 enable/disable from voice commands** (lines 872,
+   879). `vibr8 ring zero on/off` calls `self._ring0_manager.enable()`
+   /`.disable()`. In self-node mode the hub's ring0_manager writes
+   ring0.json but the self-node doesn't notice. Fix: redirect to
+   `local_node_ops.ring0_toggle(enabled=True/False)`.
+
+3. **`webrtc.py` line 1283-1284** — another local Ring0 submit path
+   (in a different code path from `_submit_text`). Same migration as
+   step 3 above: replace with `local_node_ops.ring0_input(text)`.
+
+4. **`main.py` event callbacks** (`ws_bridge.on_cli_session_id_received`,
+   `launcher.on_codex_adapter_created`, `launcher.on_computer_use_created`,
+   `ws_bridge.on_cli_relaunch_needed_callback`,
+   `ws_bridge.on_first_turn_completed_callback`). These fire from the
+   in-process bridge which is dormant in self-node mode (no sessions
+   ever get there). They can be deleted along with the in-process
+   bridge.
+
+5. **`ws_bridge.set_*` wirings** in `main.py` (`set_store`,
+   `set_webrtc_manager`, `set_ring0_manager`, `set_node_registry`,
+   `set_task_scheduler`, `set_session_registry`). Dormant in self-node
+   mode. Delete with the in-process bridge.
+
+6. **In-process manager construction** in `main.py` (`launcher = CliLauncher(...)`,
+   `ws_bridge = WsBridge()`, `ring0_manager = Ring0Manager(...)`,
+   `session_store = SessionStore()`). Once steps 1-5 are done, these
+   can be deleted; routes/webrtc no longer touch them.
+
+7. **`LocalNodeClient` alias + `SwappableNodeClient`**. Once 6 is done,
+   there's only one target for `local_node_ops` ever (the self-node
+   client). `SwappableNodeClient` becomes redundant — replace with a
+   plain reference. Delete the `LocalNodeClient = NodeOperations`
+   alias.
+
+Each step is roughly a small commit. Order matters: steps 1-3 first
+(those touch live code paths in self-node mode), then 4-7 (cleanup of
+dormant code).
 
 ### Decision point: do we need the full keystone?
 
