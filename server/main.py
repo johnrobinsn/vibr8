@@ -353,6 +353,17 @@ async def handle_node_ws(request: web.Request) -> web.WebSocketResponse:
             n = registry.get_node(nid)
             if n:
                 n.ring0_enabled = msg.get("enabled", False)
+        elif msg_type == "native_push":
+            # Native-client notification (permission_cancelled, status_change,
+            # etc.) from a remote node. Native clients connect to the hub,
+            # so the node forwards via tunnel and we dispatch via the hub's
+            # own _push_to_native_clients with the session id qualified.
+            raw_session_id = msg.get("sessionId", "")
+            event = msg.get("event", "")
+            payload = msg.get("payload") or {}
+            if raw_session_id and event and bridge:
+                qualified_id = SessionRegistry.qualify(nid, raw_session_id)
+                await bridge._push_to_native_clients(qualified_id, event, payload)
         else:
             logger.debug("[nodes] Unknown message type %r from node %s", msg_type, node.name)
 

@@ -138,6 +138,10 @@ class NodeAgent:
 
         # Set broadcast hook so CLI output goes to the hub tunnel
         self._bridge._broadcast_hook = self._forward_to_hub
+        # Native-client pushes (permission_cancelled, status_change, etc.)
+        # need to reach hub-side native clients too — they connect to the
+        # hub, not the node.
+        self._bridge._native_push_hook = self._forward_native_push_to_hub
 
         async def _on_sessions_changed() -> None:
             if self._ws and not self._ws.closed:
@@ -374,6 +378,20 @@ class NodeAgent:
                 "type": "session_message",
                 "sessionId": session_id,
                 "message": msg,
+            }) + "\n")
+
+    async def _forward_native_push_to_hub(
+        self, session_id: str, event: str, payload: dict | None = None,
+    ) -> None:
+        """Forward a native-client push (permission_cancelled etc.) to the
+        hub via the tunnel. The hub's on_node_message dispatches it to its
+        own _push_to_native_clients with the session id qualified."""
+        if self._ws and not self._ws.closed:
+            await self._ws.send_str(json.dumps({
+                "type": "native_push",
+                "sessionId": session_id,
+                "event": event,
+                "payload": payload or {},
             }) + "\n")
 
     # ── Local server ──────────────────────────────────────────────────────

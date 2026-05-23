@@ -94,6 +94,13 @@ class WsBridge:
         # Format: "{node_id}:{raw_session_id}" for remote, raw id for local
         # Hook for vibr8-node: intercepts _broadcast_to_browsers for remote forwarding
         self._broadcast_hook: Callable[..., Awaitable[None]] | None = None
+        # Hook for vibr8-node: intercepts _push_to_native_clients so native
+        # client notifications (e.g. permission_cancelled) reach hub-side
+        # native clients (watch, second screen) when the session lives on
+        # a remote node. Native clients connect to the hub, not the node,
+        # so the node-local push_to_native_clients call would otherwise
+        # find an empty subscriber list and drop the message.
+        self._native_push_hook: Callable[..., Awaitable[None]] | None = None
         self._computer_use_agents: dict[str, Any] = {}  # session_id → ComputerUseAgent
         self._active_tts: dict[str, Any] = {}  # session_id → TTSEngine instance
         self._thinking_timers: dict[str, asyncio.TimerHandle] = {}
@@ -2690,6 +2697,11 @@ class WsBridge:
 
     async def _push_to_native_clients(self, session_id: str, event: str, payload: dict[str, Any] | None = None) -> None:
         """Push a notification to native clients subscribed to *session_id*."""
+        # On vibr8-node: forward to hub instead of pushing locally (the
+        # node has no native clients of its own — they live on the hub).
+        if self._native_push_hook:
+            await self._native_push_hook(session_id, event, payload)
+            return
         if not self._native_ws_by_client:
             return
         msg: dict[str, Any] = {"type": "push", "event": event, "sessionId": session_id}
