@@ -525,18 +525,43 @@ class Ring0Manager:
 
         info = launcher.get_session(session_id)
 
-        if info and info.state not in ("exited",):
-            # Session is alive — nothing to do
+        # Rebuild the agent_config every time so the vibr8 MCP server list
+        # (Hermes ACP servers) is current for whatever relaunch path runs
+        # next. agentConfig isn't persisted across restarts, so without
+        # this Ring0 on Hermes would relaunch without MCP servers after
+        # a node restart and end up with no vibr8 tools.
+        agent_config: dict[str, Any] | None = None
+        if backend_type == "hermes":
+            agent_config = {"mcpServers": self._build_acp_mcp_servers()}
+
+        # A session record can survive a process crash with state still
+        # "running"/"starting" — the actual subprocess is dead but the
+        # launcher hasn't noticed. Use can_relaunch to check whether the
+        # launcher is genuinely tracking a live process.
+        process_alive = (
+            info is not None
+            and not launcher.can_relaunch(session_id)
+            and info.state not in ("exited",)
+        )
+
+        if info and process_alive:
+            # Truly alive — refresh agentConfig in case Ring0 just toggled
+            # backends or MCP set changed, but don't disrupt the subprocess.
+            if agent_config is not None:
+                info.agentConfig = agent_config
             logger.info("[ring0] Session %s already running", session_id)
             return session_id
 
         if info:
-            # Session exists but is exited — update config and relaunch
+            # Session record exists but the subprocess is dead (state==exited
+            # OR persisted state lies). Refresh config and relaunch.
             info.cwd = str(work_dir)
             info.mcpConfig = str(mcp_config_path)
             info.model = self._model if backend_type not in non_claude_backends else None
             if backend_type in non_claude_backends:
                 info.cliSessionId = None
+            if agent_config is not None:
+                info.agentConfig = agent_config
             await launcher.relaunch(session_id)
             logger.info("[ring0] Relaunched session %s", session_id)
             return session_id
