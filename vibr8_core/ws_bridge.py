@@ -744,8 +744,7 @@ class WsBridge:
         for ws, client_id in list(session.browser_sockets.items()):
             await ws.close()
             if client_id:
-                self._client_sessions.pop(client_id, None)
-                self._ws_by_client.pop(client_id, None)
+                self._cleanup_client_tracking_for_ws(client_id, ws)
         session.browser_sockets.clear()
         self._sessions.pop(session_id, None)
         self._auto_naming_attempted.discard(session_id)
@@ -1196,6 +1195,36 @@ class WsBridge:
 
         await self._route_browser_message(session, msg, ws)
 
+    def _find_open_ws_for_client(
+        self, client_id: str, exclude: web.WebSocketResponse | None = None,
+    ) -> web.WebSocketResponse | None:
+        """Return any still-open browser ws bound to client_id (excluding one)."""
+        for s in self._sessions.values():
+            for other_ws, cid in s.browser_sockets.items():
+                if cid == client_id and other_ws is not exclude and not other_ws.closed:
+                    return other_ws
+        return None
+
+    def _cleanup_client_tracking_for_ws(
+        self, client_id: str, closing_ws: web.WebSocketResponse,
+    ) -> None:
+        """Per-tab-safe cleanup of client-level tracking when one ws closes/dies.
+
+        Multiple browser tabs can share a client_id (each with its own ws).
+        Only clear `_client_sessions` / `_ws_by_client` / `_client_roles` if
+        the closing ws is the currently-tracked one AND no surviving ws for
+        this client remains. If a survivor exists, promote it instead.
+        """
+        if self._ws_by_client.get(client_id) is not closing_ws:
+            return
+        survivor = self._find_open_ws_for_client(client_id, exclude=closing_ws)
+        if survivor is not None:
+            self._ws_by_client[client_id] = survivor
+            return
+        self._client_sessions.pop(client_id, None)
+        self._ws_by_client.pop(client_id, None)
+        self._client_roles.pop(client_id, None)
+
     async def handle_browser_close(self, ws: web.WebSocketResponse) -> None:
         is_mirror = ws in self._mirror_sockets
         if is_mirror:
@@ -1212,9 +1241,7 @@ class WsBridge:
                     was_second_screen = False
                     if client_id:
                         was_second_screen = self._client_roles.get(client_id) == "secondscreen"
-                        self._client_sessions.pop(client_id, None)
-                        self._ws_by_client.pop(client_id, None)
-                        self._client_roles.pop(client_id, None)
+                        self._cleanup_client_tracking_for_ws(client_id, ws)
                     logger.info(f"[ws-bridge] Browser disconnected for session {sid} client={client_id or '(none)'} ({len(s.browser_sockets)} browsers)")
 
                     # Notify Ring0 when a paired second screen disconnects
@@ -2433,8 +2460,7 @@ class WsBridge:
             for ws in dead:
                 cid = session.browser_sockets.pop(ws, "")
                 if cid:
-                    self._client_sessions.pop(cid, None)
-                    self._ws_by_client.pop(cid, None)
+                    self._cleanup_client_tracking_for_ws(cid, ws)
         return True
 
     async def broadcast_ring0_switch_node(self, node_id: str, *, client_id: str = "") -> bool:
@@ -2473,8 +2499,7 @@ class WsBridge:
             for ws in dead:
                 cid = session.browser_sockets.pop(ws, "")
                 if cid:
-                    self._client_sessions.pop(cid, None)
-                    self._ws_by_client.pop(cid, None)
+                    self._cleanup_client_tracking_for_ws(cid, ws)
         return True
 
     def get_message_history(self, session_id: str) -> list[dict[str, Any]]:
@@ -2593,8 +2618,7 @@ class WsBridge:
             for ws in dead:
                 client_id = session.browser_sockets.pop(ws, "")
                 if client_id:
-                    self._client_sessions.pop(client_id, None)
-                    self._ws_by_client.pop(client_id, None)
+                    self._cleanup_client_tracking_for_ws(client_id, ws)
 
     async def _broadcast_to_browsers(self, session: Session, msg: dict[str, Any]) -> None:
         # On vibr8-node: forward to hub tunnel instead of local browsers
@@ -2618,8 +2642,7 @@ class WsBridge:
         for ws in dead:
             client_id = session.browser_sockets.pop(ws, "")
             if client_id:
-                self._client_sessions.pop(client_id, None)
-                self._ws_by_client.pop(client_id, None)
+                self._cleanup_client_tracking_for_ws(client_id, ws)
 
     async def _send_initial_state(self, client_id: str) -> None:
         """Push a full state snapshot to a native client after subscribe."""

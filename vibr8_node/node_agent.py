@@ -97,7 +97,8 @@ class NodeAgent:
             ring0_work_dir = node_dir / "ring0"
         self._store = SessionStore(directory=session_dir)
         self._bridge = WsBridge()
-        self._launcher = CliLauncher(self.port)
+        # Node's local server is plain HTTP, so the CLI must use ws:// (not wss://).
+        self._launcher = CliLauncher(self.port, scheme="ws")
         self._ring0 = Ring0Manager(
             self.port,
             config_path=ring0_config_path,
@@ -124,9 +125,16 @@ class NodeAgent:
 
         def on_cli_relaunch_needed(session_id: str) -> None:
             info = self._launcher.get_session(session_id)
-            if info and not info.archived and info.state != "starting":
-                logger.info("Auto-relaunching CLI for session %s", session_id[:8])
-                asyncio.ensure_future(self._launcher.relaunch(session_id))
+            if not info or info.archived:
+                return
+            # State can stick at "starting" after a server restart when the
+            # old PID is dead but the restore left state untouched. Suppress
+            # only when a spawn is genuinely in flight — i.e. the launcher
+            # is tracking a live process for this session.
+            if session_id in self._launcher._processes:
+                return
+            logger.info("Auto-relaunching CLI for session %s", session_id[:8])
+            asyncio.ensure_future(self._launcher.relaunch(session_id))
 
         self._bridge.on_cli_relaunch_needed_callback(on_cli_relaunch_needed)
 
@@ -456,9 +464,13 @@ class NodeAgent:
     async def _start_local_server(self) -> None:
         """Start a minimal aiohttp server for CLI WebSocket + Ring0 MCP."""
         middlewares = []
-        # Self-mode is co-located with the hub, so no proxy needed (proxying
-        # to the same host's hub would just loop).
-        if self.hub_service_token and not self.self_mode:
+        # Hub-only routes (e.g. /api/clients, /api/ring0/query-client) must be
+        # proxied to the hub even from the self-node — they read state that
+        # only exists on the hub's WsBridge (browser ws connections,
+        # client_metadata, etc.). The self-node has its own WsBridge instance
+        # which is empty for these. The hub runs on a different port so there
+        # is no loop.
+        if self.hub_service_token:
             middlewares.append(self._make_hub_proxy_middleware())
         app = web.Application(middlewares=middlewares)
         bridge = self._bridge

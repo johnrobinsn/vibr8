@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { useStore } from "../store.js";
 import { nodeApi } from "../api.js";
 import type { Artifact } from "../types.js";
@@ -41,13 +41,12 @@ export function ArtifactList({ onSelect }: { onSelect: (artifact: Artifact) => v
   const [filterSessionId, setFilterSessionId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; artifact: Artifact } | null>(null);
 
-  const loadArtifacts = useCallback(() => {
-    artifacts_api.list().then((a) => useStore.getState().setArtifacts(a as Artifact[])).catch(() => {});
-  }, [artifacts_api]);
-
   useEffect(() => {
-    loadArtifacts();
-  }, [loadArtifacts]);
+    const nid = activeNodeId === "local" ? "" : activeNodeId;
+    nodeApi(nid).artifacts.list()
+      .then((a) => useStore.getState().setArtifacts(a as Artifact[]))
+      .catch(() => {});
+  }, [activeNodeId]);
 
   useEffect(() => {
     if (contextMenu) {

@@ -586,7 +586,7 @@ class Ring0Manager:
         import subprocess
 
         server_dir = Path(__file__).parent.parent.resolve()
-        mcp_script = str(server_dir / "server" / "ring0_mcp.py")
+        mcp_script = str(server_dir / "vibr8_core" / "ring0_mcp.py")
         uv_bin = shutil.which("uv") or "uv"
         codex_bin = shutil.which("codex") or "codex"
 
@@ -612,7 +612,7 @@ class Ring0Manager:
     def _ensure_opencode_mcp(self, work_dir: Path) -> None:
         """Write opencode.jsonc in the work dir with vibr8 MCP server config."""
         server_dir = Path(__file__).parent.parent.resolve()
-        mcp_script = str(server_dir / "server" / "ring0_mcp.py")
+        mcp_script = str(server_dir / "vibr8_core" / "ring0_mcp.py")
         uv_bin = shutil.which("uv") or "uv"
         env = self._get_mcp_env()
 
@@ -661,7 +661,7 @@ class Ring0Manager:
     def _build_acp_mcp_servers(self) -> list[dict[str, Any]]:
         """Build MCP server list in ACP McpServerStdio format for Hermes."""
         server_dir = Path(__file__).parent.parent.resolve()
-        mcp_script = str(server_dir / "server" / "ring0_mcp.py")
+        mcp_script = str(server_dir / "vibr8_core" / "ring0_mcp.py")
         uv_bin = shutil.which("uv") or "uv"
         env = self._get_mcp_env()
         return [{
@@ -685,7 +685,7 @@ class Ring0Manager:
         agents_md.write_text(prompt)
 
         server_dir = Path(__file__).parent.parent.resolve()
-        mcp_script = str(server_dir / "server" / "ring0_mcp.py")
+        mcp_script = str(server_dir / "vibr8_core" / "ring0_mcp.py")
         uv_bin = shutil.which("uv") or "uv"
         mcp_config = {
             "mcpServers": {

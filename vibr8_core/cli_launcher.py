@@ -123,10 +123,13 @@ class CliLauncher:
     """Manages CLI backend processes (Claude Code via --sdk-url WebSocket,
     or Codex via app-server stdio)."""
 
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, scheme: Optional[str] = None) -> None:
         self._sessions: Dict[str, SdkSessionInfo] = {}
         self._processes: Dict[str, asyncio.subprocess.Process] = {}
         self._port = port
+        # scheme = "ws" or "wss". None = auto-detect from cert files (hub).
+        # vibr8_node always passes "ws" because its local server is plain HTTP.
+        self._scheme_override = scheme
         self._store: Optional[SessionStore] = None
         self._on_adapter: Optional[
             Callable[[str, Any, str], None]  # (session_id, adapter, backend_type)
@@ -419,8 +422,11 @@ class CliLauncher:
             if resolved:
                 binary = resolved
 
-        cert_dir = Path(__file__).parent.parent / "certs"
-        scheme = "wss" if (cert_dir / "cert.pem").exists() and (cert_dir / "key.pem").exists() else "ws"
+        if self._scheme_override:
+            scheme = self._scheme_override
+        else:
+            cert_dir = Path(__file__).parent.parent / "certs"
+            scheme = "wss" if (cert_dir / "cert.pem").exists() and (cert_dir / "key.pem").exists() else "ws"
         sdk_url = f"{scheme}://localhost:{self._port}/ws/cli/{session_id}"
 
         args: List[str] = [
