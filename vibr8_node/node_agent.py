@@ -407,6 +407,21 @@ class NodeAgent:
         hub_token = self.hub_service_token
         hub_verify_ssl = not (hub_http_url.startswith("https://localhost") or hub_http_url.startswith("https://127.0.0.1"))
 
+        # Routes proxied to the hub. Two categories:
+        # 1. Hub-only state (clients, second-screen pairings, artifacts).
+        # 2. /api/ring0/* routes that need cross-node session resolution
+        #    via the hub's session_registry — the node has no registry of
+        #    its own, so its local fallback can only exact-match against
+        #    its launcher and rejects the 8-char prefixes Ring0 passes
+        #    from list_sessions output. Send-message / interrupt / etc.
+        #    all fall in this bucket.
+        # Routes intentionally left LOCAL:
+        # - /api/ring0/sessions: returns THIS node's session list
+        # - /api/ring0/status, /toggle, /switch-backend, /switch-model,
+        #   /mute-events, /create-session, /node-environment, /tasks*:
+        #   all per-node Ring0 config / scheduler.
+        # - /api/ring0/get-session-mode, /set-session-mode: per-node
+        #   permission-mode state (Ring0 only queries its own node).
         _HUB_ONLY_PREFIXES = (
             "/api/clients",
             "/api/nodes",
@@ -414,6 +429,13 @@ class NodeAgent:
             "/api/ring0/switch-ui",
             "/api/ring0/switch-audio",
             "/api/ring0/clients",
+            "/api/ring0/prompt-context",
+            "/api/ring0/send-message",
+            "/api/ring0/interrupt",
+            "/api/ring0/respond-permission",
+            "/api/ring0/rename-session",
+            "/api/ring0/session-output/",
+            "/api/ring0/set-guard",
             "/api/second-screen/",
             "/api/artifacts",
         )
