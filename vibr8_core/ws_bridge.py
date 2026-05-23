@@ -1427,6 +1427,12 @@ class WsBridge:
         }
         if msg_id:
             browser_msg["msg_id"] = msg_id
+        # Streaming updates (same msg_id, new/expanded content blocks —
+        # e.g. an initial empty `thinking` placeholder being replaced
+        # with thinking text + tool_use). Marked so the frontend swaps
+        # the prior cached message instead of dedupe-dropping the update.
+        if is_update:
+            browser_msg["update"] = True
         # Log tool uses in assistant messages for debugging
         if isinstance(text, dict):
             content_blocks = text.get("content", [])

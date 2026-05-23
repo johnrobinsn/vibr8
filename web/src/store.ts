@@ -193,6 +193,11 @@ interface AppState {
 
   // Message actions
   appendMessage: (sessionId: string, msg: ChatMessage) => void;
+  // Replace an existing message by id, or append if absent. Used for
+  // streaming assistant updates from the bridge (same msg_id, fresh
+  // content blocks). Plain appendMessage no-ops on duplicate id, which
+  // is fine for replayed history but drops streaming updates on the floor.
+  replaceMessage: (sessionId: string, msg: ChatMessage) => void;
   setMessages: (sessionId: string, msgs: ChatMessage[]) => void;
   setArchivedCount: (sessionId: string, count: number) => void;
   updateLastAssistantMessage: (sessionId: string, updater: (msg: ChatMessage) => ChatMessage) => void;
@@ -586,6 +591,24 @@ export const useStore = create<AppState>((set, get) => ({
       if (msg.id && existing.some((m) => m.id === msg.id)) return {};
       const messages = new Map(s.messages);
       messages.set(sessionId, [...existing, msg]);
+      return { messages };
+    }),
+
+  replaceMessage: (sessionId, msg) =>
+    set((s) => {
+      const existing = s.messages.get(sessionId) || [];
+      const idx = msg.id ? existing.findIndex((m) => m.id === msg.id) : -1;
+      if (idx === -1) {
+        // No prior entry — fall through to append (covers the case where
+        // the original message was trimmed from history).
+        const messages = new Map(s.messages);
+        messages.set(sessionId, [...existing, msg]);
+        return { messages };
+      }
+      const next = existing.slice();
+      next[idx] = msg;
+      const messages = new Map(s.messages);
+      messages.set(sessionId, next);
       return { messages };
     }),
 

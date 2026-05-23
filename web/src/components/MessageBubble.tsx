@@ -141,6 +141,18 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
     );
   }
 
+  // Suppress the whole row when there's nothing to render — happens when
+  // the only blocks are an empty `thinking` placeholder (CLI streams a
+  // thinking block start with empty text, then the real content arrives
+  // in a follow-up assistant message). The avatar + body still claim
+  // vertical space otherwise.
+  const hasRenderableBlock = blocks.some((b) => {
+    if (b.type === "thinking") return !!b.thinking?.trim();
+    if (b.type === "text") return !!b.text?.trim();
+    return true; // tool_use, tool_result, etc. always render
+  });
+  if (!hasRenderableBlock && !message.content?.trim()) return null;
+
   return (
     <div className="flex items-start gap-3">
       <AssistantAvatar />
@@ -280,6 +292,10 @@ function ContentBlockRenderer({ block }: { block: ContentBlock }) {
   }
 
   if (block.type === "thinking") {
+    // Suppress empty thinking blocks (the CLI sometimes streams a
+    // placeholder block with empty text first; if the final assistant
+    // message still has no thinking text, there's nothing to show).
+    if (!block.thinking?.trim()) return null;
     return <ThinkingBlock text={block.thinking} />;
   }
 

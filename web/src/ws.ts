@@ -170,8 +170,16 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
       };
       const existingMsgs = store.messages.get(sessionId) || [];
       const isDup = existingMsgs.some((m) => m.id === msg.id);
-      console.log(`[ws] assistant msg id=${msg.id} session=${sessionId.slice(0,8)} dup=${isDup} existing=${existingMsgs.length} sockets=${sockets.size}`);
-      store.appendMessage(sessionId, chatMsg);
+      console.log(`[ws] assistant msg id=${msg.id} session=${sessionId.slice(0,8)} dup=${isDup} update=${data.update ? "y" : "n"} existing=${existingMsgs.length} sockets=${sockets.size}`);
+      // Bridge sets `update: true` when this is a streaming update for an
+      // existing msg_id (e.g. empty `thinking` placeholder → final blocks).
+      // appendMessage no-ops on duplicate ids, so it would drop the update;
+      // replaceMessage swaps in place.
+      if (data.update) {
+        store.replaceMessage(sessionId, chatMsg);
+      } else {
+        store.appendMessage(sessionId, chatMsg);
+      }
       store.setStreaming(sessionId, null);
       // CU sessions manage their own status via status_change; only set "running" for CLI
       const assistantSession = store.sessions.get(sessionId);

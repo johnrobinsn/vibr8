@@ -57,7 +57,9 @@ function getToolOnlyName(msg: ChatMessage): string | null {
   let toolName: string | null = null;
   for (const b of blocks) {
     if (b.type === "text" && b.text.trim()) return null;
-    if (b.type === "thinking") return null;
+    // Empty thinking placeholders don't disqualify tool-only collapse —
+    // they're hidden at render time anyway (see ContentBlockRenderer).
+    if (b.type === "thinking" && b.thinking?.trim()) return null;
     if (b.type === "tool_use") {
       if (toolName === null) toolName = b.name;
       else if (toolName !== b.name) return null;

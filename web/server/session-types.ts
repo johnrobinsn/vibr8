@@ -177,7 +177,7 @@ export type BrowserOutgoingMessage =
 export type BrowserIncomingMessage =
   | { type: "session_init"; session: SessionState }
   | { type: "session_update"; session: Partial<SessionState> }
-  | { type: "assistant"; message: CLIAssistantMessage["message"]; parent_tool_use_id: string | null; timestamp?: number }
+  | { type: "assistant"; message: CLIAssistantMessage["message"]; parent_tool_use_id: string | null; timestamp?: number; msg_id?: string; update?: boolean }
   | { type: "stream_event"; event: unknown; parent_tool_use_id: string | null }
   | { type: "result"; data: CLIResultMessage; timestamp?: number }
   | { type: "permission_request"; request: PermissionRequest }
