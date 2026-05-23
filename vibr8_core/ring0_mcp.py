@@ -82,6 +82,22 @@ def _slugify(name: str) -> str:
     return s.strip("-") or "session"
 
 
+def _short_id(sid: str, n: int = 8) -> str:
+    """Return first *n* chars of the raw session id.
+
+    Session ids are qualified as ``{node_id}:{raw_id}`` at the hub
+    boundary. Truncating the qualified id directly yields the same
+    prefix (the node id) for every session on a node — useless for
+    distinguishing sessions to a model. Strip the ``{node_id}:`` first
+    so the model sees a unique handle that ``session_registry.resolve``
+    can match via its raw-id prefix branch.
+    """
+    if not sid:
+        return sid
+    raw = sid.split(":", 1)[1] if ":" in sid else sid
+    return raw[:n]
+
+
 @mcp.tool()
 async def create_session(
     name: str,
@@ -145,7 +161,7 @@ async def create_session(
             await asyncio.sleep(2)
         await _post("/ring0/send-message", {"sessionId": session_id, "message": initial_message})
 
-    parts = [f"Session created: {name} (id={session_id[:8]}, backend={backend})"]
+    parts = [f"Session created: {name} (id={_short_id(session_id)}, backend={backend})"]
     if backend != "computer-use":
         parts.append(f"cwd={body.get('cwd', '')}")
     if initial_message:
@@ -174,7 +190,7 @@ async def list_sessions() -> str:
         perm_info = f", BLOCKED: {pending} pending permission(s)" if pending else ""
         pen = s.get("controlledBy", "ring0")
         pen_info = ", PEN: user (do not send messages)" if pen == "user" else ""
-        lines.append(f"- {name} (id={sid[:8]}, state={state}, type={backend}, cwd={cwd}{perm_info}{pen_info})")
+        lines.append(f"- {name} (id={_short_id(sid)}, state={state}, type={backend}, cwd={cwd}{perm_info}{pen_info})")
     return "\n".join(lines) if lines else "No active sessions."
 
 
@@ -189,7 +205,7 @@ async def rename_session(session_id: str, new_name: str) -> str:
     result = await _post("/ring0/rename-session", {"sessionId": session_id, "name": new_name})
     if result.get("error"):
         return f"Error: {result['error']}"
-    return f"Renamed session {session_id[:8]} to '{new_name}'."
+    return f"Renamed session {_short_id(session_id)} to '{new_name}'."
 
 
 @mcp.tool()
@@ -205,7 +221,7 @@ async def interrupt_session(session_id: str) -> str:
     result = await _post("/ring0/interrupt", {"sessionId": session_id})
     if result.get("error"):
         return f"Error: {result['error']}"
-    return f"Interrupted session {session_id[:8]}."
+    return f"Interrupted session {_short_id(session_id)}."
 
 
 @mcp.tool()
@@ -226,7 +242,7 @@ async def send_message(session_id: str, message: str, on_behalf_of_client: str =
     result = await _post("/ring0/send-message", body)
     if result.get("error"):
         return f"Error: {result['error']}. The user is currently working in this session. Wait for them to finish or check back later."
-    return f"Message sent to session {session_id[:8]}."
+    return f"Message sent to session {_short_id(session_id)}."
 
 
 @mcp.tool()
@@ -253,7 +269,7 @@ async def switch_ui(session_id: str, client_id: str = "") -> str:
     if result.get("error"):
         return f"Error: {result['error']}"
     target = resolved[:8] if resolved else "(prompt context)"
-    return f"Switched client {target} to session {session_id[:8]}."
+    return f"Switched client {target} to session {_short_id(session_id)}."
 
 
 def _extract_assistant_text(message: Any) -> tuple[str, bool]:
@@ -375,8 +391,8 @@ async def get_pending_permissions(session_id: str = "") -> str:
         perms = s.get("pendingPermissions", [])
         if not perms:
             continue
-        name = s.get("name", sid[:8])
-        lines.append(f"Session: {name} [{sid[:8]}] — {len(perms)} pending")
+        name = s.get("name", _short_id(sid))
+        lines.append(f"Session: {name} [{_short_id(sid)}] — {len(perms)} pending")
         for perm in perms:
             rid = perm.get("request_id", "?")
             tool = perm.get("tool_name", "?")
@@ -416,7 +432,7 @@ async def get_active_clients() -> str:
         status = "online" if online else "offline"
         parts = [f"- {label} (id={cid[:8]}..., {status}"]
         if sid:
-            parts[0] += f", session={sid[:8]}..."
+            parts[0] += f", session={_short_id(sid)}..."
         if ws_role:
             parts[0] += f", wsRole={ws_role}"
         if role and role != ws_role:
@@ -1434,7 +1450,7 @@ async def set_session_mode(session_id: str, mode: str) -> str:
     })
     if result.get("error"):
         return f"Error: {result['error']}"
-    return f"Session {session_id[:8]} mode set to '{mode}'."
+    return f"Session {_short_id(session_id)} mode set to '{mode}'."
 
 
 @mcp.tool()
@@ -1447,7 +1463,7 @@ async def get_session_mode(session_id: str) -> str:
     result = await _get(f"/ring0/get-session-mode?sessionId={session_id}")
     if result.get("error"):
         return f"Error: {result['error']}"
-    return f"Session {session_id[:8]} is in '{result['mode']}' mode."
+    return f"Session {_short_id(session_id)} is in '{result['mode']}' mode."
 
 
 @mcp.tool()
@@ -1469,7 +1485,7 @@ async def set_guard_mode(session_id: str, enabled: bool) -> str:
     if result.get("error"):
         return f"Error: {result['error']}"
     state = "enabled" if enabled else "disabled"
-    return f"Guard mode {state} for session {session_id[:8]}."
+    return f"Guard mode {state} for session {_short_id(session_id)}."
 
 
 @mcp.tool()

@@ -599,7 +599,10 @@ def create_app() -> web.Application:
         node_id = getattr(info, "nodeId", None) or ""
         agent_type_id = getattr(info, "agentType", None) or "ui-tars"
         agent_config = getattr(info, "agentConfig", None) or {}
-        agent_client_id = f"agent-{session_id[:8]}"
+        # Strip the {node_id}: prefix before truncating — qualified ids
+        # share the first 8 chars on the same node and would collide.
+        _raw_sid = session_id.split(":", 1)[1] if ":" in session_id else session_id
+        agent_client_id = f"agent-{_raw_sid[:8]}"
         ice_servers = webrtc_manager.get_client_ice_servers() if webrtc_manager else []
         reconnect_signal: asyncio.Event | None = None
 
