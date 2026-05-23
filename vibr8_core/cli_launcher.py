@@ -408,6 +408,21 @@ class CliLauncher:
         """Get all sessions in 'starting' state (awaiting CLI WebSocket connection)."""
         return [s for s in self._sessions.values() if s.state == "starting"]
 
+    def can_relaunch(self, session_id: str) -> bool:
+        """Whether a relaunch should fire for this session right now.
+
+        Returns False when the session is unknown, archived, or already
+        has a spawn in flight (live entry in `_processes`). Notably,
+        `state == "starting"` alone does NOT block: after a restart, the
+        restore step can leave a session pinned at "starting" with a
+        dead PID, and we still need to relaunch so queued messages get
+        processed.
+        """
+        info = self._sessions.get(session_id)
+        if not info or info.archived:
+            return False
+        return session_id not in self._processes
+
     # ── Spawn: Claude CLI ───────────────────────────────────────────────────
 
     async def _spawn_cli(

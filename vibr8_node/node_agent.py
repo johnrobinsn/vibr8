@@ -124,14 +124,7 @@ class NodeAgent:
         self._bridge.on_cli_session_id_received(on_cli_session_id)
 
         def on_cli_relaunch_needed(session_id: str) -> None:
-            info = self._launcher.get_session(session_id)
-            if not info or info.archived:
-                return
-            # State can stick at "starting" after a server restart when the
-            # old PID is dead but the restore left state untouched. Suppress
-            # only when a spawn is genuinely in flight — i.e. the launcher
-            # is tracking a live process for this session.
-            if session_id in self._launcher._processes:
+            if not self._launcher.can_relaunch(session_id):
                 return
             logger.info("Auto-relaunching CLI for session %s", session_id[:8])
             asyncio.ensure_future(self._launcher.relaunch(session_id))
