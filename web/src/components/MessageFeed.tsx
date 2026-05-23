@@ -446,7 +446,11 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
         el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
       }
     }
-  }, [messages.length, streamingText, voicePreview]);
+    // sessionStatus + elapsed are in the deps so the "Generating…" bar
+    // (which appears only when sessionStatus === "running" && elapsed > 0)
+    // scrolls into view as soon as it lands in the DOM, instead of being
+    // left below the viewport until the first streaming delta arrives.
+  }, [messages.length, streamingText, voicePreview, sessionStatus, elapsed]);
 
   if (messages.length === 0 && !streamingText && !voicePreview) {
     return (
