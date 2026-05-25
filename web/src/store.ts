@@ -605,8 +605,57 @@ export const useStore = create<AppState>((set, get) => ({
         messages.set(sessionId, [...existing, msg]);
         return { messages };
       }
+      // Merge contentBlocks. The Claude CLI streams each new content
+      // block as a separate `assistant` event sharing the same msg_id —
+      // each event's `content` array contains ONLY the new block, not
+      // the cumulative message. Naively replacing would drop earlier
+      // blocks (e.g., the text block disappears the moment a tool_use
+      // arrives in a follow-up event).
+      const old = existing[idx];
+      const oldBlocks = old.contentBlocks || [];
+      const newBlocks = msg.contentBlocks || [];
+      const merged: typeof oldBlocks = oldBlocks.slice();
+      // Dedupe key per block type — tool_use carries `id`, tool_result
+      // carries `tool_use_id`, thinking carries `signature`. Text blocks
+      // have no stable identity, so they're always appended.
+      const blockKey = (b: (typeof oldBlocks)[number]): string | null => {
+        if (b.type === "tool_use") return `use:${b.id}`;
+        if (b.type === "tool_result") return `res:${b.tool_use_id}`;
+        if (b.type === "thinking") {
+          const sig = (b as { signature?: string }).signature;
+          return sig ? `think:${sig}` : null;
+        }
+        return null;
+      };
+      const indexByKey = new Map<string, number>();
+      oldBlocks.forEach((b, i) => {
+        const k = blockKey(b);
+        if (k) indexByKey.set(k, i);
+      });
+      for (const b of newBlocks) {
+        const k = blockKey(b);
+        if (k && indexByKey.has(k)) {
+          // Same identity — replace in place so streaming deltas can
+          // refine existing tool_use input / tool_result content.
+          merged[indexByKey.get(k)!] = b;
+          continue;
+        }
+        if (k) indexByKey.set(k, merged.length);
+        merged.push(b);
+      }
+      // Re-derive the text-only content for callers that read it.
+      const textParts: string[] = [];
+      for (const b of merged) {
+        if (b.type === "text") textParts.push(b.text);
+        else if (b.type === "thinking" && b.thinking) textParts.push(b.thinking);
+      }
+      const mergedMsg = {
+        ...msg,
+        contentBlocks: merged,
+        content: textParts.filter(Boolean).join("\n"),
+      };
       const next = existing.slice();
-      next[idx] = msg;
+      next[idx] = mergedMsg;
       const messages = new Map(s.messages);
       messages.set(sessionId, next);
       return { messages };
