@@ -257,4 +257,8 @@ export interface PermissionRequest {
   tool_use_id: string;
   agent_id?: string;
   timestamp: number;
+  // Set by the frontend store when the same (tool_name, input) arrives
+  // again after a dismiss — the CLI is retrying. Banner shows this as a
+  // counter so the user can tell "this is the same thing coming back".
+  retryCount?: number;
 }

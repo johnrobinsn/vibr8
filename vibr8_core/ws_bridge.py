@@ -77,6 +77,13 @@ class Session:
     pen_taken_at: float = 0  # time.time() when user took pen
     _pen_timeout: Any = None  # asyncio.TimerHandle for auto-release
     last_prompted_at: float = 0  # ms since epoch, updated on every user prompt
+    # Stuck-permission-loop tracking: (tool_name, input_hash) → (count, first_seen_ts)
+    # Populated each time a permission_request is broadcast (see ws_bridge
+    # around the permission_request emit site). Used to log a warning when
+    # the CLI keeps re-emitting the same payload — typically because the
+    # tool execution failed and the model is retrying. Cleared on session
+    # close. Not persisted.
+    _perm_retry_counts: dict[tuple[str, str], tuple[int, float]] = field(default_factory=dict)
     associated_node_id: str = ""  # For sessions running on host but targeting an Android node
     prompt_source_client_id: str = ""  # client that sent the current prompt (for Ring0 context)
 
@@ -1648,6 +1655,13 @@ class WsBridge:
                 "timestamp": int(time.time() * 1000),
             }
             session.pending_permissions[msg.get("request_id", "")] = perm
+            # Stuck-loop detection: same (tool_name, input) re-emitted N times
+            # within a window means the CLI is retrying the same tool_use
+            # (e.g. an Edit whose old_string no longer matches because a
+            # prior attempt already wrote the file). Log a warning so we
+            # can spot the loop without auto-denying — the agent might
+            # still recover on its own.
+            self._record_perm_retry(session, perm)
             await self._broadcast_to_browsers(session, {"type": "permission_request", "request": perm})
             await self._push_to_native_clients(session.id, "permission_request", {"request": perm})
             self._persist_session(session)
@@ -1867,6 +1881,41 @@ class WsBridge:
         ndjson = json.dumps(ndjson_msg)
         await self._send_to_cli(session, ndjson)
         self._persist_session(session)
+
+    # Window over which identical-payload permission_requests count toward
+    # the stuck-loop warning. 5min covers a typical conversation pause
+    # without false positives across genuinely fresh attempts after a
+    # break. THRESHOLD is when we start logging — agents legitimately do
+    # 1-2 retries after fixing inputs, so 3 is the floor for "loop".
+    _PERM_RETRY_WINDOW_S = 300.0
+    _PERM_RETRY_THRESHOLD = 3
+
+    def _record_perm_retry(self, session: Session, perm: dict[str, Any]) -> None:
+        """Track per-(tool_name, input) retry counts; log when stuck."""
+        tool_name = perm.get("tool_name", "?")
+        try:
+            input_hash = json.dumps(perm.get("input", {}), sort_keys=True)
+        except Exception:
+            input_hash = repr(perm.get("input", {}))
+        key = (tool_name, input_hash)
+        now = time.time()
+        # GC entries outside the window so the dict stays bounded.
+        expired = [k for k, (_c, ts) in session._perm_retry_counts.items()
+                   if now - ts > self._PERM_RETRY_WINDOW_S]
+        for k in expired:
+            session._perm_retry_counts.pop(k, None)
+        count, first_seen = session._perm_retry_counts.get(key, (0, now))
+        if now - first_seen > self._PERM_RETRY_WINDOW_S:
+            # Reset window — same payload but the prior streak aged out.
+            count, first_seen = 0, now
+        count += 1
+        session._perm_retry_counts[key] = (count, first_seen)
+        if count >= self._PERM_RETRY_THRESHOLD:
+            preview = input_hash if len(input_hash) <= 200 else input_hash[:197] + "..."
+            logger.warning(
+                "[ws-bridge] STUCK PERMISSION LOOP session=%s tool=%s count=%d window=%.0fs input=%s",
+                session.id[:8], tool_name, count, now - first_seen, preview,
+            )
 
     async def _handle_permission_response(self, session: Session, msg: dict[str, Any]) -> None:
         request_id = msg.get("request_id", "")

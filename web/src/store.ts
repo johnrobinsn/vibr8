@@ -729,7 +729,24 @@ export const useStore = create<AppState>((set, get) => ({
     set((s) => {
       const pendingPermissions = new Map(s.pendingPermissions);
       const sessionPerms = new Map(pendingPermissions.get(sessionId) || []);
-      sessionPerms.set(perm.request_id, perm);
+      // Dedupe by (tool_name, input) within a session. When the CLI
+      // retries the same tool_use (typically because the previous attempt
+      // failed at execution — see the Edit-already-applied case), we get
+      // a fresh permission_request with a new request_id but identical
+      // payload. Treat it as a continuation of the existing banner:
+      // replace under the new request_id (so the next dismiss responds
+      // to the *current* outstanding request) and bump retryCount.
+      const incomingKey = `${perm.tool_name}::${JSON.stringify(perm.input ?? {})}`;
+      let retryCount = 1;
+      for (const [rid, p] of sessionPerms) {
+        const existingKey = `${p.tool_name}::${JSON.stringify(p.input ?? {})}`;
+        if (existingKey === incomingKey && rid !== perm.request_id) {
+          retryCount = (p.retryCount ?? 1) + 1;
+          sessionPerms.delete(rid);
+          break;
+        }
+      }
+      sessionPerms.set(perm.request_id, retryCount > 1 ? { ...perm, retryCount } : perm);
       pendingPermissions.set(sessionId, sessionPerms);
       return { pendingPermissions };
     }),

@@ -94,6 +94,14 @@ export function PermissionBanner({
               {!isAskUser && (
                 <span className="text-[11px] text-cc-muted font-mono-code">{permission.tool_name}</span>
               )}
+              {permission.retryCount && permission.retryCount > 1 && (
+                <span
+                  className="text-[10px] text-cc-warning bg-cc-warning/10 rounded-full px-1.5 py-0.5"
+                  title="The CLI re-emitted this request with the same payload. The previous attempt likely failed at execution time (e.g., Edit's old_string no longer matches the file)."
+                >
+                  retry ×{permission.retryCount}
+                </span>
+              )}
             </div>
 
             {isAskUser ? (
