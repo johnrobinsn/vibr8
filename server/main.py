@@ -480,7 +480,10 @@ def create_app() -> web.Application:
     # voice doesn't pay 9-13s of first-inference latency. Runs entirely
     # on worker threads inside warmup_voice_models so it does NOT block
     # the event loop — the server is fully responsive while this runs.
-    if HAS_WEBRTC:
+    # VIBR8_FAST_STARTUP=1 skips warmup entirely for tests where voice
+    # isn't exercised — the heavy GPU loads otherwise add 30+ seconds.
+    _fast_startup = os.environ.get("VIBR8_FAST_STARTUP") == "1"
+    if HAS_WEBRTC and not _fast_startup:
         try:
             from server.stt import warmup_voice_models
             spawn(warmup_voice_models())
@@ -866,9 +869,10 @@ def create_app() -> web.Application:
             except Exception:
                 logger.exception("[server] Failed to preload Kokoro TTS model")
 
-        if HAS_WEBRTC:
+        if HAS_WEBRTC and not _fast_startup:
             spawn(_preload_stt())
-        spawn(_preload_tts())
+        if not _fast_startup:
+            spawn(_preload_tts())
 
         # Suppress noisy aioice STUN retry errors on closed transports.
         loop = asyncio.get_event_loop()
@@ -1216,6 +1220,8 @@ def request_restart() -> None:
 def _get_ssl_context():
     """Load SSL context from certs/ directory if available."""
     import ssl
+    if os.environ.get("VIBR8_DISABLE_TLS") == "1":
+        return None
     cert_dir = Path(__file__).parent.parent / "certs"
     cert_file = cert_dir / "cert.pem"
     key_file = cert_dir / "key.pem"

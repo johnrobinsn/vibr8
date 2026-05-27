@@ -9,13 +9,24 @@ const hasCerts =
   fs.existsSync(path.join(certDir, "key.pem")) &&
   fs.existsSync(path.join(certDir, "cert.pem"));
 
+// Allow the dev backend host/port to be overridden so e2e tests can run
+// in parallel with a live dev server on the default ports. Tests pass
+// VITE_BACKEND_HOST + VITE_BACKEND_PORT pointing at a fresh test server.
+// VITE_DISABLE_HTTPS=1 forces http/ws even when certs/ exists (the test
+// backend doesn't serve TLS to keep startup simple).
+const backendHost = process.env.VITE_BACKEND_HOST ?? "localhost";
+const backendPort = process.env.VITE_BACKEND_PORT ?? "3456";
+const useHttps = hasCerts && process.env.VITE_DISABLE_HTTPS !== "1";
+const httpScheme = useHttps ? "https" : "http";
+const wsScheme = useHttps ? "wss" : "ws";
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     host: "0.0.0.0",
     port: 5174,
     allowedHosts: true,
-    ...(hasCerts && {
+    ...(useHttps && {
       https: {
         key: fs.readFileSync(path.join(certDir, "key.pem")),
         cert: fs.readFileSync(path.join(certDir, "cert.pem")),
@@ -23,11 +34,11 @@ export default defineConfig({
     }),
     proxy: {
       "/api": {
-        target: hasCerts ? "https://localhost:3456" : "http://localhost:3456",
+        target: `${httpScheme}://${backendHost}:${backendPort}`,
         secure: false,
       },
       "/ws": {
-        target: hasCerts ? "wss://localhost:3456" : "ws://localhost:3456",
+        target: `${wsScheme}://${backendHost}:${backendPort}`,
         ws: true,
         secure: false,
         configure: (proxy) => {

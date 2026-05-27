@@ -1,4 +1,4 @@
-.PHONY: dev dev-api dev-frontend build test test-py test-frontend install docker-hub-build docker-hub-run
+.PHONY: dev dev-api dev-frontend build test test-py test-frontend test-e2e install docker-hub-build docker-hub-run
 
 # Run both Python backend and Vite frontend
 dev:
@@ -41,6 +41,12 @@ test-py:
 # Run frontend tests
 test-frontend:
 	cd web && bun run test
+
+# Run end-to-end smoke tests (Playwright + real backend + Vite)
+# Boots an isolated stack on ports 13456/15174 — safe to run alongside
+# a live dev server on 3456/5174.
+test-e2e:
+	cd web && bun run test:e2e
 
 # Install dependencies
 install:

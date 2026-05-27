@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Stub `claude` for e2e tests. Does nothing useful — just hangs so the
+# vibr8 launcher's spawn() succeeds. The test verifies WS plumbing, not
+# CLI behavior. Real Claude would cost API calls + 30s+ wait per run.
+exec sleep 3600

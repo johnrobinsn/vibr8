@@ -12,3 +12,9 @@ certs/
 .claude/
 server.log
 vibe-sessions/
+
+# Playwright e2e
+web/.e2e-home/
+web/test-results/
+web/playwright-report/
+web/playwright/.cache/
