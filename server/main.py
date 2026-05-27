@@ -475,6 +475,18 @@ def create_app() -> web.Application:
         task.add_done_callback(background_tasks.discard)
         return task
 
+    # Warm the voice pipeline (Whisper + Silero VAD + EOU + ECAPA + TSE)
+    # in the background so the first utterance after the user enables
+    # voice doesn't pay 9-13s of first-inference latency. Runs entirely
+    # on worker threads inside warmup_voice_models so it does NOT block
+    # the event loop — the server is fully responsive while this runs.
+    if HAS_WEBRTC:
+        try:
+            from server.stt import warmup_voice_models
+            spawn(warmup_voice_models())
+        except Exception:
+            logger.exception("[server] Failed to schedule voice-model warmup")
+
     # Wire up stores and managers
     ws_bridge.set_store(session_store)
     if webrtc_manager:

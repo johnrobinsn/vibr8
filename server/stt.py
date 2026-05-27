@@ -74,6 +74,83 @@ _HALLUCINATION_PATTERNS = {
 }
 
 
+# ── Voice-pipeline warmup ─────────────────────────────────────────────────────
+
+
+async def warmup_voice_models() -> None:
+    """Pre-warm the voice-recognition pipeline against a silence buffer.
+
+    Called from server startup as a background task — it must NOT block
+    the main event loop. The work is GPU-bound and first-inference-heavy
+    (Whisper generate has JIT/compile cost; speechbrain ECAPA, WeSpeaker
+    ECAPA, and the BSRNN TSE all have model-load + first-pass costs).
+    Without warmup, the user's first utterance after enabling voice can
+    take 9–13s end-to-end (see logs ~2026-05-27 09:45). After warmup the
+    same path is ~0.5–1s.
+
+    Each stage is wrapped in its own try/except so a missing model or
+    GPU doesn't kill the whole warmup. Stages run sequentially on a
+    worker thread (asyncio.to_thread) so the event loop stays responsive.
+    """
+    import asyncio
+    import time
+
+    async def _run(label: str, fn) -> None:
+        t0 = time.monotonic()
+        try:
+            await asyncio.to_thread(fn)
+            logger.info("[voice-warmup] %s ready in %.1fs", label, time.monotonic() - t0)
+        except Exception:
+            logger.warning("[voice-warmup] %s skipped (failed after %.1fs)",
+                           label, time.monotonic() - t0, exc_info=True)
+
+    # ~1s of silence at 16 kHz mono float32 — enough for Whisper's mel
+    # framer and the TSE / ECAPA fbank front-ends to do real work
+    # (anything shorter and BSRNN's stft falls below its window length).
+    silence = np.zeros(WHISPER_SAMPLE_RATE, dtype=np.float32)
+
+    logger.info("[voice-warmup] starting (background, non-blocking)")
+
+    # 1. Whisper + Silero VAD + EOU model load + Whisper first inference.
+    def _warm_whisper() -> None:
+        STT.preload_shared_resources()
+        STT._transcribe(silence)  # JIT-compile the generate() path
+
+    await _run("whisper+vad+eou", _warm_whisper)
+
+    # 2. SpeechBrain ECAPA (speaker gate). Skip cleanly if torchaudio /
+    #    speechbrain isn't importable or no CUDA.
+    def _warm_speaker_gate() -> None:
+        from server import speaker_model
+        speaker_model.embed(silence)
+
+    await _run("speechbrain-ecapa", _warm_speaker_gate)
+
+    # 3. WeSpeaker ECAPA (TSE conditioning vector). Skip if checkpoint
+    #    isn't deployed to ~/.vibr8/models/wespeaker-bsrnn-vox1.
+    wespeaker_emb = None
+    def _warm_wespeaker() -> None:
+        nonlocal wespeaker_emb
+        from server import wespeaker_model
+        wespeaker_emb = wespeaker_model.embed(silence)
+
+    await _run("wespeaker-ecapa", _warm_wespeaker)
+
+    # 4. BSRNN TSE — needs wespeaker_emb as conditioning. Skip if either
+    #    the wespeaker step above failed or the TSE checkpoint is absent.
+    def _warm_tse() -> None:
+        from server import tse_processor
+        if not tse_processor.is_available():
+            raise RuntimeError("TSE not available (no CUDA or checkpoint missing)")
+        if wespeaker_emb is None:
+            raise RuntimeError("wespeaker embedding not produced; cannot warm TSE")
+        tse_processor.extract(silence, wespeaker_emb)
+
+    await _run("bsrnn-tse", _warm_tse)
+
+    logger.info("[voice-warmup] complete")
+
+
 # ── Synchronous STT core ──────────────────────────────────────────────────────
 
 
