@@ -181,10 +181,17 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         store.appendMessage(sessionId, chatMsg);
       }
       store.setStreaming(sessionId, null);
-      // CU sessions manage their own status via status_change; only set "running" for CLI
-      const assistantSession = store.sessions.get(sessionId);
-      if (assistantSession?.backend_type !== "computer-use") {
-        store.setSessionStatus(sessionId, "running");
+      // CU sessions manage their own status via status_change; only set "running" for CLI.
+      // Skip the "running" flip on `update: true` — these are streaming
+      // backfills for a msg_id whose first event already set the status,
+      // and they often arrive AFTER the turn's `result` event has settled
+      // status to "idle". Without this skip the Generating bar pops back
+      // on after the turn has actually ended.
+      if (!data.update) {
+        const assistantSession = store.sessions.get(sessionId);
+        if (assistantSession?.backend_type !== "computer-use") {
+          store.setSessionStatus(sessionId, "running");
+        }
       }
 
       // Start timer if not already started (for non-streaming tool calls)
