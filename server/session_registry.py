@@ -163,10 +163,17 @@ class TunneledSessionRouter:
         tunnel = self._get_tunnel()
         if not tunnel:
             return False
+        # NOTE: do NOT use the key "requestId" for the permission request id.
+        # NodeTunnel.send_command clobbers cmd["requestId"] with its own
+        # correlation token (see server/node_tunnel.py:45) and the node
+        # dispatcher drops the key entirely. The result was Ring0's
+        # respond_to_permission silently no-op'ing on remote sessions:
+        # control_response sent with request_id="" → CLI ignores → agent
+        # stuck on the original permission. Use a distinct field.
         result = await tunnel.send_command({
             "type": "respond_permission",
             "sessionId": self._raw_id,
-            "requestId": request_id,
+            "permissionRequestId": request_id,
             "behavior": behavior,
             "message": message,
         })

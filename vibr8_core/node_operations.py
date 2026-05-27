@@ -359,13 +359,35 @@ class NodeOperations:
         self._bridge._handle_set_permission_mode(session, mode)
         return {"ok": True}
 
-    async def respond_permission(self, session_id: str = "", **payload) -> dict:
+    async def respond_permission(
+        self,
+        session_id: str = "",
+        permission_request_id: str = "",
+        behavior: str = "",
+        message: str = "",
+    ) -> dict:
+        """Approve or deny a pending permission on this node's session.
+
+        `permission_request_id` is the permission's id (NOT the tunnel
+        correlation id). It travels under the `permissionRequestId` wire
+        key because the tunnel reserves `requestId` for its own
+        request/response correlation — naming it `requestId` here would
+        be silently clobbered by NodeTunnel.send_command and the
+        permission would never get popped, leading to a silent no-op.
+        """
         session = self._bridge._sessions.get(session_id)
         if not session:
             return {"error": f"Session {session_id} not found"}
-        # _handle_permission_response expects the original camelCase payload
-        msg = {"sessionId": session_id, **_snake_to_camel_dict(payload)}
-        await self._bridge._handle_permission_response(session, msg)
+        if not permission_request_id:
+            return {"error": "permissionRequestId required"}
+        # The bridge falls back to the prefix-match path; bubble its
+        # actual success/failure up so callers (and Ring0 via MCP) can
+        # tell when their request_id didn't match anything.
+        ok = await self._bridge.respond_to_permission(
+            session_id, permission_request_id, behavior, message,
+        )
+        if not ok:
+            return {"error": f"Permission {permission_request_id} not found"}
         return {"ok": True}
 
     # ── Ring0 ─────────────────────────────────────────────────────────────
