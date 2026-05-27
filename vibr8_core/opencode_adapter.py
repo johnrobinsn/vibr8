@@ -70,8 +70,9 @@ class OpenCodeAdapter:
         self._connected: bool = False
         self._initialized: bool = False
 
-        # Streaming accumulator
+        # Streaming accumulators
         self._streaming_text: str = ""
+        self._streaming_reasoning: str = ""
         self._msg_counter: int = 0
 
         # Part type tracking for delta disambiguation
@@ -396,6 +397,7 @@ class OpenCodeAdapter:
         part_type = self._part_types.get(part_id, "text")
 
         if part_type == "reasoning":
+            self._streaming_reasoning += delta
             self._emit({
                 "type": "stream_event",
                 "event": {
@@ -480,8 +482,9 @@ class OpenCodeAdapter:
         if role == "assistant":
             # Turn is complete
             text = self._streaming_text or ""
+            reasoning = self._streaming_reasoning or ""
 
-            if text:
+            if text or reasoning:
                 # Emit content_block_stop
                 self._emit({
                     "type": "stream_event",
@@ -498,6 +501,18 @@ class OpenCodeAdapter:
                     "parent_tool_use_id": None,
                 })
 
+                # Build content blocks: thinking first, then text
+                content_blocks: list[dict] = []
+                if reasoning:
+                    content_blocks.append({
+                        "type": "thinking",
+                        "thinking": reasoning,
+                    })
+                if text:
+                    content_blocks.append({"type": "text", "text": text})
+                elif reasoning:
+                    content_blocks.append({"type": "text", "text": reasoning})
+
                 # Emit full assistant message
                 self._msg_counter += 1
                 self._emit({
@@ -507,7 +522,7 @@ class OpenCodeAdapter:
                         "type": "message",
                         "role": "assistant",
                         "model": self._options.model or "",
-                        "content": [{"type": "text", "text": text}],
+                        "content": content_blocks,
                         "stop_reason": "end_turn",
                         "usage": {
                             "input_tokens": info.get("tokens", {}).get("input", 0),
@@ -552,6 +567,7 @@ class OpenCodeAdapter:
 
             # Reset streaming state
             self._streaming_text = ""
+            self._streaming_reasoning = ""
             self._part_types.clear()
             self._emitted_tool_use_ids.clear()
 
