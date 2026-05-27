@@ -1244,8 +1244,14 @@ export function waitForConnection(sessionId: string): Promise<void> {
 
 export function sendToSession(sessionId: string, msg: BrowserOutgoingMessage) {
   const ws = sockets.get(sessionId);
-  if (ws?.readyState === WebSocket.OPEN) {
+  const state = ws?.readyState;
+  // Diagnostic: surface drops so user reports of "I sent a prompt and
+  // nothing happened" can be correlated with WS state in the console.
+  console.log(`[ws] sendToSession session=${sessionId.slice(0,8)} type=${msg.type} state=${state} sockets=${sockets.size}`);
+  if (state === WebSocket.OPEN && ws) {
     ws.send(JSON.stringify(msg));
+  } else {
+    console.warn(`[ws] DROP send session=${sessionId.slice(0,8)} type=${msg.type} state=${state} — message NOT delivered`);
   }
 }
 
