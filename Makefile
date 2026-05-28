@@ -1,4 +1,4 @@
-.PHONY: dev dev-api dev-frontend build test test-py test-frontend test-e2e install docker-hub-build docker-hub-run
+.PHONY: dev dev-api dev-frontend build test test-all test-core test-py test-desktop test-webrtc test-frontend test-e2e install docker-hub-build docker-hub-run
 
 # Run both Python backend and Vite frontend
 dev:
@@ -31,12 +31,41 @@ dev-frontend:
 build:
 	cd web && bun run build
 
-# Run all tests
-test: test-py test-frontend
+# Run the default fast test suite
+test: test-core
 
-# Run Python tests
-test-py:
-	uv run pytest server/tests/ -v
+# Run all currently defined default suites. Frontend tests are intentionally
+# explicit because they need separate stabilization work before they can be a
+# reliable gate.
+test-all: test-core test-frontend
+
+# Run Python tests that do not require optional media/ML/device dependencies.
+# Safe to run alongside a live vibr8 instance: these tests use isolated ports,
+# mocks, or in-memory aiohttp apps rather than the default dev server ports.
+test-core:
+	uv run --extra dev pytest -v \
+		server/tests/test_node_client_wrappers.py \
+		server/tests/test_opencode_adapter.py \
+		server/tests/test_codex_adapter.py \
+		server/tests/test_node_integration.py \
+		server/tests/test_voice_profiles.py \
+		server/tests/test_post_refactor_regressions.py \
+		server/tests/test_hermes_adapter.py \
+		server/tests/test_smoke_ws_path.py
+
+# Backwards-compatible alias for the default Python test suite.
+test-py: test-core
+
+# Optional desktop/media tests.
+test-desktop:
+	uv run --extra dev --extra desktop pytest -v \
+		server/tests/test_screen_capture.py \
+		server/tests/test_video_track.py
+
+# Optional WebRTC peer tests.
+test-webrtc:
+	uv run --extra dev --extra desktop pytest -v \
+		server/tests/test_webrtc_agent_peer.py
 
 # Run frontend tests
 test-frontend:
