@@ -55,6 +55,12 @@ export default defineConfig({
         // settings (VITE_DISABLE_HTTPS=1) regardless of whether certs/
         // exists for the user's regular dev runs.
         VIBR8_DISABLE_TLS: "1",
+        // Explicitly opt into no-auth mode for the test fixture: HOME
+        // points at an empty tmpdir so users.json doesn't exist, and
+        // post-PR #4 the server otherwise refuses to start. The default
+        // bind host without VIBR8_ALLOW_PUBLIC_NO_AUTH is loopback, which
+        // is exactly what the test wants.
+        VIBR8_ALLOW_NO_AUTH: "1",
         VIBR8_LOG_FILE: path.join(TEST_HOME, "server.log"),
         // Stub `claude` first on PATH so launcher.spawn() succeeds
         // without invoking the real CLI (which would cost API calls and
