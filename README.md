@@ -400,7 +400,7 @@ The guard word check is independent of command matching — "check the vibr8 ses
 
 ### User Management
 
-vibr8 supports optional password authentication. When enabled, all API and WebSocket endpoints require a session cookie.
+vibr8 supports password authentication. When enabled, API and WebSocket endpoints require a session cookie except for explicit login and pairing/bootstrap paths.
 
 ```bash
 # Add a user (prompts for password)
@@ -413,7 +413,9 @@ uv run python -m server.manage_users list
 uv run python -m server.manage_users remove <username>
 ```
 
-Auth is **opt-in**: if no users exist, all endpoints are open (local dev mode). Adding the first user enables auth and requires login.
+Create at least one user before running an Internet-accessible server. If no users exist, vibr8 refuses to start unless `VIBR8_ALLOW_NO_AUTH=1` is set. Explicit no-auth mode binds to loopback unless `VIBR8_ALLOW_PUBLIC_NO_AUTH=1` is also set.
+
+> **Caveat:** loopback bind blocks direct external connections, but it does **not** protect against a reverse proxy (nginx, Caddy, autossh tunnel terminator, etc.) running on the same host that forwards traffic to localhost. If you put any proxy in front of vibr8, always run with auth enabled regardless of bind host.
 
 ### Voice Replay
 
@@ -457,6 +459,9 @@ vibr8 stores configuration in `~/.vibr8/`:
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `3456` | Backend server port |
+| `VIBR8_HOST` | `0.0.0.0` with auth, `127.0.0.1` in explicit no-auth mode | Backend bind host |
+| `VIBR8_ALLOW_NO_AUTH` | — | Required to start without `~/.vibr8/users.json`; intended for local development only |
+| `VIBR8_ALLOW_PUBLIC_NO_AUTH` | — | Also required to bind a no-auth server to a non-loopback host |
 | `NODE_ENV` | — | Set to `production` to serve built frontend |
 | `VIBR8_TTS_ENGINE` | `kokoro` | TTS engine: `kokoro` (local) or `openai` (cloud) |
 | `VIBR8_TTS_VOICE` | `af_sarah` | TTS voice name |

@@ -1,6 +1,10 @@
 .PHONY: dev dev-api dev-frontend build test test-all test-core test-py test-desktop test-webrtc test-frontend test-e2e install docker-hub-build docker-hub-run
 
-# Run both Python backend and Vite frontend
+# Run both Python backend and Vite frontend.
+# First-run requirement: create a user with
+#   uv run python -m server.manage_users add <username>
+# or set VIBR8_ALLOW_NO_AUTH=1. The server otherwise refuses to start.
+# See README → "Authentication".
 dev:
 	@trap 'kill 0' EXIT; \
 	( while true; do \

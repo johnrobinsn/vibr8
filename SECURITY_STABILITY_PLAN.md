@@ -29,8 +29,9 @@ This document records the current product guardrails and implementation directio
 Goal: make accidental Internet exposure without auth impossible, while preserving pairing/onboarding flows.
 
 - Add a startup guard:
-  - If auth is disabled and `VIBR8_ALLOW_NO_AUTH=1` is not set, refuse to start.
-  - If auth is disabled and no-auth is explicitly allowed, force bind host to localhost unless another explicit dev override is set.
+  - If auth is disabled and `VIBR8_ALLOW_NO_AUTH=1` is not set, refuse to start. **Done.**
+  - If auth is disabled and no-auth is explicitly allowed, force bind host to localhost unless another explicit dev override is set. **Done.**
+  - `VIBR8_HOST` controls the bind host. Auth-enabled servers may bind publicly. No-auth servers require both `VIBR8_ALLOW_NO_AUTH=1` and `VIBR8_ALLOW_PUBLIC_NO_AUTH=1` to honor a public bind host such as `0.0.0.0`.
 - Inventory every public route:
   - `PUBLIC_PREFIXES`
   - `PUBLIC_EXACT_PATHS`

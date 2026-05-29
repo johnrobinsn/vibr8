@@ -11,6 +11,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from collections.abc import Mapping
 
 import aiohttp
 from aiohttp import web
@@ -84,12 +85,58 @@ os.environ.pop("CLAUDECODE", None)
 
 PORT = int(os.environ.get("PORT", "3456"))
 RECONNECT_GRACE_S = 10
+ALLOW_NO_AUTH_ENV = "VIBR8_ALLOW_NO_AUTH"
+ALLOW_PUBLIC_NO_AUTH_ENV = "VIBR8_ALLOW_PUBLIC_NO_AUTH"
+HOST_ENV = "VIBR8_HOST"
 
 # Typed key for the WsBridge instance in app state. Mirrors the same
 # idiom used in server/tests/test_smoke_ws_path.py so the smoke gate
 # and production lookup match shape, and silences aiohttp's
 # NotAppKeyWarning for this key on startup.
 BRIDGE_KEY = web.AppKey("bridge", WsBridge)
+BIND_HOST_KEY = web.AppKey("bind_host", str)
+
+
+def _env_flag(environ: Mapping[str, str], name: str) -> bool:
+    return environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host.strip().lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def resolve_bind_host(auth_enabled: bool, environ: Mapping[str, str] = os.environ) -> str:
+    """Resolve and validate the server bind host for the current auth mode."""
+    requested_host = environ.get(HOST_ENV, "0.0.0.0").strip() or "0.0.0.0"
+    if auth_enabled:
+        return requested_host
+
+    if not _env_flag(environ, ALLOW_NO_AUTH_ENV):
+        raise RuntimeError(
+            "Authentication is disabled because no users.json exists. Refusing to start "
+            "without auth. Run "
+            "`uv run python -m server.manage_users add <username>` to create a user, or set "
+            f"{ALLOW_NO_AUTH_ENV}=1 for explicit local development."
+        )
+
+    if _is_loopback_host(requested_host):
+        return requested_host
+
+    if _env_flag(environ, ALLOW_PUBLIC_NO_AUTH_ENV):
+        logger.warning(
+            "[server] Authentication is disabled and %s=1; binding no-auth server to %s",
+            ALLOW_PUBLIC_NO_AUTH_ENV,
+            requested_host,
+        )
+        return requested_host
+
+    logger.warning(
+        "[server] Authentication is disabled; forcing bind host to 127.0.0.1. "
+        "Set %s=1 to allow the requested no-auth public bind host %s.",
+        ALLOW_PUBLIC_NO_AUTH_ENV,
+        requested_host,
+    )
+    return "127.0.0.1"
 
 
 # ── WebSocket route handlers ─────────────────────────────────────────────────
@@ -400,8 +447,10 @@ async def handle_node_ws(request: web.Request) -> web.WebSocketResponse:
 
 def create_app() -> web.Application:
     auth_manager = AuthManager()
+    bind_host = resolve_bind_host(auth_manager.enabled)
     middlewares = [auth_middleware] if auth_manager.enabled else []
     app = web.Application(middlewares=middlewares)
+    app[BIND_HOST_KEY] = bind_host
 
     session_store = SessionStore()
     ws_bridge = WsBridge()
@@ -1242,15 +1291,16 @@ def _get_ssl_context():
 def main() -> None:
     try:
         app = create_app()
+        bind_host = app[BIND_HOST_KEY]
         ssl_ctx = _get_ssl_context()
         scheme = "https" if ssl_ctx else "http"
         ws_scheme = "wss" if ssl_ctx else "ws"
-        logger.info(f"Server running on {scheme}://localhost:{PORT}")
-        logger.info(f"  CLI WebSocket:     {ws_scheme}://localhost:{PORT}/ws/cli/:sessionId")
-        logger.info(f"  Browser WebSocket: {ws_scheme}://localhost:{PORT}/ws/browser/:sessionId")
+        logger.info("Server running on %s://%s:%d", scheme, bind_host, PORT)
+        logger.info("  CLI WebSocket:     %s://%s:%d/ws/cli/:sessionId", ws_scheme, bind_host, PORT)
+        logger.info("  Browser WebSocket: %s://%s:%d/ws/browser/:sessionId", ws_scheme, bind_host, PORT)
         if os.environ.get("NODE_ENV") != "production":
             logger.info("Dev mode: frontend at http://localhost:5174")
-        web.run_app(app, host="0.0.0.0", port=PORT, print=None, shutdown_timeout=2.0, reuse_address=True, ssl_context=ssl_ctx)
+        web.run_app(app, host=bind_host, port=PORT, print=None, shutdown_timeout=2.0, reuse_address=True, ssl_context=ssl_ctx)
     except Exception:
         logger.exception("[server] Fatal error during startup/run")
         sys.exit(1)

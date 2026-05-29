@@ -544,6 +544,12 @@ class NodeAgent:
         self._app = app
         self._runner = web.AppRunner(app)
         await self._runner.setup()
+        # Hardcoded 127.0.0.1 is load-bearing: the node's local HTTP server
+        # has no auth of its own (it relies on the hub for browser-facing
+        # auth and on the tunnel API key for hub-side calls). The hub's
+        # server/main.py auth guard does NOT extend here. If you ever make
+        # this bind configurable, mirror server/main.resolve_bind_host so a
+        # public bind requires explicit VIBR8_ALLOW_PUBLIC_NO_AUTH.
         site = web.TCPSite(self._runner, "127.0.0.1", self.port)
         await site.start()
         logger.info("Local server running on http://127.0.0.1:%d", self.port)
