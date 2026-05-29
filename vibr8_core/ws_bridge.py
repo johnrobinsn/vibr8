@@ -135,6 +135,21 @@ class WsBridge:
         self._task_scheduler: Any = None  # TaskScheduler (set via setter)
         self._session_registry: Any = None  # SessionRegistry (set via setter)
 
+    @staticmethod
+    def _schedule_background(coro: Awaitable[Any]) -> None:
+        """Schedule a coroutine only when an event loop is running.
+
+        Some synchronous unit tests exercise bridge methods without a current
+        loop. In that context async notifications cannot be delivered, so close
+        the coroutine instead of leaking it or raising from ensure_future.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            coro.close()
+            return
+        loop.create_task(coro)
+
     # ── Native WebSocket (Android foreground service) ───────────────────
 
     def register_native_ws(self, client_id: str, ws: web.WebSocketResponse) -> None:
@@ -921,8 +936,8 @@ class WsBridge:
                     logger.warning(f"[ws-bridge] Failed to parse queued message for Codex")
 
         # Notify browsers and native clients
-        asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
-        asyncio.ensure_future(self._push_to_native_clients(session.id, "cli_connected"))
+        self._schedule_background(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
+        self._schedule_background(self._push_to_native_clients(session.id, "cli_connected"))
         logger.info(f"[ws-bridge] Codex adapter attached for session {session_id}")
 
     # ── Computer-use agent attachment ──────────────────────────────────────────
