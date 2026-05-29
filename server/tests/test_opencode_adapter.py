@@ -19,6 +19,15 @@ from vibr8_core.opencode_adapter import OpenCodeAdapter, OpenCodeAdapterOptions
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
+def close_scheduled_coro(coro: Any) -> MagicMock:
+    """Close a coroutine passed to a patched scheduler and return a task stub."""
+    if hasattr(coro, "close"):
+        coro.close()
+    task = MagicMock()
+    task.done.return_value = True
+    return task
+
+
 def make_adapter(
     session_id: str = "test-session",
     model: str = "opencode/gpt-5.5",
@@ -29,7 +38,7 @@ def make_adapter(
 ) -> OpenCodeAdapter:
     """Create an adapter with init task cancelled (for unit testing)."""
     with patch("vibr8_core.opencode_adapter.asyncio.create_task") as mock_ct:
-        mock_ct.return_value = MagicMock()
+        mock_ct.side_effect = close_scheduled_coro
         a = OpenCodeAdapter(session_id, OpenCodeAdapterOptions(
             model=model,
             cwd=cwd,
@@ -165,20 +174,23 @@ class TestOpenCodeAdapterDispatch:
         return make_ready_adapter()
 
     async def test_user_message_accepted(self, adapter):
-        result = adapter.send_browser_message({"type": "user_message", "content": "test"})
+        with patch("vibr8_core.opencode_adapter.asyncio.create_task", side_effect=close_scheduled_coro):
+            result = adapter.send_browser_message({"type": "user_message", "content": "test"})
         assert result is True
 
     async def test_permission_response_accepted(self, adapter):
         adapter._pending_approvals["r1"] = "oc-perm-1"
-        result = adapter.send_browser_message({
-            "type": "permission_response",
-            "request_id": "r1",
-            "behavior": "allow",
-        })
+        with patch("vibr8_core.opencode_adapter.asyncio.create_task", side_effect=close_scheduled_coro):
+            result = adapter.send_browser_message({
+                "type": "permission_response",
+                "request_id": "r1",
+                "behavior": "allow",
+            })
         assert result is True
 
     async def test_interrupt_accepted(self, adapter):
-        result = adapter.send_browser_message({"type": "interrupt"})
+        with patch("vibr8_core.opencode_adapter.asyncio.create_task", side_effect=close_scheduled_coro):
+            result = adapter.send_browser_message({"type": "interrupt"})
         assert result is True
 
     def test_set_model_rejected(self, adapter):
@@ -690,7 +702,7 @@ class TestOpenCodeAdapterEmit:
     def test_emit_handles_async_callback(self, adapter):
         cb = AsyncMock()
         adapter.on_browser_message(cb)
-        with patch("vibr8_core.opencode_adapter.asyncio.ensure_future") as mock_ef:
+        with patch("vibr8_core.opencode_adapter.asyncio.ensure_future", side_effect=close_scheduled_coro) as mock_ef:
             adapter._emit({"type": "test"})
             mock_ef.assert_called_once()
 
@@ -709,7 +721,7 @@ class TestOpenCodeAdapterServerDisposed:
         return a
 
     def test_server_disposed_triggers_disconnect(self, adapter):
-        with patch("vibr8_core.opencode_adapter.asyncio.create_task") as mock_ct:
+        with patch("vibr8_core.opencode_adapter.asyncio.create_task", side_effect=close_scheduled_coro) as mock_ct:
             adapter._dispatch_sse_event({
                 "type": "server.instance.disposed",
                 "properties": {},
