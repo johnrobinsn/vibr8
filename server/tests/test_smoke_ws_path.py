@@ -31,6 +31,9 @@ from aiohttp.test_utils import TestClient, TestServer
 from vibr8_core.ws_bridge import WsBridge
 
 
+BRIDGE_KEY = web.AppKey("bridge", WsBridge)
+
+
 # Mirrors server.main.handle_browser_ws — copied here so the smoke
 # doesn't pull in the entire create_app() (Ring0, warmup, scheduler).
 # If this handler diverges from main.py's, that's the regression we
@@ -39,7 +42,7 @@ async def _handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=45)
     await ws.prepare(request)
     session_id = request.match_info["session_id"]
-    bridge: WsBridge = request.app["bridge"]
+    bridge = request.app[BRIDGE_KEY]
     client_id = request.rel_url.query.get("clientId", "")
     role = request.rel_url.query.get("role", "primary")
     mirror = request.rel_url.query.get("mirror", "") == "true"
@@ -59,7 +62,7 @@ async def _handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
 async def smoke_client():
     bridge = WsBridge()
     app = web.Application()
-    app["bridge"] = bridge
+    app[BRIDGE_KEY] = bridge
     app.router.add_get("/ws/browser/{session_id}", _handle_browser_ws)
     server = TestServer(app)
     client = TestClient(server)

@@ -105,6 +105,7 @@ async def test_cli_launcher_scheme_default_uses_certs(tmp_path) -> None:
         proc.pid = 12345
         proc.stdout = None
         proc.stderr = None
+        proc.wait = AsyncMock(return_value=0)
         return proc
 
     launcher = CliLauncher(port=3456)  # no scheme
