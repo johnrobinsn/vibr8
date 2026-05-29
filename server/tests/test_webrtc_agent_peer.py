@@ -10,10 +10,14 @@ import json
 import pytest
 from fractions import Fraction
 
-import av
+av = pytest.importorskip("av")
+pytest.importorskip("aiortc")
+
 import numpy as np
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamTrack
+
+pytestmark = pytest.mark.webrtc
 
 # ── Synthetic video track (stands in for ScreenShareTrack) ──────────────
 

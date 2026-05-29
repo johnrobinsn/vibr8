@@ -43,18 +43,11 @@ test-all: test-core test-frontend
 # Safe to run alongside a live vibr8 instance: these tests use isolated ports,
 # mocks, or in-memory aiohttp apps rather than the default dev server ports.
 test-core:
-	uv run --extra dev pytest -v \
-		server/tests/test_node_client_wrappers.py \
-		server/tests/test_opencode_adapter.py \
-		server/tests/test_codex_adapter.py \
-		server/tests/test_node_integration.py \
-		server/tests/test_voice_profiles.py \
-		server/tests/test_post_refactor_regressions.py \
-		server/tests/test_hermes_adapter.py \
-		server/tests/test_smoke_ws_path.py
+	uv run --extra dev pytest -v -m "not (desktop or webrtc)" server/tests
 
-# Backwards-compatible alias for the default Python test suite.
-test-py: test-core
+# Run all Python tests that do not require frontend tooling. Optional suites
+# install their declared extras and remain isolated from the live dev ports.
+test-py: test-core test-desktop test-webrtc
 
 # Optional desktop/media tests.
 test-desktop:
@@ -64,7 +57,7 @@ test-desktop:
 
 # Optional WebRTC peer tests.
 test-webrtc:
-	uv run --extra dev --extra desktop pytest -v \
+	uv run --extra dev --extra webrtc pytest -v \
 		server/tests/test_webrtc_agent_peer.py
 
 # Run frontend tests

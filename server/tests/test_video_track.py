@@ -1,13 +1,17 @@
 """Tests for server.video_track — ScreenShareTrack unit tests."""
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
-
-import av
-import numpy as np
 import pytest
 
+av = pytest.importorskip("av")
+pytest.importorskip("aiortc")
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+import numpy as np
+
 from server.video_track import ScreenShareTrack
+
+pytestmark = pytest.mark.desktop
 
 
 def _make_mock_capture(width=1920, height=1080, fps=30):
