@@ -146,7 +146,11 @@ class WsBridge:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            logger.warning("[ws-bridge] Dropping background coroutine: no running event loop")
+            coro_name = getattr(coro, "__qualname__", repr(coro))
+            logger.warning(
+                "[ws-bridge] Dropping background coroutine %s: no running event loop",
+                coro_name,
+            )
             coro.close()
             return
         loop.create_task(coro)
