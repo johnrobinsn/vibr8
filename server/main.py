@@ -85,6 +85,12 @@ os.environ.pop("CLAUDECODE", None)
 PORT = int(os.environ.get("PORT", "3456"))
 RECONNECT_GRACE_S = 10
 
+# Typed key for the WsBridge instance in app state. Mirrors the same
+# idiom used in server/tests/test_smoke_ws_path.py so the smoke gate
+# and production lookup match shape, and silences aiohttp's
+# NotAppKeyWarning for this key on startup.
+BRIDGE_KEY = web.AppKey("bridge", WsBridge)
+
 
 # ── WebSocket route handlers ─────────────────────────────────────────────────
 
@@ -95,7 +101,7 @@ async def handle_cli_ws(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
     session_id = request.match_info["session_id"]
 
-    bridge: WsBridge = request.app["bridge"]
+    bridge = request.app[BRIDGE_KEY]
     launcher: CliLauncher = request.app["launcher"]
 
     await bridge.handle_cli_open(ws, session_id)
@@ -123,7 +129,7 @@ async def handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
     session_id = request.match_info["session_id"]
 
-    bridge: WsBridge = request.app["bridge"]
+    bridge = request.app[BRIDGE_KEY]
     client_id = request.rel_url.query.get("clientId", "")
     role = request.rel_url.query.get("role", "primary")
 
@@ -216,7 +222,7 @@ async def handle_native_ws(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
     client_id = request.match_info["client_id"]
 
-    bridge: WsBridge = request.app["bridge"]
+    bridge = request.app[BRIDGE_KEY]
     bridge.register_native_ws(client_id, ws)
 
     logger.info("[native] Connection opened for client %s", client_id[:8])
@@ -298,7 +304,7 @@ async def handle_node_ws(request: web.Request) -> web.WebSocketResponse:
     node_id = request.match_info["node_id"]
 
     registry: NodeRegistry = request.app["node_registry"]
-    bridge: WsBridge = request.app["bridge"]
+    bridge = request.app[BRIDGE_KEY]
     session_registry: SessionRegistry = request.app["session_registry"]
 
     # Authenticate via query param API key
@@ -827,7 +833,7 @@ def create_app() -> web.Application:
             app.router.add_get("/{path:.*}", spa_fallback)
 
     # Store references for handlers
-    app["bridge"] = ws_bridge
+    app[BRIDGE_KEY] = ws_bridge
     app["launcher"] = launcher
     app["session_store"] = session_store
     app["worktree_tracker"] = worktree_tracker
