@@ -59,7 +59,7 @@ test-desktop:
 
 # Optional WebRTC peer tests.
 test-webrtc:
-	uv run --extra dev --extra desktop pytest -v \
+	uv run --extra dev --extra webrtc pytest -v \
 		server/tests/test_webrtc_agent_peer.py
 
 # Run frontend tests

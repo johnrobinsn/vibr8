@@ -30,6 +30,9 @@ desktop = [
     "mss>=10.1.0",
     "pillow>=12.2.0",
 ]
+webrtc = [
+    "aiortc>=1.9",
+]
 computer-use = [
     "torch>=2.0",
     "transformers>=4.46,<5.0",  # 5.x breaks speculative decoding (HF #31987, #34626)
