@@ -146,6 +146,7 @@ class WsBridge:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            logger.warning("[ws-bridge] Dropping background coroutine: no running event loop")
             coro.close()
             return
         loop.create_task(coro)
@@ -987,9 +988,9 @@ class WsBridge:
         }
         session.state.update(init_msg["session"])
         self._persist_session(session)
-        asyncio.ensure_future(self._broadcast_to_browsers(session, init_msg))
-        asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
-        asyncio.ensure_future(self._push_to_native_clients(session.id, "cli_connected"))
+        self._schedule_background(self._broadcast_to_browsers(session, init_msg))
+        self._schedule_background(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
+        self._schedule_background(self._push_to_native_clients(session.id, "cli_connected"))
 
         # Replay any messages queued while the agent was initializing
         if session.pending_messages:
@@ -1022,9 +1023,9 @@ class WsBridge:
         session._awaiting_replay = True
         session._replay_archived = False
         logger.info(f"[ws-bridge] CLI connected for session {session_id} (awaiting replay)")
-        asyncio.ensure_future(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
-        asyncio.ensure_future(self._push_to_native_clients(session.id, "cli_connected"))
-        asyncio.ensure_future(self._push_to_all_native_clients("sessions_changed"))
+        self._schedule_background(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
+        self._schedule_background(self._push_to_native_clients(session.id, "cli_connected"))
+        self._schedule_background(self._push_to_all_native_clients("sessions_changed"))
 
         # Flush queued messages. Snapshot + clear before awaiting so that if a
         # write fails and _send_to_cli re-queues into pending_messages, the

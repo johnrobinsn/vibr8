@@ -1,4 +1,4 @@
-.PHONY: dev dev-api dev-frontend build test test-all test-core test-py test-desktop test-webrtc test-frontend test-e2e install docker-hub-build docker-hub-run
+.PHONY: dev dev-api dev-frontend build test test-all test-core test-py-core test-py test-desktop test-webrtc test-frontend test-e2e install docker-hub-build docker-hub-run
 
 # Run both Python backend and Vite frontend
 dev:
@@ -42,19 +42,14 @@ test-all: test-core test-frontend
 # Run Python tests that do not require optional media/ML/device dependencies.
 # Safe to run alongside a live vibr8 instance: these tests use isolated ports,
 # mocks, or in-memory aiohttp apps rather than the default dev server ports.
-test-core:
-	uv run --extra dev pytest -v \
-		server/tests/test_node_client_wrappers.py \
-		server/tests/test_opencode_adapter.py \
-		server/tests/test_codex_adapter.py \
-		server/tests/test_node_integration.py \
-		server/tests/test_voice_profiles.py \
-		server/tests/test_post_refactor_regressions.py \
-		server/tests/test_hermes_adapter.py \
-		server/tests/test_smoke_ws_path.py
+test-core: test-py-core
 
-# Backwards-compatible alias for the default Python test suite.
-test-py: test-core
+test-py-core:
+	uv run --extra dev pytest -v -m "not (desktop or webrtc)" server/tests
+
+# Run all Python tests that do not require frontend tooling. Optional suites
+# install their declared extras and remain isolated from the live dev ports.
+test-py: test-py-core test-desktop test-webrtc
 
 # Optional desktop/media tests.
 test-desktop:

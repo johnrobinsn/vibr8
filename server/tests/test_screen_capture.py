@@ -1,12 +1,17 @@
 """Tests for server.screen_capture — unit tests that don't require a display."""
 
-from unittest.mock import patch, MagicMock
-
-import av
-import numpy as np
 import pytest
 
+av = pytest.importorskip("av")
+pytest.importorskip("mss")
+
+from unittest.mock import patch, MagicMock
+
+import numpy as np
+
 from server.screen_capture import ScreenCapture, NoDisplayError
+
+pytestmark = pytest.mark.desktop
 
 
 class TestScreenCaptureInit:
