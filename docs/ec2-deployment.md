@@ -254,6 +254,12 @@ users file exists, the server refuses to start unless `VIBR8_ALLOW_NO_AUTH=1`
 is set. Explicit no-auth mode binds to loopback unless
 `VIBR8_ALLOW_PUBLIC_NO_AUTH=1` is also set.
 
+**Important:** because this deployment uses an autossh tunnel from EC2 to your
+laptop and nginx in front of vibr8, the loopback bind on the laptop does not
+protect against Internet access — nginx forwards traffic through the tunnel to
+localhost from vibr8's perspective. Always run with auth enabled for this kind
+of reverse-proxied setup.
+
 ---
 
 ## Verification Checklist

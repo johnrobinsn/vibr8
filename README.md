@@ -415,6 +415,8 @@ uv run python -m server.manage_users remove <username>
 
 Create at least one user before running an Internet-accessible server. If no users exist, vibr8 refuses to start unless `VIBR8_ALLOW_NO_AUTH=1` is set. Explicit no-auth mode binds to loopback unless `VIBR8_ALLOW_PUBLIC_NO_AUTH=1` is also set.
 
+> **Caveat:** loopback bind blocks direct external connections, but it does **not** protect against a reverse proxy (nginx, Caddy, autossh tunnel terminator, etc.) running on the same host that forwards traffic to localhost. If you put any proxy in front of vibr8, always run with auth enabled regardless of bind host.
+
 ### Voice Replay
 
 Debug voice transcription issues by replaying recorded audio segments through the STT pipeline.

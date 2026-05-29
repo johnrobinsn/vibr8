@@ -114,8 +114,9 @@ def resolve_bind_host(auth_enabled: bool, environ: Mapping[str, str] = os.enviro
     if not _env_flag(environ, ALLOW_NO_AUTH_ENV):
         raise RuntimeError(
             "Authentication is disabled because no users.json exists. Refusing to start "
-            f"without auth. Create ~/.vibr8/users.json or set {ALLOW_NO_AUTH_ENV}=1 "
-            "for explicit local development."
+            "without auth. Run "
+            "`uv run python -m server.manage_users add <username>` to create a user, or set "
+            f"{ALLOW_NO_AUTH_ENV}=1 for explicit local development."
         )
 
     if _is_loopback_host(requested_host):
