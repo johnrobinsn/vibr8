@@ -1,7 +1,8 @@
 """Authentication — user/password auth with session cookies.
 
 Users stored in ~/.vibr8/users.json (bcrypt-hashed passwords).
-Auth is opt-in: if no users.json exists, auth is disabled.
+If no users.json exists, auth is disabled. server.main refuses to start in
+that state unless explicit no-auth development mode is enabled.
 
 Session tokens are HMAC-signed (stateless) so they survive server restarts.
 """

@@ -366,9 +366,9 @@ The app is available at http://localhost:3456 (single port).
 
 ### 10. Configuration
 
-#### Authentication (optional)
+#### Authentication
 
-Auth is opt-in. If no users exist, all endpoints are open (local dev mode). Adding the first user enables auth for all API and WebSocket endpoints.
+Create at least one user before running an Internet-accessible server. If no users exist, vibr8 refuses to start unless `VIBR8_ALLOW_NO_AUTH=1` is set. Explicit no-auth mode binds to loopback unless `VIBR8_ALLOW_PUBLIC_NO_AUTH=1` is also set.
 
 ```bash
 uv run python -m server.manage_users add <username>    # Add user (prompts for password)
@@ -431,6 +431,9 @@ Alternatively, set the `ICE_SERVERS` environment variable to the same JSON array
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3456` | Backend server port |
+| `VIBR8_HOST` | `0.0.0.0` with auth, `127.0.0.1` in explicit no-auth mode | Backend bind host |
+| `VIBR8_ALLOW_NO_AUTH` | — | Required to start without `~/.vibr8/users.json`; intended for local development only |
+| `VIBR8_ALLOW_PUBLIC_NO_AUTH` | — | Also required to bind a no-auth server to a non-loopback host |
 | `NODE_ENV` | — | Set to `production` to serve built frontend from `web/dist/` |
 | `VIBR8_TTS_ENGINE` | `kokoro` | TTS engine: `kokoro` (local, no API key) or `openai` (cloud) |
 | `VIBR8_TTS_VOICE` | `af_sarah` (kokoro) / `echo` (openai) | TTS voice name |

@@ -234,8 +234,7 @@ pair with `lt-cred-mech` also works.
 
 ## 6. Authentication
 
-vibr8 has built-in user authentication (opt-in). Set it up before exposing to
-the internet:
+vibr8 has built-in user authentication. Set it up before exposing to the internet:
 
 ```bash
 # Add a user
@@ -250,7 +249,10 @@ uv run python -m server.manage_users remove myuser
 
 Credentials are stored in `~/.vibr8/users.json` with bcrypt hashes.
 When the file exists, all API/WebSocket endpoints require authentication via
-session cookie. No file = no auth (local dev mode).
+session cookie except for explicit login and pairing/bootstrap paths. If no
+users file exists, the server refuses to start unless `VIBR8_ALLOW_NO_AUTH=1`
+is set. Explicit no-auth mode binds to loopback unless
+`VIBR8_ALLOW_PUBLIC_NO_AUTH=1` is also set.
 
 ---
 
