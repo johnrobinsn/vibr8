@@ -47,10 +47,10 @@ Goal: make accidental Internet exposure without auth impossible, while preservin
   `/api/nodes` and `/api/nodes/{node_id}/activate`; browser direct selection
   remains on authenticated `/api/clients/{client_id}/active-node`.**
 - Review second-screen pairing endpoints for:
-  - rate limiting
-  - one-time code semantics
-  - token delivery lifetime
-  - replay protection
+  - rate limiting **Pinned for unified pairing and legacy second-screen code requests.**
+  - one-time code semantics **Pinned for native and second-screen token delivery.**
+  - token delivery lifetime **Expired code behavior is pinned.**
+  - replay protection **Pinned for repeated status polls after token delivery.**
   - auditability
 - Review node registration/tunnel endpoints for:
   - authenticated token creation
