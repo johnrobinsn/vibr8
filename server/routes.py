@@ -34,6 +34,9 @@ from vibr8_core.ring0 import Ring0Manager
 
 logger = logging.getLogger(__name__)
 
+NODE_REGISTER_RATE_LIMIT = 10
+NODE_REGISTER_RATE_WINDOW = 60.0
+
 
 def _extract_assistant_text(message: Any) -> tuple[str, bool]:
     """Extract readable text from an assistant message content.
@@ -61,6 +64,24 @@ def _extract_assistant_text(message: Any) -> tuple[str, bool]:
     if isinstance(message, str):
         return message.strip(), bool(message.strip())
     return "", False
+
+
+def _check_rate_limit(
+    buckets: dict[str, list[float]],
+    key: str,
+    *,
+    limit: int,
+    window: float,
+) -> bool:
+    """Record one request and return True when the caller is already limited."""
+    now = time.time()
+    cutoff = now - window
+    timestamps = [t for t in buckets.get(key, []) if t > cutoff]
+    buckets[key] = timestamps
+    if len(timestamps) >= limit:
+        return True
+    timestamps.append(now)
+    return False
 
 
 def _format_session_output(messages: list[dict], permissions: list[dict]) -> str:
@@ -156,6 +177,7 @@ def create_routes(
     hub_browser_bridge: Any | None = None,
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
+    node_register_rate: dict[str, list[float]] = {}
 
     # If the caller didn't pre-build a NodeOperations, derive one from the
     # in-process managers we already have. Lets older callers (and tests)
@@ -2820,6 +2842,22 @@ def create_routes(
         if node_registry is None:
             return web.json_response({"error": "Node registry not available"}, status=503)
         ip = request.remote or "unknown"
+        if _check_rate_limit(
+            node_register_rate,
+            ip,
+            limit=NODE_REGISTER_RATE_LIMIT,
+            window=NODE_REGISTER_RATE_WINDOW,
+        ):
+            logger.warning(
+                "[audit] node registration rate limited path=/api/nodes/register ip=%s",
+                ip,
+                extra={
+                    "audit_event": "node_register_rate_limited",
+                    "path": "/api/nodes/register",
+                    "ip": ip,
+                },
+            )
+            return web.json_response({"error": "Too many requests"}, status=429)
         body = await request.json()
         name = body.get("name", "").strip()
         api_key = body.get("apiKey", "")

@@ -945,6 +945,37 @@ class TestNodeTokenEndpoints:
         assert records[-1].reason == "bound_elsewhere"
         assert records[-1].error_message == "API key is already bound to another node"
 
+    async def test_register_node_rate_limit_emits_audit_log(self, app, caplog):
+        caplog.set_level(logging.WARNING)
+
+        async with TestClient(TestServer(app)) as client:
+            for i in range(10):
+                resp = await client.post(
+                    "/api/nodes/register",
+                    json={
+                        "name": f"probe-{i}",
+                        "apiKey": "sk-node-unissued",
+                        "capabilities": {},
+                    },
+                )
+                assert resp.status == 403
+
+            resp = await client.post(
+                "/api/nodes/register",
+                json={
+                    "name": "probe-limited",
+                    "apiKey": "sk-node-unissued",
+                    "capabilities": {},
+                },
+            )
+            body = await resp.json()
+
+        assert resp.status == 429
+        assert body == {"error": "Too many requests"}
+        records = _audit_records(caplog, "node_register_rate_limited")
+        assert records[-1].path == "/api/nodes/register"
+        assert records[-1].ip
+
     async def test_register_node_success_emits_audit_log(self, app, registry, caplog):
         caplog.set_level(logging.INFO)
         raw_key, entry = registry.generate_api_key("new-node", username="alice")
