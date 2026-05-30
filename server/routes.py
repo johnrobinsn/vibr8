@@ -2966,6 +2966,24 @@ def create_routes(
         name = body.get("name", "")
         username = request.get("auth_user")
         raw_key, entry = node_registry.generate_api_key(name, username=username)
+        ip = request.remote or "unknown"
+        path = request.path
+        logger.info(
+            "[audit] node token created path=%s ip=%s user=%s key_id=%s name=%s",
+            path,
+            ip,
+            username or "",
+            entry.id,
+            entry.name[:32],
+            extra={
+                "audit_event": "node_token_created",
+                "path": path,
+                "ip": ip,
+                "username": username or "",
+                "api_key_id": entry.id,
+                "token_name": entry.name[:32],
+            },
+        )
         return web.json_response({
             "apiKey": raw_key,
             "token": raw_key,
@@ -2995,6 +3013,8 @@ def create_routes(
             return web.json_response({"error": "Node registry not available"}, status=503)
         key_id = request.match_info["key_id"]
         username = request.get("auth_user", None)
+        ip = request.remote or "unknown"
+        path = request.path
         # The registry owns persisted revocation and offline state. Live
         # WebSocket closure stays in the route layer because aiohttp close()
         # is async and revoke_api_key() is intentionally synchronous.
@@ -3007,7 +3027,38 @@ def create_routes(
             for ws in bound_ws:
                 if not ws.closed:
                     await ws.close(code=4001, message=b"Node token revoked")
+            logger.warning(
+                "[audit] node token revoked path=%s ip=%s user=%s key_id=%s closed_ws=%d",
+                path,
+                ip,
+                username or "",
+                key_id,
+                len(bound_ws),
+                extra={
+                    "audit_event": "node_token_revoked",
+                    "path": path,
+                    "ip": ip,
+                    "username": username or "",
+                    "api_key_id": key_id,
+                    "closed_ws_count": len(bound_ws),
+                },
+            )
             return web.json_response({"ok": True})
+        logger.warning(
+            "[audit] node token revocation rejected path=%s ip=%s user=%s key_id=%s reason=not_found_or_forbidden",
+            path,
+            ip,
+            username or "",
+            key_id,
+            extra={
+                "audit_event": "node_token_revoke_rejected",
+                "path": path,
+                "ip": ip,
+                "username": username or "",
+                "api_key_id": key_id,
+                "reason": "not_found_or_forbidden",
+            },
+        )
         return web.json_response({"error": "Key not found"}, status=404)
 
     # ── Android Devices ──────────────────────────────────────────────────

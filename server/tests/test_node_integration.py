@@ -725,6 +725,39 @@ class TestNodeTokenEndpoints:
         entry = registry._api_keys[data["id"]]
         assert entry.username == "alice"
 
+    async def test_create_node_token_emits_audit_log(self, app, registry, caplog):
+        caplog.set_level(logging.INFO)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/nodes/tokens",
+                json={"name": "audit-node"},
+                headers={"X-Test-User": "alice"},
+            )
+            data = await resp.json()
+
+        assert resp.status == 200
+        records = _audit_records(caplog, "node_token_created")
+        assert records[-1].path == "/api/nodes/tokens"
+        assert records[-1].username == "alice"
+        assert records[-1].api_key_id == data["id"]
+        assert records[-1].token_name == "audit-node"
+        assert records[-1].ip
+
+    async def test_legacy_create_node_key_emits_legacy_path_in_audit_log(self, app, registry, caplog):
+        caplog.set_level(logging.INFO)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/nodes/generate-key",
+                json={"name": "legacy-node"},
+                headers={"X-Test-User": "alice"},
+            )
+            data = await resp.json()
+
+        assert resp.status == 200
+        records = _audit_records(caplog, "node_token_created")
+        assert records[-1].path == "/api/nodes/generate-key"
+        assert records[-1].api_key_id == data["id"]
+
     async def test_list_node_tokens_filters_to_authenticated_user(self, app, registry):
         _, alice_entry = registry.generate_api_key("alice-node", username="alice")
         registry.generate_api_key("bob-node", username="bob")
@@ -758,6 +791,52 @@ class TestNodeTokenEndpoints:
 
         assert alice_resp.status == 200
         assert registry.validate_standalone_key(raw_key) is None
+
+    async def test_revoke_node_token_emits_audit_logs(self, app, registry, caplog):
+        caplog.set_level(logging.WARNING)
+        raw_key, entry = registry.generate_api_key("alice-node", username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            bob_resp = await client.delete(
+                f"/api/nodes/tokens/{entry.id}",
+                headers={"X-Test-User": "bob"},
+            )
+            alice_resp = await client.delete(
+                f"/api/nodes/tokens/{entry.id}",
+                headers={"X-Test-User": "alice"},
+            )
+
+        assert bob_resp.status == 404
+        rejected = _audit_records(caplog, "node_token_revoke_rejected")
+        assert rejected[-1].path == f"/api/nodes/tokens/{entry.id}"
+        assert rejected[-1].username == "bob"
+        assert rejected[-1].api_key_id == entry.id
+        assert rejected[-1].reason == "not_found_or_forbidden"
+        assert rejected[-1].ip
+
+        assert alice_resp.status == 200
+        assert registry.validate_standalone_key(raw_key) is None
+        revoked = _audit_records(caplog, "node_token_revoked")
+        assert revoked[-1].path == f"/api/nodes/tokens/{entry.id}"
+        assert revoked[-1].username == "alice"
+        assert revoked[-1].api_key_id == entry.id
+        assert revoked[-1].closed_ws_count == 0
+        assert revoked[-1].ip
+
+    async def test_legacy_revoke_node_key_emits_legacy_path_in_audit_log(self, app, registry, caplog):
+        caplog.set_level(logging.WARNING)
+        _, entry = registry.generate_api_key("legacy-node", username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.delete(
+                f"/api/nodes/keys/{entry.id}",
+                headers={"X-Test-User": "alice"},
+            )
+
+        assert resp.status == 200
+        records = _audit_records(caplog, "node_token_revoked")
+        assert records[-1].path == f"/api/nodes/keys/{entry.id}"
+        assert records[-1].api_key_id == entry.id
 
     async def test_revoke_node_token_closes_bound_online_node_ws(self, app, registry):
         class FakeWs:
