@@ -24,11 +24,11 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
 | `/ws/node/` | node bootstrap | Remote nodes connect over outbound WebSocket and authenticate inside the node handler with node credentials. | Keep only if node tunnel auth remains handler-level; add explicit failed-auth logging and revocation semantics. |
 | `/api/auth/login` | login | Browser needs to submit credentials before it has a session cookie. | Keep public. |
 | `/api/auth/me` | login/session discovery | Browser needs to determine whether auth is enabled and whether the current cookie is valid. | Keep public, but ensure it never leaks private user data. |
-| `/api/pairing/request` | device pairing bootstrap | Native and second-screen devices need to request a code before having a token. | Keep public with rate limits. |
-| `/api/pairing/status/` | device pairing bootstrap | Devices poll this path while waiting for user approval. | Keep public with brute-force protection and one-time token delivery. |
+| `/api/pairing/request` | device pairing bootstrap | Native and second-screen devices need to request a code before having a token. | Keep public. Rate-limit behavior is pinned by tests. |
+| `/api/pairing/status/` | device pairing bootstrap | Devices poll this path while waiting for user approval. | Keep public. Brute-force cooldown and one-time token delivery are pinned by tests. |
 | `/api/nodes/register` | node bootstrap | Nodes register with an API key in the request body. | Replace with authenticated user-created revocable node tokens. |
-| `/api/second-screen/pair-code` | second-screen bootstrap | Legacy second-screen pairing requests a code before having a token. | Keep or replace with unified `/api/pairing/request`; preserve second-screen onboarding. |
-| `/api/second-screen/status` | second-screen bootstrap | Second screens poll pairing status and receive a pending device token once. | Keep public only for status/token delivery; verify replay behavior. |
+| `/api/second-screen/pair-code` | second-screen bootstrap | Legacy second-screen pairing requests a code before having a token. | Keep or replace with unified `/api/pairing/request`; preserve second-screen onboarding. Rate-limit behavior is pinned by tests. |
+| `/api/second-screen/status` | second-screen bootstrap | Second screens poll pairing status and receive a pending device token once. | Keep public only for status/token delivery; one-time token delivery is pinned by tests. |
 | `/assets/` | static asset | Built frontend assets must load before login. | Keep public. |
 | `/sw.js` | static asset | Service worker file. | Keep public if service worker remains enabled. |
 | `/manifest.json` | static asset | Browser app manifest. | Keep public. |

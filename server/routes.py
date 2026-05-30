@@ -2606,6 +2606,8 @@ def create_routes(
         if not client_id:
             return web.json_response({"error": "clientId required"}, status=400)
         ip = request.remote or "unknown"
+        if auth_manager.check_pairing_rate_limit(ip):
+            return web.json_response({"error": "Too many requests"}, status=429)
         result = auth_manager.request_pairing("second-screen", ip, client_id)
         return web.json_response({"code": result["code"]})
 
@@ -2673,7 +2675,8 @@ def create_routes(
         if not client_id:
             return web.json_response({"error": "clientId required"}, status=400)
 
-        # Check if this client is a paired second screen
+        # This status path polls by caller-held clientId, not a short pairing code.
+        # Keep token delivery single-use without applying pairing-code brute-force limits.
         pairing = _second_screen_pairings.get(client_id)
         if pairing:
             resp: dict[str, Any] = {
