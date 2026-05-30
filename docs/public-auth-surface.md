@@ -40,19 +40,21 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
 
 | Rule | Classification | Current Reason | Follow-Up |
 |---|---|---|---|
-| `/api/nodes` | risky/public metadata | UI currently reads node list without credentials. | Should become authenticated; second-screen bootstrap should use a narrower path if needed. |
+| — | — | None. | — |
 
 ## Tightened Routes
 
 | Rule | Previous Classification | Current Auth Requirement | Notes |
 |---|---|---|---|
 | `/api/ring0/` | highest-risk public control surface | Valid user, device, or service token. | Ring0 MCP uses the `VIBR8_TOKEN` bearer token issued by `AuthManager` and passed to MCP by `Ring0Manager._get_service_token`; remote nodes forward hub Ring0 calls with their hub-issued service token. |
+| `/api/nodes` | risky/public metadata | Valid user, device, or service token. | Browser UI already has authenticated API access; node inventory no longer needs to be anonymous. |
+| `^/api/nodes/[^/]+/activate$` | risky/public control surface | Valid user, device, or service token. | Direct browser selection uses authenticated `/api/clients/{client_id}/active-node`; this wrapper remains available to authenticated Ring0, device, or service callers. |
 
 ## Current Public Path Patterns
 
 | Rule | Classification | Current Reason | Follow-Up |
 |---|---|---|---|
-| `^/api/nodes/[^/]+/activate$` | risky/public control surface | Lets callers switch a browser client's active node, used by voice/Ring0 flows. | Should require authenticated browser, device, or service token; clarify second-screen needs before tightening. |
+| — | — | None. | — |
 
 ## WebSocket Routes
 
@@ -79,4 +81,7 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
    any authenticated user so operators can clean up legacy credentials after
    upgrade.
 2. Narrow node listing and activation to authenticated clients while preserving
-   second-screen and voice routing workflows.
+   second-screen and voice routing workflows. `/api/nodes` and
+   `/api/nodes/{node_id}/activate` now require valid auth; direct browser
+   node selection continues through authenticated
+   `/api/clients/{client_id}/active-node`.

@@ -25,12 +25,19 @@ async def ok_handler(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "authUser": request.get("auth_user")})
 
 
-async def call_middleware(path: str, *, token: str = "") -> web.StreamResponse:
+async def call_middleware(
+    path: str,
+    *,
+    token: str = "",
+    cookie_token: str = "",
+) -> web.StreamResponse:
     app = MagicMock()
     app.get.return_value = EnabledAuth()
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if cookie_token:
+        headers["Cookie"] = f"vibr8_session={cookie_token}"
     request = make_mocked_request("GET", path, headers=headers, app=app)
     return await auth_middleware(request, ok_handler)
 
@@ -53,8 +60,6 @@ async def call_middleware(path: str, *, token: str = "") -> web.StreamResponse:
         "/logo.svg",
         "/favicon.ico",
         "/apple-touch-icon.png",
-        "/api/nodes",
-        "/api/nodes/node-1/activate",
     ],
 )
 async def test_current_public_paths_bypass_auth(path: str) -> None:
@@ -70,6 +75,8 @@ async def test_current_public_paths_bypass_auth(path: str) -> None:
         "/api/auth/device-token",
         "/api/pairing/confirm",
         "/api/second-screen/list",
+        "/api/nodes",
+        "/api/nodes/node-1/activate",
         "/api/nodes/generate-key",
         "/api/nodes/tokens",
         "/api/nodes/active",
@@ -98,14 +105,29 @@ async def test_public_paths_still_capture_optional_auth_user() -> None:
 @pytest.mark.parametrize(
     "path",
     [
+        "/api/nodes",
+        "/api/nodes/node-1/activate",
         "/api/ring0/status",
         "/api/ring0/query-client",
         "/api/ring0/send-message",
         "/api/ring0/respond-permission",
     ],
 )
-async def test_ring0_paths_allow_authenticated_bearer_tokens(path: str) -> None:
+async def test_tightened_paths_allow_authenticated_bearer_tokens(path: str) -> None:
     response = await call_middleware(path, token="valid")
+    assert response.status == 200
+    assert json.loads(response.text)["authUser"] == "alice"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/nodes",
+        "/api/nodes/node-1/activate",
+    ],
+)
+async def test_tightened_node_paths_allow_authenticated_cookies(path: str) -> None:
+    response = await call_middleware(path, cookie_token="valid")
     assert response.status == 200
     assert json.loads(response.text)["authUser"] == "alice"
 
@@ -128,12 +150,8 @@ def test_public_auth_surface_matches_audit_document() -> None:
         "/favicon",
         "/apple-touch-icon",
     )
-    assert auth.PUBLIC_EXACT_PATHS == frozenset({
-        "/api/nodes",
-    })
-    assert [pattern.pattern for pattern in auth._PUBLIC_PATH_PATTERNS] == [
-        r"^/api/nodes/[^/]+/activate$",
-    ]
+    assert auth.PUBLIC_EXACT_PATHS == frozenset()
+    assert [pattern.pattern for pattern in auth._PUBLIC_PATH_PATTERNS] == []
 
 
 def test_public_auth_surface_constants_are_named_in_audit_document() -> None:
