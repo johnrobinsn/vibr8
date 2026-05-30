@@ -26,7 +26,6 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
 | `/api/auth/me` | login/session discovery | Browser needs to determine whether auth is enabled and whether the current cookie is valid. | Keep public, but ensure it never leaks private user data. |
 | `/api/pairing/request` | device pairing bootstrap | Native and second-screen devices need to request a code before having a token. | Keep public with rate limits. |
 | `/api/pairing/status/` | device pairing bootstrap | Devices poll this path while waiting for user approval. | Keep public with brute-force protection and one-time token delivery. |
-| `/api/ring0/` | highest-risk public control surface | Entire Ring0 API currently bypasses middleware. | Tighten first. Ring0 MCP should use service-token-backed access, not anonymous clients. |
 | `/api/nodes/register` | node bootstrap | Nodes register with an API key in the request body. | Replace with authenticated user-created revocable node tokens. |
 | `/api/second-screen/pair-code` | second-screen bootstrap | Legacy second-screen pairing requests a code before having a token. | Keep or replace with unified `/api/pairing/request`; preserve second-screen onboarding. |
 | `/api/second-screen/status` | second-screen bootstrap | Second screens poll pairing status and receive a pending device token once. | Keep public only for status/token delivery; verify replay behavior. |
@@ -42,6 +41,12 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
 | Rule | Classification | Current Reason | Follow-Up |
 |---|---|---|---|
 | `/api/nodes` | risky/public metadata | UI currently reads node list without credentials. | Should become authenticated; second-screen bootstrap should use a narrower path if needed. |
+
+## Tightened Routes
+
+| Rule | Previous Classification | Current Auth Requirement | Notes |
+|---|---|---|---|
+| `/api/ring0/` | highest-risk public control surface | Valid user, device, or service token. | Ring0 MCP uses the `VIBR8_TOKEN` bearer token issued by `AuthManager` and passed to MCP by `Ring0Manager._get_service_token`; remote nodes forward hub Ring0 calls with their hub-issued service token. |
 
 ## Current Public Path Patterns
 
@@ -63,9 +68,7 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
 
 ## Tightening Order
 
-1. Replace anonymous `/api/ring0/` access with authenticated browser/device or
-   service-token access.
-2. Move node registration from anonymous API-key-in-body bootstrap toward
+1. Move node registration from anonymous API-key-in-body bootstrap toward
    authenticated, revocable, user-owned node tokens.
-3. Narrow node listing and activation to authenticated clients while preserving
+2. Narrow node listing and activation to authenticated clients while preserving
    second-screen and voice routing workflows.

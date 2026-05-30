@@ -44,7 +44,6 @@ async def call_middleware(path: str, *, token: str = "") -> web.StreamResponse:
         "/api/auth/me",
         "/api/pairing/request",
         "/api/pairing/status/123456",
-        "/api/ring0/status",
         "/api/nodes/register",
         "/api/second-screen/pair-code",
         "/api/second-screen/status",
@@ -73,6 +72,10 @@ async def test_current_public_paths_bypass_auth(path: str) -> None:
         "/api/second-screen/list",
         "/api/nodes/generate-key",
         "/api/nodes/active",
+        "/api/ring0/status",
+        "/api/ring0/query-client",
+        "/api/ring0/send-message",
+        "/api/ring0/respond-permission",
         "/ws/browser/session-1",
         "/ws/native/client-1",
         "/ws/terminal/session-1",
@@ -91,6 +94,21 @@ async def test_public_paths_still_capture_optional_auth_user() -> None:
     assert json.loads(response.text)["authUser"] == "alice"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/ring0/status",
+        "/api/ring0/query-client",
+        "/api/ring0/send-message",
+        "/api/ring0/respond-permission",
+    ],
+)
+async def test_ring0_paths_allow_authenticated_bearer_tokens(path: str) -> None:
+    response = await call_middleware(path, token="valid")
+    assert response.status == 200
+    assert json.loads(response.text)["authUser"] == "alice"
+
+
 def test_public_auth_surface_matches_audit_document() -> None:
     assert auth.PUBLIC_PREFIXES == (
         "/ws/cli/",
@@ -99,7 +117,6 @@ def test_public_auth_surface_matches_audit_document() -> None:
         "/api/auth/me",
         "/api/pairing/request",
         "/api/pairing/status/",
-        "/api/ring0/",
         "/api/nodes/register",
         "/api/second-screen/pair-code",
         "/api/second-screen/status",

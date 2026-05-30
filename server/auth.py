@@ -45,7 +45,6 @@ PUBLIC_PREFIXES = (
     "/api/auth/me",
     "/api/pairing/request",
     "/api/pairing/status/",
-    "/api/ring0/",
     "/api/nodes/register",
     "/api/second-screen/pair-code",
     "/api/second-screen/status",
