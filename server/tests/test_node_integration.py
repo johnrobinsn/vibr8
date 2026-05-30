@@ -87,8 +87,25 @@ class TestNodeRegistry:
         assert node.id != "local"
         assert node.capabilities["platform"] == "linux"
         assert node.api_key_id == entry.id
+        assert entry.node_id == node.id
         assert registry.get_node(node.id) is node
         assert registry.get_node_by_name("cloud-dev") is node
+
+    def test_node_token_binds_to_first_registered_node(self, registry):
+        raw_key, entry = registry.generate_api_key("cloud-dev")
+
+        node = registry.register("cloud-dev", raw_key)
+
+        assert entry.node_id == node.id
+        assert entry.to_dict()["nodeId"] == node.id
+        assert entry.to_api_dict()["nodeId"] == node.id
+
+    def test_bound_node_token_cannot_register_different_node(self, registry):
+        raw_key, _ = registry.generate_api_key("node-a")
+        registry.register("node-a", raw_key)
+
+        with pytest.raises(PermissionError, match="already bound"):
+            registry.register("node-b", raw_key)
 
     def test_register_new_node_requires_issued_api_key(self, registry):
         with pytest.raises(PermissionError):
@@ -118,9 +135,21 @@ class TestNodeRegistry:
 
         assert node1.id == node2.id
         assert node2.api_key_id == entry2.id
+        assert entry2.node_id == node2.id
         assert node2.capabilities["platform"] == "linux"
         assert registry.validate_api_key(node2.id, raw_key2) is True
         assert registry.validate_api_key(node2.id, raw_key1) is False
+
+    def test_bound_node_token_cannot_rotate_different_existing_node(self, registry):
+        raw_key1, _ = registry.generate_api_key("node-a")
+        raw_key2, _ = registry.generate_api_key("node-b")
+        registry.register("node-a", raw_key1)
+        node2 = registry.register("node-b", raw_key2)
+
+        with pytest.raises(PermissionError, match="already bound"):
+            registry.register("node-b", raw_key1)
+
+        assert registry.validate_api_key(node2.id, raw_key2) is True
 
     def test_reregister_with_wrong_key_fails(self, registry):
         """Re-registering an existing node with a wrong key raises PermissionError."""
@@ -275,6 +304,7 @@ class TestNodeRegistry:
         assert loaded is not None
         assert loaded.name == "persist-test"
         assert loaded.api_key_id == entry.id
+        assert reg2._api_keys[entry.id].node_id == node_id
         assert reg2.hub_name == "my-hub"
 
     def test_set_online_offline(self, registry):

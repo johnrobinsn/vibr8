@@ -32,6 +32,7 @@ class ApiKeyEntry:
     key_hash: str              # bcrypt hash
     key_prefix: str            # first 12 chars for display (e.g. "sk-node-1234...")
     username: str = ""         # authenticated user that created this key
+    node_id: str = ""          # node identity this key is bound to after use
     created_at: float = 0     # time.time()
     last_used_at: float = 0   # time.time(), 0 = never used
     revoked_at: float = 0     # time.time(), 0 = active
@@ -43,6 +44,7 @@ class ApiKeyEntry:
             "keyHash": self.key_hash,
             "keyPrefix": self.key_prefix,
             "username": self.username,
+            "nodeId": self.node_id,
             "createdAt": self.created_at,
             "lastUsedAt": self.last_used_at,
             "revokedAt": self.revoked_at,
@@ -55,6 +57,7 @@ class ApiKeyEntry:
             "name": self.name,
             "keyPrefix": self.key_prefix,
             "username": self.username,
+            "nodeId": self.node_id or None,
             "createdAt": self.created_at,
             "lastUsedAt": self.last_used_at,
             "revokedAt": self.revoked_at or None,
@@ -68,6 +71,7 @@ class ApiKeyEntry:
             key_hash=data["keyHash"],
             key_prefix=data.get("keyPrefix", "sk-node-****"),
             username=data.get("username", ""),
+            node_id=data.get("nodeId", ""),
             created_at=data.get("createdAt", 0),
             last_used_at=data.get("lastUsedAt", 0),
             revoked_at=data.get("revokedAt", 0),
@@ -181,11 +185,14 @@ class NodeRegistry:
                 key_entry = self.validate_standalone_key(api_key)
                 if not key_entry:
                     raise PermissionError("Invalid API key for existing node")
+                if key_entry.node_id and key_entry.node_id != existing.id:
+                    raise PermissionError("API key is already bound to another node")
                 # Valid standalone key — update stored hash
                 existing.api_key_hash = bcrypt.hashpw(
                     api_key.encode(), bcrypt.gensalt()
                 ).decode()
                 existing.api_key_id = key_entry.id
+                key_entry.node_id = existing.id
             if capabilities:
                 existing.capabilities = capabilities
             self._save()
@@ -195,11 +202,14 @@ class NodeRegistry:
         key_entry = self.validate_standalone_key(api_key)
         if not key_entry:
             raise PermissionError("Invalid API key for new node")
+        if key_entry.node_id:
+            raise PermissionError("API key is already bound to another node")
 
         node_id = secrets.token_hex(16)
         api_key_hash = bcrypt.hashpw(
             api_key.encode(), bcrypt.gensalt()
         ).decode()
+        key_entry.node_id = node_id
         node = RegisteredNode(
             id=node_id,
             name=name,

@@ -55,7 +55,7 @@ Goal: make accidental Internet exposure without auth impossible, while preservin
 - Review node registration/tunnel endpoints for:
   - authenticated token creation
   - revocation
-  - node identity binding
+  - node identity binding **Done for token-to-node binding on first registration and token rotation.**
   - failed-auth logging **Pinned for registration rejection and node WebSocket tunnel rejection.**
   - reconnect behavior after revocation **Done for token-bound nodes; revocation closes bound online node WebSockets and blocks reconnect.**
 
@@ -76,7 +76,7 @@ Goal: replace ad hoc node API keys with user-owned, revocable credentials.
   - list node tokens **Done as `/api/nodes/tokens`, scoped to the authenticated user.**
   - revoke node token **Done as `/api/nodes/tokens/{key_id}`, preserving metadata as revoked with success/failure audit logging pinned.**
   - rename/update node metadata
-- Require nodes to connect with a valid non-revoked token. **Done for nodes registered after token-id binding; legacy nodes without a token id retain stored-key behavior.**
+- Require nodes to connect with a valid non-revoked token. **Done for nodes registered after token-id binding; issued tokens bind to one node identity on first registration or rotation. Legacy nodes without a token id retain stored-key behavior.**
 - Ensure revocation disconnects or blocks reconnect for the node. **Done for token-bound nodes: revocation marks matching online nodes offline and blocks reconnect via the stored node credential.**
 - Keep capability model simple for now: if token is valid and user has access, the node has full capability.
 
