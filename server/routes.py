@@ -2899,9 +2899,9 @@ def create_routes(
             "apiKey": raw_key,
             "token": raw_key,
             "revocationNote": (
-                "Revocation prevents new registrations with this token. "
-                "Already-registered nodes continue using their stored node credential "
-                "until node reconnect handling is migrated."
+                "Revocation prevents new registrations with this token and blocks "
+                "reconnect for nodes bound to it. Legacy nodes without a token binding "
+                "retain stored-key behavior until re-registered."
             ),
             **entry.to_api_dict(),
         })
@@ -2924,7 +2924,18 @@ def create_routes(
             return web.json_response({"error": "Node registry not available"}, status=503)
         key_id = request.match_info["key_id"]
         username = request.get("auth_user", None)
+        # The registry owns persisted revocation and offline state. Live
+        # WebSocket closure stays in the route layer because aiohttp close()
+        # is async and revoke_api_key() is intentionally synchronous.
+        bound_ws = [
+            node.ws
+            for node in node_registry.get_nodes_by_api_key_id(key_id)
+            if node.ws is not None
+        ]
         if node_registry.revoke_api_key(key_id, username=username):
+            for ws in bound_ws:
+                if not ws.closed:
+                    await ws.close(code=4001, message=b"Node token revoked")
             return web.json_response({"ok": True})
         return web.json_response({"error": "Key not found"}, status=404)
 

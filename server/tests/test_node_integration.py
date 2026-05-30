@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import warnings
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
+from aiohttp.web_app import NotAppKeyWarning
 from aiohttp.test_utils import TestClient, TestServer
 
 from server.node_registry import NodeRegistry, RegisteredNode
@@ -67,7 +69,7 @@ class TestNodeRegistry:
         assert found.last_used_at > 0
 
     def test_register_node(self, registry):
-        raw_key, _ = registry.generate_api_key("cloud-dev")
+        raw_key, entry = registry.generate_api_key("cloud-dev")
         node = registry.register(
             name="cloud-dev",
             api_key=raw_key,
@@ -76,6 +78,7 @@ class TestNodeRegistry:
         assert node.name == "cloud-dev"
         assert node.id != "local"
         assert node.capabilities["platform"] == "linux"
+        assert node.api_key_id == entry.id
         assert registry.get_node(node.id) is node
         assert registry.get_node_by_name("cloud-dev") is node
 
@@ -96,6 +99,20 @@ class TestNodeRegistry:
         node2 = registry.register("cloud-dev", raw_key, {"platform": "darwin"})
         assert node1.id == node2.id
         assert node2.capabilities["platform"] == "darwin"
+
+    def test_reregister_existing_node_can_rotate_to_new_token(self, registry):
+        raw_key1, entry1 = registry.generate_api_key("cloud-dev")
+        raw_key2, entry2 = registry.generate_api_key("cloud-dev-rotated")
+        node1 = registry.register("cloud-dev", raw_key1)
+
+        registry.revoke_api_key(entry1.id)
+        node2 = registry.register("cloud-dev", raw_key2, {"platform": "linux"})
+
+        assert node1.id == node2.id
+        assert node2.api_key_id == entry2.id
+        assert node2.capabilities["platform"] == "linux"
+        assert registry.validate_api_key(node2.id, raw_key2) is True
+        assert registry.validate_api_key(node2.id, raw_key1) is False
 
     def test_reregister_with_wrong_key_fails(self, registry):
         """Re-registering an existing node with a wrong key raises PermissionError."""
@@ -142,6 +159,47 @@ class TestNodeRegistry:
         assert registry.validate_standalone_key(raw_key) is None
         assert registry.list_api_keys() == []
         assert registry._api_keys[entry.id].revoked_at > 0
+
+    def test_revoke_api_key_blocks_registered_node_reconnect(self, registry):
+        raw_key, entry = registry.generate_api_key("revokable-node")
+        node = registry.register("revokable-node", raw_key)
+
+        assert registry.validate_api_key(node.id, raw_key) is True
+
+        registry.revoke_api_key(entry.id)
+
+        assert registry.validate_api_key(node.id, raw_key) is False
+
+    def test_revoke_api_key_marks_registered_online_nodes_offline(self, registry):
+        raw_key, entry = registry.generate_api_key("online-node")
+        node = registry.register("online-node", raw_key)
+        ws_mock = MagicMock()
+        node.tunnel = MagicMock()
+        registry.set_online(node.id, ws_mock)
+
+        assert node.status == "online"
+
+        registry.revoke_api_key(entry.id)
+
+        assert node.status == "offline"
+        assert node.ws is None
+        assert node.tunnel is None
+
+    def test_get_nodes_by_api_key_id(self, registry):
+        raw_key, entry = registry.generate_api_key("node-key")
+        node = registry.register("node-key", raw_key)
+
+        assert registry.get_nodes_by_api_key_id(entry.id) == [node]
+        assert registry.get_nodes_by_api_key_id("missing") == []
+
+    def test_legacy_node_without_api_key_id_keeps_stored_key_behavior(self, registry):
+        raw_key, entry = registry.generate_api_key("legacy-node")
+        node = registry.register("legacy-node", raw_key)
+        node.api_key_id = ""
+
+        registry.revoke_api_key(entry.id)
+
+        assert registry.validate_api_key(node.id, raw_key) is True
 
     def test_list_api_keys_filters_by_owner(self, registry):
         _, alice_entry = registry.generate_api_key("alice-node", username="alice")
@@ -199,7 +257,7 @@ class TestNodeRegistry:
     def test_persistence_roundtrip(self, tmp_vibr8_dir):
         """Registry state survives save/reload."""
         reg1 = NodeRegistry()
-        raw_key, _ = reg1.generate_api_key("persist-test")
+        raw_key, entry = reg1.generate_api_key("persist-test")
         node = reg1.register("persist-test", raw_key)
         node_id = node.id
         reg1.hub_name = "my-hub"
@@ -208,6 +266,7 @@ class TestNodeRegistry:
         loaded = reg2.get_node(node_id)
         assert loaded is not None
         assert loaded.name == "persist-test"
+        assert loaded.api_key_id == entry.id
         assert reg2.hub_name == "my-hub"
 
     def test_set_online_offline(self, registry):
@@ -691,3 +750,62 @@ class TestNodeTokenEndpoints:
 
         assert alice_resp.status == 200
         assert registry.validate_standalone_key(raw_key) is None
+
+    async def test_revoke_node_token_closes_bound_online_node_ws(self, app, registry):
+        class FakeWs:
+            def __init__(self):
+                self.closed = False
+                self.close_calls = []
+
+            async def close(self, *, code, message):
+                self.closed = True
+                self.close_calls.append((code, message))
+
+        raw_key, entry = registry.generate_api_key("alice-node", username="alice")
+        node = registry.register("alice-node", raw_key)
+        ws = FakeWs()
+        registry.set_online(node.id, ws)  # type: ignore[arg-type]
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.delete(
+                f"/api/nodes/tokens/{entry.id}",
+                headers={"X-Test-User": "alice"},
+            )
+
+        assert resp.status == 200
+        assert ws.closed is True
+        assert ws.close_calls == [(4001, b"Node token revoked")]
+        assert node.status == "offline"
+
+
+class TestNodeWebSocketAuth:
+    """HTTP-level coverage for node tunnel authentication."""
+
+    @pytest.fixture
+    def app(self, bridge, registry):
+        from server.main import BRIDGE_KEY, handle_node_ws
+
+        session_registry = MagicMock()
+        session_registry.remove_node_sessions = MagicMock()
+
+        app = web.Application()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", NotAppKeyWarning)
+            app["node_registry"] = registry
+            app["session_registry"] = session_registry
+        app[BRIDGE_KEY] = bridge
+        app.router.add_get("/ws/node/{node_id}", handle_node_ws)
+        return app
+
+    async def test_node_ws_rejects_revoked_token_bound_node(self, app, registry):
+        raw_key, entry = registry.generate_api_key("revoked-node")
+        node = registry.register("revoked-node", raw_key)
+        registry.revoke_api_key(entry.id)
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect(f"/ws/node/{node.id}?apiKey={raw_key}")
+            msg = await ws.receive(timeout=1.0)
+
+        assert msg.type == web.WSMsgType.CLOSE
+        assert ws.close_code == 4001
+        assert node.status == "offline"
