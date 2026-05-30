@@ -2847,6 +2847,8 @@ def create_routes(
         capabilities = body.get("capabilities", {})
         if not name or not api_key:
             return web.json_response({"error": "name and apiKey required"}, status=400)
+        existing_node = node_registry.get_node_by_name(name)
+        previous_api_key_id = existing_node.api_key_id if existing_node else ""
         try:
             node = node_registry.register(name, api_key, capabilities)
         except PermissionError as e:
@@ -2891,6 +2893,22 @@ def create_routes(
                 "api_key_id": node.api_key_id,
             },
         )
+        if node.api_key_id and node.api_key_id != previous_api_key_id:
+            logger.info(
+                "[audit] node token bound path=/api/nodes/register ip=%s node=%s node_id=%s api_key_id=%s",
+                ip,
+                node.name[:32],
+                node.id[:8],
+                node.api_key_id,
+                extra={
+                    "audit_event": "node_token_bound",
+                    "path": "/api/nodes/register",
+                    "ip": ip,
+                    "node_name": node.name[:32],
+                    "node_id_prefix": node.id[:8],
+                    "api_key_id": node.api_key_id,
+                },
+            )
         # Issue a service token so the node's Ring0 MCP can hit hub-side
         # client / second-screen / artifact endpoints over HTTP. Hub auth
         # accepts svc: tokens as a valid Bearer credential. When auth is
