@@ -23,6 +23,7 @@ from vibr8_core.ws_bridge import WsBridge
 from server.auto_namer import generate_session_title, AutoNamerOptions
 from vibr8_core import session_names
 from server.routes import create_routes
+from server.rate_limit import check_rate_limit
 from server.terminal import TerminalManager
 
 try:
@@ -85,6 +86,8 @@ os.environ.pop("CLAUDECODE", None)
 
 PORT = int(os.environ.get("PORT", "3456"))
 RECONNECT_GRACE_S = 10
+NODE_WS_RATE_LIMIT = 10
+NODE_WS_RATE_WINDOW = 60.0
 ALLOW_NO_AUTH_ENV = "VIBR8_ALLOW_NO_AUTH"
 ALLOW_PUBLIC_NO_AUTH_ENV = "VIBR8_ALLOW_PUBLIC_NO_AUTH"
 HOST_ENV = "VIBR8_HOST"
@@ -95,6 +98,7 @@ HOST_ENV = "VIBR8_HOST"
 # NotAppKeyWarning for this key on startup.
 BRIDGE_KEY = web.AppKey("bridge", WsBridge)
 BIND_HOST_KEY = web.AppKey("bind_host", str)
+NODE_WS_RATE_KEY = web.AppKey("node_ws_rate", dict)
 
 
 def _env_flag(environ: Mapping[str, str], name: str) -> bool:
@@ -344,11 +348,31 @@ async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-async def handle_node_ws(request: web.Request) -> web.WebSocketResponse:
+async def handle_node_ws(request: web.Request) -> web.StreamResponse:
     """Handle persistent WebSocket tunnel from a remote vibr8-node."""
+    node_id = request.match_info["node_id"]
+    ip = request.remote or "unknown"
+    node_ws_rate = request.app[NODE_WS_RATE_KEY]
+    if check_rate_limit(
+        node_ws_rate,
+        ip,
+        limit=NODE_WS_RATE_LIMIT,
+        window=NODE_WS_RATE_WINDOW,
+    ):
+        logger.warning(
+            "[audit] node tunnel rate limited node=%s ip=%s",
+            node_id[:8],
+            ip,
+            extra={
+                "audit_event": "node_ws_rate_limited",
+                "node_id_prefix": node_id[:8],
+                "ip": ip,
+            },
+        )
+        return web.json_response({"error": "Too many requests"}, status=429)
+
     ws = web.WebSocketResponse(heartbeat=45)
     await ws.prepare(request)
-    node_id = request.match_info["node_id"]
 
     registry: NodeRegistry = request.app["node_registry"]
     bridge = request.app[BRIDGE_KEY]
@@ -357,7 +381,6 @@ async def handle_node_ws(request: web.Request) -> web.WebSocketResponse:
     # Authenticate via query param API key
     api_key = request.rel_url.query.get("apiKey", "")
     api_key_prefix = api_key[:16] + "..." if api_key else ""
-    ip = request.remote or "unknown"
     node = registry.get_node(node_id)
     if not node:
         logger.warning(
@@ -912,6 +935,7 @@ def create_app() -> web.Application:
 
     # Store references for handlers
     app[BRIDGE_KEY] = ws_bridge
+    app[NODE_WS_RATE_KEY] = {}
     app["launcher"] = launcher
     app["session_store"] = session_store
     app["worktree_tracker"] = worktree_tracker

@@ -14,6 +14,7 @@ import warnings
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.web_app import NotAppKeyWarning
@@ -945,6 +946,37 @@ class TestNodeTokenEndpoints:
         assert records[-1].reason == "bound_elsewhere"
         assert records[-1].error_message == "API key is already bound to another node"
 
+    async def test_register_node_rate_limit_emits_audit_log(self, app, caplog):
+        caplog.set_level(logging.WARNING)
+
+        async with TestClient(TestServer(app)) as client:
+            for i in range(10):
+                resp = await client.post(
+                    "/api/nodes/register",
+                    json={
+                        "name": f"probe-{i}",
+                        "apiKey": "sk-node-unissued",
+                        "capabilities": {},
+                    },
+                )
+                assert resp.status == 403
+
+            resp = await client.post(
+                "/api/nodes/register",
+                json={
+                    "name": "probe-limited",
+                    "apiKey": "sk-node-unissued",
+                    "capabilities": {},
+                },
+            )
+            body = await resp.json()
+
+        assert resp.status == 429
+        assert body == {"error": "Too many requests"}
+        records = _audit_records(caplog, "node_register_rate_limited")
+        assert records[-1].path == "/api/nodes/register"
+        assert records[-1].ip
+
     async def test_register_node_success_emits_audit_log(self, app, registry, caplog):
         caplog.set_level(logging.INFO)
         raw_key, entry = registry.generate_api_key("new-node", username="alice")
@@ -969,7 +1001,7 @@ class TestNodeWebSocketAuth:
 
     @pytest.fixture
     def app(self, bridge, registry):
-        from server.main import BRIDGE_KEY, handle_node_ws
+        from server.main import BRIDGE_KEY, NODE_WS_RATE_KEY, handle_node_ws
 
         session_registry = MagicMock()
         session_registry.remove_node_sessions = MagicMock()
@@ -980,6 +1012,7 @@ class TestNodeWebSocketAuth:
             app["node_registry"] = registry
             app["session_registry"] = session_registry
         app[BRIDGE_KEY] = bridge
+        app[NODE_WS_RATE_KEY] = {}
         app.router.add_get("/ws/node/{node_id}", handle_node_ws)
         return app
 
@@ -1032,3 +1065,25 @@ class TestNodeWebSocketAuth:
         assert records[-1].reason == "unknown_node"
         assert records[-1].ip
         assert records[-1].attempted_api_key_prefix == "sk-node-nope..."
+
+    async def test_node_ws_rate_limit_emits_audit_log(self, app, caplog):
+        caplog.set_level(logging.WARNING)
+
+        async with TestClient(TestServer(app)) as client:
+            for _ in range(10):
+                ws = await client.ws_connect(
+                    "/ws/node/missing-node?apiKey=sk-node-nope"
+                )
+                msg = await ws.receive(timeout=1.0)
+                assert msg.type == web.WSMsgType.CLOSE
+                assert ws.close_code == 4001
+
+            with pytest.raises(aiohttp.WSServerHandshakeError) as exc:
+                await client.ws_connect(
+                    "/ws/node/missing-node?apiKey=sk-node-nope"
+                )
+
+        assert exc.value.status == 429
+        records = _audit_records(caplog, "node_ws_rate_limited")
+        assert records[-1].node_id_prefix == "missing-"
+        assert records[-1].ip
