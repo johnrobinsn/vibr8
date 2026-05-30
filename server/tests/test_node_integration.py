@@ -920,6 +920,31 @@ class TestNodeTokenEndpoints:
         assert records[-1].error_message == "Invalid API key for new node"
         assert records[-1].ip
 
+    async def test_register_node_hides_bound_token_rejection_on_wire(
+        self,
+        app,
+        registry,
+        caplog,
+    ):
+        caplog.set_level(logging.WARNING)
+        raw_key, _ = registry.generate_api_key("bound-node", username="alice")
+        registry.register("bound-node", raw_key)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/nodes/register",
+                json={"name": "other-node", "apiKey": raw_key, "capabilities": {}},
+            )
+            body = await resp.json()
+
+        assert resp.status == 403
+        assert body == {"error": "Invalid API key for new node"}
+        records = _audit_records(caplog, "node_register_rejected")
+        assert records[-1].path == "/api/nodes/register"
+        assert records[-1].node_name == "other-node"
+        assert records[-1].reason == "bound_elsewhere"
+        assert records[-1].error_message == "API key is already bound to another node"
+
     async def test_register_node_success_emits_audit_log(self, app, registry, caplog):
         caplog.set_level(logging.INFO)
         raw_key, entry = registry.generate_api_key("new-node", username="alice")

@@ -2829,21 +2829,33 @@ def create_routes(
         try:
             node = node_registry.register(name, api_key, capabilities)
         except PermissionError as e:
+            error_message = str(e)
+            reason = (
+                "bound_elsewhere"
+                if error_message == "API key is already bound to another node"
+                else "invalid_token"
+            )
+            public_error = (
+                "Invalid API key for existing node"
+                if node_registry.get_node_by_name(name)
+                else "Invalid API key for new node"
+            )
             logger.warning(
-                "[audit] node registration rejected path=/api/nodes/register ip=%s node=%s reason=invalid_token error=%s",
+                "[audit] node registration rejected path=/api/nodes/register ip=%s node=%s reason=%s error=%s",
                 ip,
                 name[:32],
-                str(e),
+                reason,
+                error_message,
                 extra={
                     "audit_event": "node_register_rejected",
                     "path": "/api/nodes/register",
                     "ip": ip,
                     "node_name": name[:32],
-                    "reason": "invalid_token",
-                    "error_message": str(e),
+                    "reason": reason,
+                    "error_message": error_message,
                 },
             )
-            return web.json_response({"error": str(e)}, status=403)
+            return web.json_response({"error": public_error}, status=403)
         logger.info(
             "[audit] node registered path=/api/nodes/register ip=%s node=%s node_id=%s",
             ip,

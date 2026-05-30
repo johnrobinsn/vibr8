@@ -79,8 +79,10 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
    tokens bind to one node identity on first registration or explicit token
    rotation, preventing cross-node token reuse. Legacy nodes without a
    persisted token id retain stored-key behavior until re-registered.
-   Pre-migration ownerless keys are visible and revocable by any authenticated
-   user so operators can clean up legacy credentials after upgrade.
+   Unregistering a node does not free a previously bound token for reuse;
+   operators should issue a new token for a replacement node. Pre-migration
+   ownerless keys are visible and revocable by any authenticated user so
+   operators can clean up legacy credentials after upgrade.
 2. Narrow node listing and activation to authenticated clients while preserving
    second-screen and voice routing workflows. `/api/nodes` and
    `/api/nodes/{node_id}/activate` now require valid auth; direct browser
