@@ -317,7 +317,12 @@ class AuthManager:
         if client_id:
             entry["clientId"] = client_id
         self._pairing_codes[code] = entry
-        logger.info("[auth] Created %s pairing code (expires in %ds)", device_type, PAIRING_TTL)
+        logger.info(
+            "[audit] pairing code created type=%s ip=%s",
+            device_type,
+            ip,
+            extra={"audit_event": "pairing_code_created", "pairing_type": device_type, "ip": ip},
+        )
         return {"code": code, "expiresAt": expires_at}
 
     def confirm_pairing(self, code: str, username: str, name: str) -> Optional[dict]:
@@ -329,8 +334,28 @@ class AuthManager:
         self._purge_expired_pairings()
         entry = self._pairing_codes.get(code)
         if not entry:
+            logger.warning(
+                "[audit] pairing confirmation failed reason=invalid_or_expired user=%s",
+                username,
+                extra={
+                    "audit_event": "pairing_confirm_failed",
+                    "reason": "invalid_or_expired",
+                    "username": username,
+                },
+            )
             return None
         if entry.get("confirmed"):
+            logger.warning(
+                "[audit] pairing confirmation failed reason=already_confirmed user=%s type=%s",
+                username,
+                entry.get("type", "unknown"),
+                extra={
+                    "audit_event": "pairing_confirm_failed",
+                    "reason": "already_confirmed",
+                    "username": username,
+                    "pairing_type": entry.get("type", "unknown"),
+                },
+            )
             return None  # already confirmed
         device_type = entry["type"]
         entry["confirmed"] = True
@@ -338,7 +363,17 @@ class AuthManager:
             result = self.create_device_token(username, name)
             entry["token"] = result["token"]
             entry["tokenId"] = result["tokenId"]
-            logger.info("[auth] Confirmed native pairing for user %s, token %s", username, result["tokenId"])
+            logger.info(
+                "[audit] pairing confirmed type=native user=%s token_id=%s",
+                username,
+                result["tokenId"],
+                extra={
+                    "audit_event": "pairing_confirmed",
+                    "pairing_type": "native",
+                    "username": username,
+                    "token_id": result["tokenId"],
+                },
+            )
             return {"type": "native", "tokenId": result["tokenId"]}
         else:  # second-screen
             entry["pairedUser"] = username
@@ -348,8 +383,19 @@ class AuthManager:
             token_result = self.create_device_token(username, f"Second Screen ({name})")
             entry["token"] = token_result["token"]
             entry["tokenId"] = token_result["tokenId"]
-            logger.info("[auth] Confirmed second-screen pairing for user %s, client %s, token %s",
-                        username, client_id[:8], token_result["tokenId"])
+            logger.info(
+                "[audit] pairing confirmed type=second-screen user=%s client=%s token_id=%s",
+                username,
+                client_id[:8],
+                token_result["tokenId"],
+                extra={
+                    "audit_event": "pairing_confirmed",
+                    "pairing_type": "second-screen",
+                    "username": username,
+                    "client_id_prefix": client_id[:8],
+                    "token_id": token_result["tokenId"],
+                },
+            )
             return {"type": "second-screen", "clientId": client_id, "pairedUser": username,
                     "token": token_result["token"], "tokenId": token_result["tokenId"]}
 
@@ -365,13 +411,35 @@ class AuthManager:
         device_type = entry["type"]
         if device_type == "native":
             token = entry.get("token", "")
+            token_id = entry.get("tokenId", "")
             del self._pairing_codes[code]  # single-use
+            logger.info(
+                "[audit] pairing token delivered type=native token_id=%s",
+                token_id,
+                extra={
+                    "audit_event": "pairing_token_delivered",
+                    "pairing_type": "native",
+                    "token_id": token_id,
+                },
+            )
             return {"status": "complete", "token": token}
         else:  # second-screen
             client_id = entry.get("clientId", "")
             paired_user = entry.get("pairedUser", "")
             token = entry.get("token", "")
+            token_id = entry.get("tokenId", "")
             del self._pairing_codes[code]  # single-use
+            logger.info(
+                "[audit] pairing token delivered type=second-screen client=%s token_id=%s",
+                client_id[:8],
+                token_id,
+                extra={
+                    "audit_event": "pairing_token_delivered",
+                    "pairing_type": "second-screen",
+                    "client_id_prefix": client_id[:8],
+                    "token_id": token_id,
+                },
+            )
             return {"status": "complete", "clientId": client_id, "pairedUser": paired_user, "token": token}
 
     def _purge_expired_pairings(self) -> None:

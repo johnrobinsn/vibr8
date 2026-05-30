@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from unittest.mock import MagicMock
 
@@ -11,6 +12,10 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from server import auth as auth_module
 from server.auth import AuthManager
+
+
+def _audit_records(caplog, event: str):
+    return [record for record in caplog.records if getattr(record, "audit_event", "") == event]
 
 
 @pytest.fixture
@@ -49,7 +54,12 @@ def app(auth_manager, tmp_path, monkeypatch):
         worktree_tracker=WorktreeTracker(),
         auth_manager=auth_manager,
     )
-    app = web.Application()
+    @web.middleware
+    async def auth_user_middleware(request, handler):
+        request["auth_user"] = "alice"
+        return await handler(request)
+
+    app = web.Application(middlewares=[auth_user_middleware])
     app.router.add_routes(routes)
     return app
 
@@ -107,6 +117,36 @@ def test_pairing_codes_cannot_be_confirmed_twice(auth_manager) -> None:
     assert auth_manager.confirm_pairing(second_screen["code"], "alice", "Kitchen") is None
 
 
+def test_pairing_lifecycle_emits_audit_logs(auth_manager, caplog) -> None:
+    caplog.set_level(logging.INFO)
+
+    requested = auth_manager.request_pairing("native", "1.2.3.4")
+    confirmed = auth_manager.confirm_pairing(requested["code"], "alice", "Laptop")
+    delivered = auth_manager.get_pairing_status(requested["code"], "1.2.3.4")
+    failed = auth_manager.confirm_pairing("000000", "alice", "Laptop")
+
+    assert confirmed is not None
+    assert delivered["status"] == "complete"
+    assert failed is None
+
+    created = _audit_records(caplog, "pairing_code_created")
+    assert created[-1].pairing_type == "native"
+    assert created[-1].ip == "1.2.3.4"
+
+    confirmed_records = _audit_records(caplog, "pairing_confirmed")
+    assert confirmed_records[-1].pairing_type == "native"
+    assert confirmed_records[-1].username == "alice"
+    assert confirmed_records[-1].token_id == confirmed["tokenId"]
+
+    delivered_records = _audit_records(caplog, "pairing_token_delivered")
+    assert delivered_records[-1].pairing_type == "native"
+    assert delivered_records[-1].token_id == confirmed["tokenId"]
+
+    failed_records = _audit_records(caplog, "pairing_confirm_failed")
+    assert failed_records[-1].reason == "invalid_or_expired"
+    assert failed_records[-1].username == "alice"
+
+
 def test_expired_pairing_codes_cannot_be_confirmed_or_polled(auth_manager) -> None:
     requested = auth_manager.request_pairing("native", "1.2.3.4")
     code = requested["code"]
@@ -134,7 +174,8 @@ def test_pairing_status_bruteforce_cooldown_after_failed_lookups(auth_manager) -
     assert auth_manager.check_pairing_brute_force(ip) is True
 
 
-async def test_pairing_request_route_returns_429_after_rate_limit(app) -> None:
+async def test_pairing_request_route_returns_429_after_rate_limit(app, caplog) -> None:
+    caplog.set_level(logging.WARNING)
     async with TestClient(TestServer(app)) as client:
         for _ in range(auth_module.PAIRING_RATE_LIMIT):
             resp = await client.post("/api/pairing/request", json={"type": "native"})
@@ -144,8 +185,12 @@ async def test_pairing_request_route_returns_429_after_rate_limit(app) -> None:
         assert limited.status == 429
         assert await limited.json() == {"error": "Too many requests"}
 
+    records = _audit_records(caplog, "pairing_rate_limited")
+    assert records[-1].path == "/api/pairing/request"
 
-async def test_pairing_status_route_returns_429_after_failed_lookups(app) -> None:
+
+async def test_pairing_status_route_returns_429_after_failed_lookups(app, caplog) -> None:
+    caplog.set_level(logging.WARNING)
     async with TestClient(TestServer(app)) as client:
         for _ in range(auth_module.PAIRING_FAIL_THRESHOLD):
             resp = await client.get("/api/pairing/status/000000")
@@ -155,6 +200,26 @@ async def test_pairing_status_route_returns_429_after_failed_lookups(app) -> Non
         limited = await client.get("/api/pairing/status/000000")
         assert limited.status == 429
         assert await limited.json() == {"error": "Too many requests"}
+
+    records = _audit_records(caplog, "pairing_bruteforce_limited")
+    assert records[-1].path == "/api/pairing/status"
+
+
+async def test_pairing_confirm_route_logs_rejected_attempt_with_ip(app, caplog) -> None:
+    caplog.set_level(logging.WARNING)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post(
+            "/api/pairing/confirm",
+            json={"code": "000000", "name": "Laptop"},
+        )
+        body = await resp.json()
+
+    assert resp.status == 400
+    assert body == {"error": "Invalid or expired code"}
+    records = _audit_records(caplog, "pairing_confirm_rejected")
+    assert records[-1].path == "/api/pairing/confirm"
+    assert records[-1].username == "alice"
+    assert records[-1].ip
 
 
 async def test_second_screen_pair_code_requires_client_id(app) -> None:
@@ -166,7 +231,8 @@ async def test_second_screen_pair_code_requires_client_id(app) -> None:
     assert body == {"error": "clientId required"}
 
 
-async def test_second_screen_pair_code_route_returns_429_after_rate_limit(app) -> None:
+async def test_second_screen_pair_code_route_returns_429_after_rate_limit(app, caplog) -> None:
+    caplog.set_level(logging.WARNING)
     async with TestClient(TestServer(app)) as client:
         for index in range(auth_module.PAIRING_RATE_LIMIT):
             resp = await client.post(
@@ -183,6 +249,8 @@ async def test_second_screen_pair_code_route_returns_429_after_rate_limit(app) -
 
     assert limited.status == 429
     assert body == {"error": "Too many requests"}
+    records = _audit_records(caplog, "pairing_rate_limited")
+    assert records[-1].path == "/api/second-screen/pair-code"
 
 
 async def test_unified_status_delivers_second_screen_token_once(app, auth_manager) -> None:

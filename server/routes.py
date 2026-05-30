@@ -304,6 +304,15 @@ def create_routes(
             return web.json_response({"error": "Auth not configured"}, status=501)
         ip = request.remote or "unknown"
         if auth_manager.check_pairing_rate_limit(ip):
+            logger.warning(
+                "[audit] pairing request rate limited path=/api/pairing/request ip=%s",
+                ip,
+                extra={
+                    "audit_event": "pairing_rate_limited",
+                    "path": "/api/pairing/request",
+                    "ip": ip,
+                },
+            )
             return web.json_response({"error": "Too many requests"}, status=429)
         try:
             body = await request.json()
@@ -336,6 +345,18 @@ def create_routes(
             return web.json_response({"error": "code and name are required"}, status=400)
         result = auth_manager.confirm_pairing(code, username, name)
         if not result:
+            ip = request.remote or "unknown"
+            logger.warning(
+                "[audit] pairing confirmation rejected path=/api/pairing/confirm ip=%s user=%s",
+                ip,
+                username,
+                extra={
+                    "audit_event": "pairing_confirm_rejected",
+                    "path": "/api/pairing/confirm",
+                    "ip": ip,
+                    "username": username,
+                },
+            )
             return web.json_response({"error": "Invalid or expired code"}, status=400)
         # Handle second-screen registration
         if result["type"] == "second-screen":
@@ -380,6 +401,15 @@ def create_routes(
             return web.json_response({"error": "Auth not configured"}, status=501)
         ip = request.remote or "unknown"
         if auth_manager.check_pairing_brute_force(ip):
+            logger.warning(
+                "[audit] pairing status brute-force cooldown path=/api/pairing/status ip=%s",
+                ip,
+                extra={
+                    "audit_event": "pairing_bruteforce_limited",
+                    "path": "/api/pairing/status",
+                    "ip": ip,
+                },
+            )
             return web.json_response({"error": "Too many requests"}, status=429)
         code = request.match_info["code"]
         status = auth_manager.get_pairing_status(code, ip)
@@ -2607,6 +2637,15 @@ def create_routes(
             return web.json_response({"error": "clientId required"}, status=400)
         ip = request.remote or "unknown"
         if auth_manager.check_pairing_rate_limit(ip):
+            logger.warning(
+                "[audit] pairing request rate limited path=/api/second-screen/pair-code ip=%s",
+                ip,
+                extra={
+                    "audit_event": "pairing_rate_limited",
+                    "path": "/api/second-screen/pair-code",
+                    "ip": ip,
+                },
+            )
             return web.json_response({"error": "Too many requests"}, status=429)
         result = auth_manager.request_pairing("second-screen", ip, client_id)
         return web.json_response({"code": result["code"]})
