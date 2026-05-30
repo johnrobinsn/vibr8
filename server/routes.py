@@ -2819,6 +2819,7 @@ def create_routes(
         """Register a remote node (API-key auth, not cookie auth)."""
         if node_registry is None:
             return web.json_response({"error": "Node registry not available"}, status=503)
+        ip = request.remote or "unknown"
         body = await request.json()
         name = body.get("name", "").strip()
         api_key = body.get("apiKey", "")
@@ -2828,7 +2829,35 @@ def create_routes(
         try:
             node = node_registry.register(name, api_key, capabilities)
         except PermissionError as e:
+            logger.warning(
+                "[audit] node registration rejected path=/api/nodes/register ip=%s node=%s reason=invalid_token error=%s",
+                ip,
+                name[:32],
+                str(e),
+                extra={
+                    "audit_event": "node_register_rejected",
+                    "path": "/api/nodes/register",
+                    "ip": ip,
+                    "node_name": name[:32],
+                    "reason": "invalid_token",
+                    "error_message": str(e),
+                },
+            )
             return web.json_response({"error": str(e)}, status=403)
+        logger.info(
+            "[audit] node registered path=/api/nodes/register ip=%s node=%s node_id=%s",
+            ip,
+            node.name[:32],
+            node.id[:8],
+            extra={
+                "audit_event": "node_registered",
+                "path": "/api/nodes/register",
+                "ip": ip,
+                "node_name": node.name[:32],
+                "node_id_prefix": node.id[:8],
+                "api_key_id": node.api_key_id,
+            },
+        )
         # Issue a service token so the node's Ring0 MCP can hit hub-side
         # client / second-screen / artifact endpoints over HTTP. Hub auth
         # accepts svc: tokens as a valid Bearer credential. When auth is

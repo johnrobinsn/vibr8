@@ -56,8 +56,8 @@ Goal: make accidental Internet exposure without auth impossible, while preservin
   - authenticated token creation
   - revocation
   - node identity binding
-  - failed-auth logging
-  - reconnect behavior after revocation
+  - failed-auth logging **Pinned for registration rejection and node WebSocket tunnel rejection.**
+  - reconnect behavior after revocation **Done for token-bound nodes; revocation closes bound online node WebSockets and blocks reconnect.**
 
 ## Phase 2: Revocable Node Tokens
 

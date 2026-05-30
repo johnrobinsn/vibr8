@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import warnings
 from typing import Any
@@ -21,6 +22,13 @@ from aiohttp.test_utils import TestClient, TestServer
 from server.node_registry import NodeRegistry, RegisteredNode
 from server.node_tunnel import NodeTunnel
 from vibr8_core.ws_bridge import WsBridge, Session
+
+
+def _audit_records(caplog, event: str):
+    return [
+        record for record in caplog.records
+        if getattr(record, "audit_event", "") == event
+    ]
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -777,6 +785,50 @@ class TestNodeTokenEndpoints:
         assert ws.close_calls == [(4001, b"Node token revoked")]
         assert node.status == "offline"
 
+    async def test_register_node_rejects_revoked_token_with_audit_log(
+        self,
+        app,
+        registry,
+        caplog,
+    ):
+        caplog.set_level(logging.WARNING)
+        raw_key, entry = registry.generate_api_key("revoked-node", username="alice")
+        registry.revoke_api_key(entry.id, username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/nodes/register",
+                json={"name": "revoked-node", "apiKey": raw_key, "capabilities": {}},
+            )
+            body = await resp.json()
+
+        assert resp.status == 403
+        assert body == {"error": "Invalid API key for new node"}
+        records = _audit_records(caplog, "node_register_rejected")
+        assert records[-1].path == "/api/nodes/register"
+        assert records[-1].node_name == "revoked-node"
+        assert records[-1].reason == "invalid_token"
+        assert records[-1].error_message == "Invalid API key for new node"
+        assert records[-1].ip
+
+    async def test_register_node_success_emits_audit_log(self, app, registry, caplog):
+        caplog.set_level(logging.INFO)
+        raw_key, entry = registry.generate_api_key("new-node", username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/nodes/register",
+                json={"name": "new-node", "apiKey": raw_key, "capabilities": {}},
+            )
+            body = await resp.json()
+
+        assert resp.status == 200
+        records = _audit_records(caplog, "node_registered")
+        assert records[-1].path == "/api/nodes/register"
+        assert records[-1].node_name == "new-node"
+        assert records[-1].node_id_prefix == body["nodeId"][:8]
+        assert records[-1].api_key_id == entry.id
+
 
 class TestNodeWebSocketAuth:
     """HTTP-level coverage for node tunnel authentication."""
@@ -809,3 +861,40 @@ class TestNodeWebSocketAuth:
         assert msg.type == web.WSMsgType.CLOSE
         assert ws.close_code == 4001
         assert node.status == "offline"
+
+    async def test_node_ws_rejects_revoked_token_with_audit_log(
+        self,
+        app,
+        registry,
+        caplog,
+    ):
+        caplog.set_level(logging.WARNING)
+        raw_key, entry = registry.generate_api_key("revoked-node")
+        node = registry.register("revoked-node", raw_key)
+        registry.revoke_api_key(entry.id)
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect(f"/ws/node/{node.id}?apiKey={raw_key}")
+            msg = await ws.receive(timeout=1.0)
+
+        assert msg.type == web.WSMsgType.CLOSE
+        records = _audit_records(caplog, "node_ws_rejected")
+        assert records[-1].node_id_prefix == node.id[:8]
+        assert records[-1].api_key_id == entry.id
+        assert records[-1].reason == "invalid_or_revoked_token"
+        assert records[-1].ip
+        assert records[-1].attempted_api_key_prefix == raw_key[:16] + "..."
+
+    async def test_node_ws_rejects_unknown_node_with_audit_log(self, app, registry, caplog):
+        caplog.set_level(logging.WARNING)
+
+        async with TestClient(TestServer(app)) as client:
+            ws = await client.ws_connect("/ws/node/missing-node?apiKey=sk-node-nope")
+            msg = await ws.receive(timeout=1.0)
+
+        assert msg.type == web.WSMsgType.CLOSE
+        records = _audit_records(caplog, "node_ws_rejected")
+        assert records[-1].node_id_prefix == "missing-"
+        assert records[-1].reason == "unknown_node"
+        assert records[-1].ip
+        assert records[-1].attempted_api_key_prefix == "sk-node-nope..."

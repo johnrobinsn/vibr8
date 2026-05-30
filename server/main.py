@@ -356,9 +356,38 @@ async def handle_node_ws(request: web.Request) -> web.WebSocketResponse:
 
     # Authenticate via query param API key
     api_key = request.rel_url.query.get("apiKey", "")
+    api_key_prefix = api_key[:16] + "..." if api_key else ""
+    ip = request.remote or "unknown"
     node = registry.get_node(node_id)
-    if not node or not registry.validate_api_key(node_id, api_key):
-        logger.warning("[nodes] Rejected WS tunnel for node %s — invalid auth", node_id[:8])
+    if not node:
+        logger.warning(
+            "[audit] node tunnel rejected node=%s ip=%s reason=unknown_node",
+            node_id[:8],
+            ip,
+            extra={
+                "audit_event": "node_ws_rejected",
+                "node_id_prefix": node_id[:8],
+                "ip": ip,
+                "attempted_api_key_prefix": api_key_prefix,
+                "reason": "unknown_node",
+            },
+        )
+        await ws.close(code=4001, message=b"Invalid node ID or API key")
+        return ws
+    if not registry.validate_api_key(node_id, api_key):
+        logger.warning(
+            "[audit] node tunnel rejected node=%s ip=%s reason=invalid_or_revoked_token",
+            node_id[:8],
+            ip,
+            extra={
+                "audit_event": "node_ws_rejected",
+                "node_id_prefix": node_id[:8],
+                "api_key_id": node.api_key_id,
+                "ip": ip,
+                "attempted_api_key_prefix": api_key_prefix,
+                "reason": "invalid_or_revoked_token",
+            },
+        )
         await ws.close(code=4001, message=b"Invalid node ID or API key")
         return ws
 
