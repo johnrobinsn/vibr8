@@ -71,10 +71,10 @@ Goal: replace ad hoc node API keys with user-owned, revocable credentials.
 - Add API routes for authenticated users:
   - create node token **Done as `/api/nodes/tokens`, with legacy `/api/nodes/generate-key` kept as an alias.**
   - list node tokens **Done as `/api/nodes/tokens`, scoped to the authenticated user.**
-  - revoke node token **Done as `/api/nodes/tokens/{key_id}`, preserving metadata as revoked. Revocation currently prevents new registrations with that token; already-registered nodes continue authenticating with their stored node credential until reconnect handling is migrated.**
+  - revoke node token **Done as `/api/nodes/tokens/{key_id}`, preserving metadata as revoked.**
   - rename/update node metadata
-- Require nodes to connect with a valid non-revoked token.
-- Ensure revocation disconnects or blocks reconnect for the node. **Follow-up: existing registered nodes still authenticate via their stored node hash.**
+- Require nodes to connect with a valid non-revoked token. **Done for nodes registered after token-id binding; legacy nodes without a token id retain stored-key behavior.**
+- Ensure revocation disconnects or blocks reconnect for the node. **Done for token-bound nodes: revocation marks matching online nodes offline and blocks reconnect via the stored node credential.**
 - Keep capability model simple for now: if token is valid and user has access, the node has full capability.
 
 ## Phase 3: Self-Node Only

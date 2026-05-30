@@ -79,6 +79,7 @@ class RegisteredNode:
     id: str                                  # UUID assigned by hub
     name: str                                # User-friendly name (e.g., "cloud-dev")
     api_key_hash: str                        # bcrypt hash of API key
+    api_key_id: str = ""                     # issued key/token id used to register
     capabilities: dict[str, Any] = field(default_factory=dict)
     status: str = "offline"                  # "online" | "offline"
     last_heartbeat: float = 0                # time.time()
@@ -93,6 +94,7 @@ class RegisteredNode:
             "id": self.id,
             "name": self.name,
             "apiKeyHash": self.api_key_hash,
+            "apiKeyId": self.api_key_id,
             "capabilities": self.capabilities,
             "ring0Enabled": self.ring0_enabled,
         }
@@ -116,6 +118,7 @@ class RegisteredNode:
             id=data["id"],
             name=data["name"],
             api_key_hash=data["apiKeyHash"],
+            api_key_id=data.get("apiKeyId", ""),
             capabilities=data.get("capabilities", {}),
             ring0_enabled=data.get("ring0Enabled", False),
         )
@@ -175,19 +178,22 @@ class NodeRegistry:
         if existing:
             # Re-registration: validate against stored key first, then standalone key pool
             if not self.validate_api_key(existing.id, api_key):
-                if not self.validate_standalone_key(api_key):
+                key_entry = self.validate_standalone_key(api_key)
+                if not key_entry:
                     raise PermissionError("Invalid API key for existing node")
                 # Valid standalone key — update stored hash
                 existing.api_key_hash = bcrypt.hashpw(
                     api_key.encode(), bcrypt.gensalt()
                 ).decode()
+                existing.api_key_id = key_entry.id
             if capabilities:
                 existing.capabilities = capabilities
             self._save()
             return existing
 
         # New registration — validate against issued keys and update last_used
-        if not self.validate_standalone_key(api_key):
+        key_entry = self.validate_standalone_key(api_key)
+        if not key_entry:
             raise PermissionError("Invalid API key for new node")
 
         node_id = secrets.token_hex(16)
@@ -198,6 +204,7 @@ class NodeRegistry:
             id=node_id,
             name=name,
             api_key_hash=api_key_hash,
+            api_key_id=key_entry.id,
             capabilities=capabilities or {},
         )
         self._nodes[node_id] = node
@@ -237,16 +244,23 @@ class NodeRegistry:
     def get_all_nodes(self) -> list[RegisteredNode]:
         return list(self._nodes.values())
 
+    def get_nodes_by_api_key_id(self, key_id: str) -> list[RegisteredNode]:
+        return [node for node in self._nodes.values() if node.api_key_id == key_id]
+
     def validate_api_key(self, node_id: str, api_key: str) -> bool:
         node = self._nodes.get(node_id)
-        if not node:
+        if not node or not node.api_key_hash:
             return False
+        if node.api_key_id:
+            entry = self._api_keys.get(node.api_key_id)
+            if not entry or entry.revoked_at:
+                return False
         return bcrypt.checkpw(api_key.encode(), node.api_key_hash.encode())
 
     def validate_api_key_any(self, api_key: str) -> RegisteredNode | None:
         """Validate an API key against all registered nodes. Returns the matching node."""
         for node in self._nodes.values():
-            if bcrypt.checkpw(api_key.encode(), node.api_key_hash.encode()):
+            if node.api_key_hash and self.validate_api_key(node.id, api_key):
                 return node
         return None
 
@@ -288,6 +302,9 @@ class NodeRegistry:
         if username is not None and entry.username and entry.username != username:
             return False
         entry.revoked_at = time.time()
+        for node in self._nodes.values():
+            if node.api_key_id == key_id:
+                self.set_offline(node.id)
         self._save()
         logger.info("[nodes] Revoked API key %r (id=%s)", entry.name, key_id)
         return True
