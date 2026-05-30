@@ -76,10 +76,11 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
    `/api/nodes/register` remains public for compatibility. Token-bound nodes
    persist the issuing token id; revocation marks matching online nodes
    offline and blocks reconnect through their stored node credential. Public
-   registration is rate-limited per IP and emits an audit event when
-   throttled. Issued tokens bind to one node identity on first registration or
-   explicit token rotation, preventing cross-node token reuse. Legacy nodes
-   without a persisted token id retain stored-key behavior until re-registered.
+   registration and node WebSocket tunnel authentication are rate-limited per
+   IP and emit audit events when throttled. Issued tokens bind to one node
+   identity on first registration or explicit token rotation, preventing
+   cross-node token reuse. Legacy nodes without a persisted token id retain
+   stored-key behavior until re-registered.
    Unregistering a node does not free a previously bound token for reuse;
    operators should issue a new token for a replacement node. Pre-migration
    ownerless keys are visible and revocable by any authenticated user so

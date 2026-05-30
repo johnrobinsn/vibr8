@@ -19,6 +19,7 @@ from vibr8_core import artifacts, env_manager, session_names
 from vibr8_core import git_utils
 from server import speaker_fingerprints, voice_profiles, voice_logger
 from server.usage_limits import get_usage_limits
+from server.rate_limit import check_rate_limit
 from vibr8_core.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
 from server.session_registry import LOCAL_NODE_ID
 from vibr8_core.worktree_tracker import WorktreeTracker, WorktreeMapping
@@ -64,24 +65,6 @@ def _extract_assistant_text(message: Any) -> tuple[str, bool]:
     if isinstance(message, str):
         return message.strip(), bool(message.strip())
     return "", False
-
-
-def _check_rate_limit(
-    buckets: dict[str, list[float]],
-    key: str,
-    *,
-    limit: int,
-    window: float,
-) -> bool:
-    """Record one request and return True when the caller is already limited."""
-    now = time.time()
-    cutoff = now - window
-    timestamps = [t for t in buckets.get(key, []) if t > cutoff]
-    buckets[key] = timestamps
-    if len(timestamps) >= limit:
-        return True
-    timestamps.append(now)
-    return False
 
 
 def _format_session_output(messages: list[dict], permissions: list[dict]) -> str:
@@ -2842,7 +2825,7 @@ def create_routes(
         if node_registry is None:
             return web.json_response({"error": "Node registry not available"}, status=503)
         ip = request.remote or "unknown"
-        if _check_rate_limit(
+        if check_rate_limit(
             node_register_rate,
             ip,
             limit=NODE_REGISTER_RATE_LIMIT,
