@@ -51,7 +51,7 @@ Goal: make accidental Internet exposure without auth impossible, while preservin
   - one-time code semantics **Pinned for native and second-screen token delivery.**
   - token delivery lifetime **Expired code behavior is pinned.**
   - replay protection **Pinned for repeated status polls after token delivery.**
-  - auditability
+  - auditability **Pinned for rate limits, brute-force cooldowns, confirmation outcomes, and token delivery.**
 - Review node registration/tunnel endpoints for:
   - authenticated token creation
   - revocation
