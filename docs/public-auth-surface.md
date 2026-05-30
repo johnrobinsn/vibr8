@@ -81,7 +81,8 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
    identity on first registration or explicit token rotation, emit
    `node_token_bound` audit events, and prevent cross-node token reuse. Legacy
    nodes without a persisted token id retain stored-key behavior until
-   re-registered.
+   re-registered; on first re-registration with an issued token after upgrade,
+   they emit a `node_token_bound` event as they pick up a real binding.
    Unregistering a node does not free a previously bound token for reuse;
    operators should issue a new token for a replacement node. Pre-migration
    ownerless keys are visible and revocable by any authenticated user so
