@@ -43,6 +43,9 @@ Goal: make accidental Internet exposure without auth impossible, while preservin
   - required static assets
   - should be authenticated
 - Remove broad public access from Ring0 routes.
+- Narrow node listing and activation to authenticated callers. **Done for
+  `/api/nodes` and `/api/nodes/{node_id}/activate`; browser direct selection
+  remains on authenticated `/api/clients/{client_id}/active-node`.**
 - Review second-screen pairing endpoints for:
   - rate limiting
   - one-time code semantics

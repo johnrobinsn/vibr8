@@ -56,15 +56,11 @@ PUBLIC_PREFIXES = (
     "/apple-touch-icon",
 )
 
-# Exact-match public routes (node listing & active node — needed by UI)
-PUBLIC_EXACT_PATHS = frozenset({
-    "/api/nodes",
-})
+# Exact-match public routes.
+PUBLIC_EXACT_PATHS = frozenset()
 
-# Parameterized public routes (node activation — controls voice routing)
-_PUBLIC_PATH_PATTERNS = (
-    re.compile(r"^/api/nodes/[^/]+/activate$"),
-)
+# Parameterized public routes.
+_PUBLIC_PATH_PATTERNS: tuple[re.Pattern[str], ...] = ()
 
 
 def _is_public_path(path: str) -> bool:
