@@ -995,6 +995,85 @@ class TestNodeTokenEndpoints:
         assert records[-1].node_id_prefix == body["nodeId"][:8]
         assert records[-1].api_key_id == entry.id
 
+    async def test_register_node_success_emits_token_bound_audit_log(
+        self,
+        app,
+        registry,
+        caplog,
+    ):
+        caplog.set_level(logging.INFO)
+        raw_key, entry = registry.generate_api_key("bound-new-node", username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/nodes/register",
+                json={
+                    "name": "bound-new-node",
+                    "apiKey": raw_key,
+                    "capabilities": {},
+                },
+            )
+            body = await resp.json()
+
+        assert resp.status == 200
+        records = _audit_records(caplog, "node_token_bound")
+        assert records[-1].path == "/api/nodes/register"
+        assert records[-1].node_name == "bound-new-node"
+        assert records[-1].node_id_prefix == body["nodeId"][:8]
+        assert records[-1].api_key_id == entry.id
+        assert records[-1].ip
+
+    async def test_reregister_same_node_does_not_reemit_token_bound_audit_log(
+        self,
+        app,
+        registry,
+        caplog,
+    ):
+        caplog.set_level(logging.INFO)
+        raw_key, _ = registry.generate_api_key("same-token-node", username="alice")
+        registry.register("same-token-node", raw_key)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/nodes/register",
+                json={
+                    "name": "same-token-node",
+                    "apiKey": raw_key,
+                    "capabilities": {"platform": "linux"},
+                },
+            )
+
+        assert resp.status == 200
+        assert _audit_records(caplog, "node_token_bound") == []
+
+    async def test_reregister_existing_node_with_new_token_emits_bound_audit_log(
+        self,
+        app,
+        registry,
+        caplog,
+    ):
+        caplog.set_level(logging.INFO)
+        raw_key1, _ = registry.generate_api_key("rotate-node", username="alice")
+        raw_key2, entry2 = registry.generate_api_key("rotate-node-new", username="alice")
+        node = registry.register("rotate-node", raw_key1)
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/nodes/register",
+                json={
+                    "name": "rotate-node",
+                    "apiKey": raw_key2,
+                    "capabilities": {"platform": "linux"},
+                },
+            )
+
+        assert resp.status == 200
+        records = _audit_records(caplog, "node_token_bound")
+        assert records[-1].path == "/api/nodes/register"
+        assert records[-1].node_name == "rotate-node"
+        assert records[-1].node_id_prefix == node.id[:8]
+        assert records[-1].api_key_id == entry2.id
+
 
 class TestNodeWebSocketAuth:
     """HTTP-level coverage for node tunnel authentication."""
