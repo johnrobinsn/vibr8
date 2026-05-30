@@ -60,7 +60,6 @@ PUBLIC_PREFIXES = (
 # Exact-match public routes (node listing & active node — needed by UI)
 PUBLIC_EXACT_PATHS = frozenset({
     "/api/nodes",
-    "/api/nodes/active",
 })
 
 # Parameterized public routes (node activation — controls voice routing)
