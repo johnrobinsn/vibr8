@@ -57,12 +57,14 @@ class TestNodeRegistry:
         assert local.status == "online"
 
     def test_generate_and_validate_api_key(self, registry):
-        raw_key, entry = registry.generate_api_key("test-node")
+        raw_key, entry = registry.generate_api_key("test-node", username="alice")
         assert raw_key.startswith("sk-node-")
         assert entry.name == "test-node"
+        assert entry.username == "alice"
         found = registry.validate_standalone_key(raw_key)
         assert found is not None
         assert found.id == entry.id
+        assert found.last_used_at > 0
 
     def test_register_node(self, registry):
         raw_key, _ = registry.generate_api_key("cloud-dev")
@@ -76,6 +78,17 @@ class TestNodeRegistry:
         assert node.capabilities["platform"] == "linux"
         assert registry.get_node(node.id) is node
         assert registry.get_node_by_name("cloud-dev") is node
+
+    def test_register_new_node_requires_issued_api_key(self, registry):
+        with pytest.raises(PermissionError):
+            registry.register("cloud-dev", "sk-node-unissued")
+
+    def test_register_new_node_rejects_revoked_api_key(self, registry):
+        raw_key, entry = registry.generate_api_key("cloud-dev")
+        assert registry.revoke_api_key(entry.id) is True
+
+        with pytest.raises(PermissionError):
+            registry.register("cloud-dev", raw_key)
 
     def test_reregister_existing_node(self, registry):
         raw_key, _ = registry.generate_api_key("cloud-dev")
@@ -127,6 +140,54 @@ class TestNodeRegistry:
         assert registry.validate_standalone_key(raw_key) is not None
         registry.revoke_api_key(entry.id)
         assert registry.validate_standalone_key(raw_key) is None
+        assert registry.list_api_keys() == []
+        assert registry._api_keys[entry.id].revoked_at > 0
+
+    def test_list_api_keys_filters_by_owner(self, registry):
+        _, alice_entry = registry.generate_api_key("alice-node", username="alice")
+        _, bob_entry = registry.generate_api_key("bob-node", username="bob")
+
+        assert {entry.id for entry in registry.list_api_keys(username="alice")} == {
+            alice_entry.id
+        }
+        assert {entry.id for entry in registry.list_api_keys(username="bob")} == {
+            bob_entry.id
+        }
+
+    def test_owner_filter_includes_legacy_ownerless_keys(self, registry):
+        _, legacy_entry = registry.generate_api_key("legacy-node")
+        _, alice_entry = registry.generate_api_key("alice-node", username="alice")
+
+        assert {entry.id for entry in registry.list_api_keys(username="alice")} == {
+            alice_entry.id,
+            legacy_entry.id,
+        }
+
+    def test_revoke_api_key_requires_matching_owner(self, registry):
+        raw_key, entry = registry.generate_api_key("owned-node", username="alice")
+
+        assert registry.revoke_api_key(entry.id, username="bob") is False
+        assert registry.validate_standalone_key(raw_key) is not None
+
+        assert registry.revoke_api_key(entry.id, username="alice") is True
+        assert registry.validate_standalone_key(raw_key) is None
+
+    def test_revoke_api_key_allows_legacy_ownerless_keys(self, registry):
+        raw_key, entry = registry.generate_api_key("legacy-node")
+
+        assert registry.revoke_api_key(entry.id, username="alice") is True
+        assert registry.validate_standalone_key(raw_key) is None
+
+    def test_api_key_metadata_persists_revocation(self, tmp_vibr8_dir):
+        reg1 = NodeRegistry()
+        raw_key, entry = reg1.generate_api_key("persist-revoke", username="alice")
+        assert reg1.revoke_api_key(entry.id, username="alice") is True
+
+        reg2 = NodeRegistry()
+        loaded_entry = reg2._api_keys[entry.id]
+        assert loaded_entry.username == "alice"
+        assert loaded_entry.revoked_at > 0
+        assert reg2.validate_standalone_key(raw_key) is None
 
     def test_find_by_name_fuzzy(self, registry):
         raw_key, _ = registry.generate_api_key("cloud-dev")
@@ -542,3 +603,91 @@ class TestSessionListEndpoints:
         ring0_entry = next((s for s in data if s["sessionId"] == "ring0"), None)
         assert ring0_entry is not None
         assert ring0_entry["isRing0"] is True
+
+
+class TestNodeTokenEndpoints:
+    """Smoke tests for authenticated node token routes."""
+
+    @pytest.fixture
+    def mock_launcher(self):
+        launcher = MagicMock()
+        launcher.list_sessions.return_value = []
+        launcher.get_all_session_ids.return_value = []
+        launcher.get_session.return_value = None
+        return launcher
+
+    @pytest.fixture
+    def app(self, mock_launcher, bridge, registry):
+        from server.routes import create_routes
+        from vibr8_core.session_store import SessionStore
+        from vibr8_core.worktree_tracker import WorktreeTracker
+
+        @web.middleware
+        async def auth_user_middleware(request, handler):
+            user = request.headers.get("X-Test-User")
+            if user:
+                request["auth_user"] = user
+            return await handler(request)
+
+        store = SessionStore()
+        routes = create_routes(
+            mock_launcher,
+            bridge,
+            store,
+            worktree_tracker=WorktreeTracker(),
+            node_registry=registry,
+        )
+        app = web.Application(middlewares=[auth_user_middleware])
+        app.router.add_routes(routes)
+        return app
+
+    async def test_create_node_token_uses_authenticated_user(self, app, registry):
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/nodes/tokens",
+                json={"name": "alice-node"},
+                headers={"X-Test-User": "alice"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+
+        assert data["apiKey"].startswith("sk-node-")
+        assert data["token"] == data["apiKey"]
+        assert data["username"] == "alice"
+        assert "Revocation prevents new registrations" in data["revocationNote"]
+        entry = registry._api_keys[data["id"]]
+        assert entry.username == "alice"
+
+    async def test_list_node_tokens_filters_to_authenticated_user(self, app, registry):
+        _, alice_entry = registry.generate_api_key("alice-node", username="alice")
+        registry.generate_api_key("bob-node", username="bob")
+        _, legacy_entry = registry.generate_api_key("legacy-node")
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.get(
+                "/api/nodes/tokens",
+                headers={"X-Test-User": "alice"},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+
+        assert {entry["id"] for entry in data} == {alice_entry.id, legacy_entry.id}
+
+    async def test_revoke_node_token_enforces_authenticated_owner(self, app, registry):
+        raw_key, entry = registry.generate_api_key("alice-node", username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            bob_resp = await client.delete(
+                f"/api/nodes/tokens/{entry.id}",
+                headers={"X-Test-User": "bob"},
+            )
+            assert bob_resp.status == 404
+            assert registry.validate_standalone_key(raw_key) is not None
+
+            alice_resp = await client.delete(
+                f"/api/nodes/tokens/{entry.id}",
+                headers={"X-Test-User": "alice"},
+            )
+
+        assert alice_resp.status == 200
+        assert registry.validate_standalone_key(raw_key) is None

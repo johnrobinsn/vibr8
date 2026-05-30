@@ -31,8 +31,10 @@ class ApiKeyEntry:
     name: str                  # user-given label
     key_hash: str              # bcrypt hash
     key_prefix: str            # first 12 chars for display (e.g. "sk-node-1234...")
+    username: str = ""         # authenticated user that created this key
     created_at: float = 0     # time.time()
     last_used_at: float = 0   # time.time(), 0 = never used
+    revoked_at: float = 0     # time.time(), 0 = active
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -40,8 +42,10 @@ class ApiKeyEntry:
             "name": self.name,
             "keyHash": self.key_hash,
             "keyPrefix": self.key_prefix,
+            "username": self.username,
             "createdAt": self.created_at,
             "lastUsedAt": self.last_used_at,
+            "revokedAt": self.revoked_at,
         }
 
     def to_api_dict(self) -> dict[str, Any]:
@@ -50,8 +54,10 @@ class ApiKeyEntry:
             "id": self.id,
             "name": self.name,
             "keyPrefix": self.key_prefix,
+            "username": self.username,
             "createdAt": self.created_at,
             "lastUsedAt": self.last_used_at,
+            "revokedAt": self.revoked_at or None,
         }
 
     @staticmethod
@@ -61,8 +67,10 @@ class ApiKeyEntry:
             name=data["name"],
             key_hash=data["keyHash"],
             key_prefix=data.get("keyPrefix", "sk-node-****"),
+            username=data.get("username", ""),
             created_at=data.get("createdAt", 0),
             last_used_at=data.get("lastUsedAt", 0),
+            revoked_at=data.get("revokedAt", 0),
         )
 
 
@@ -179,7 +187,8 @@ class NodeRegistry:
             return existing
 
         # New registration — validate against issued keys and update last_used
-        self.validate_standalone_key(api_key)
+        if not self.validate_standalone_key(api_key):
+            raise PermissionError("Invalid API key for new node")
 
         node_id = secrets.token_hex(16)
         api_key_hash = bcrypt.hashpw(
@@ -241,7 +250,11 @@ class NodeRegistry:
                 return node
         return None
 
-    def generate_api_key(self, name: str = "") -> tuple[str, ApiKeyEntry]:
+    def generate_api_key(
+        self,
+        name: str = "",
+        username: str | None = None,
+    ) -> tuple[str, ApiKeyEntry]:
         """Generate a new API key with metadata. Returns (raw_key, entry)."""
         raw_key = f"sk-node-{secrets.token_hex(24)}"
         key_hash = bcrypt.hashpw(raw_key.encode(), bcrypt.gensalt()).decode()
@@ -250,6 +263,7 @@ class NodeRegistry:
             name=name or "Unnamed key",
             key_hash=key_hash,
             key_prefix=raw_key[:16] + "...",
+            username=username or "",
             created_at=time.time(),
         )
         self._api_keys[entry.id] = entry
@@ -257,15 +271,23 @@ class NodeRegistry:
         logger.info("[nodes] Generated API key %r (id=%s)", entry.name, entry.id)
         return raw_key, entry
 
-    def list_api_keys(self) -> list[ApiKeyEntry]:
+    def list_api_keys(self, username: str | None = None) -> list[ApiKeyEntry]:
         """Return all API key entries (no raw keys)."""
-        return sorted(self._api_keys.values(), key=lambda k: k.created_at, reverse=True)
+        keys = [
+            key for key in self._api_keys.values()
+            if not key.revoked_at
+            and (username is None or key.username in ("", username))
+        ]
+        return sorted(keys, key=lambda k: k.created_at, reverse=True)
 
-    def revoke_api_key(self, key_id: str) -> bool:
+    def revoke_api_key(self, key_id: str, username: str | None = None) -> bool:
         """Revoke an API key by ID."""
-        entry = self._api_keys.pop(key_id, None)
-        if not entry:
+        entry = self._api_keys.get(key_id)
+        if not entry or entry.revoked_at:
             return False
+        if username is not None and entry.username and entry.username != username:
+            return False
+        entry.revoked_at = time.time()
         self._save()
         logger.info("[nodes] Revoked API key %r (id=%s)", entry.name, key_id)
         return True
@@ -273,6 +295,8 @@ class NodeRegistry:
     def validate_standalone_key(self, api_key: str) -> ApiKeyEntry | None:
         """Validate an API key against the issued keys list. Updates last_used."""
         for entry in self._api_keys.values():
+            if entry.revoked_at:
+                continue
             if bcrypt.checkpw(api_key.encode(), entry.key_hash.encode()):
                 entry.last_used_at = time.time()
                 self._save()

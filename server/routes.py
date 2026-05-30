@@ -2886,30 +2886,45 @@ def create_routes(
         return web.json_response({"ok": True, "name": node_registry.hub_name})
 
     @routes.post("/api/nodes/generate-key")
+    @routes.post("/api/nodes/tokens")
     async def generate_node_key(request: web.Request) -> web.Response:
-        """Generate a new API key for node registration."""
+        """Generate a new revocable node token for node registration."""
         if node_registry is None:
             return web.json_response({"error": "Node registry not available"}, status=503)
         body = await request.json() if request.content_length else {}
         name = body.get("name", "")
-        raw_key, entry = node_registry.generate_api_key(name)
-        return web.json_response({"apiKey": raw_key, **entry.to_api_dict()})
+        username = request.get("auth_user")
+        raw_key, entry = node_registry.generate_api_key(name, username=username)
+        return web.json_response({
+            "apiKey": raw_key,
+            "token": raw_key,
+            "revocationNote": (
+                "Revocation prevents new registrations with this token. "
+                "Already-registered nodes continue using their stored node credential "
+                "until node reconnect handling is migrated."
+            ),
+            **entry.to_api_dict(),
+        })
 
     @routes.get("/api/nodes/keys")
+    @routes.get("/api/nodes/tokens")
     async def list_node_keys(request: web.Request) -> web.Response:
-        """List all issued API keys (no raw keys)."""
+        """List issued node tokens for the authenticated user (no raw tokens)."""
         if node_registry is None:
             return web.json_response({"error": "Node registry not available"}, status=503)
-        keys = node_registry.list_api_keys()
+        username = request.get("auth_user", None)
+        keys = node_registry.list_api_keys(username=username)
         return web.json_response([k.to_api_dict() for k in keys])
 
     @routes.delete("/api/nodes/keys/{key_id}")
+    @routes.delete("/api/nodes/tokens/{key_id}")
     async def revoke_node_key(request: web.Request) -> web.Response:
-        """Revoke an API key."""
+        """Revoke a node token."""
         if node_registry is None:
             return web.json_response({"error": "Node registry not available"}, status=503)
         key_id = request.match_info["key_id"]
-        if node_registry.revoke_api_key(key_id):
+        username = request.get("auth_user", None)
+        if node_registry.revoke_api_key(key_id, username=username):
             return web.json_response({"ok": True})
         return web.json_response({"error": "Key not found"}, status=404)
 
@@ -3154,5 +3169,3 @@ def create_routes(
         return web.json_response(result)
 
     return routes
-
-
