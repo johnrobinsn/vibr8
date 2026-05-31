@@ -48,6 +48,7 @@ export default defineConfig({
         // Legacy in-process mode skips the self-node subprocess spawn,
         // keeping the test boot deterministic and fast.
         VIBR8_DISABLE_SELF_NODE: "1",
+        VIBR8_ALLOW_LEGACY_IN_PROCESS: "1",
         // Skip GPU model preloads (~30s combined) — the test doesn't
         // exercise voice / TTS, just the browser→WsBridge WS path.
         VIBR8_FAST_STARTUP: "1",

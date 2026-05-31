@@ -107,7 +107,7 @@ Three things to notice:
 
 3. **WebRTC peers are per-tab.** Per-peer state (PC, STT, outgoing track, video, screen capture, input injector) is keyed by `peer_key = "{client_id}#{tab_id}"`. User-level state (guard, tts_muted, voice modes, speaker gates, usernames) stays keyed by `client_id`. Two tabs of the same browser can run independent voice connections.
 
-Set `VIBR8_DISABLE_SELF_NODE=1` to fall back to the legacy in-process path (no subprocess; hub directly owns session state).
+Set both `VIBR8_DISABLE_SELF_NODE=1` and `VIBR8_ALLOW_LEGACY_IN_PROCESS=1` to fall back to the legacy in-process path for isolated development/tests only.
 
 The WebSocket protocol is reverse-engineered and documented in `WEBSOCKET_PROTOCOL_REVERSED.md`. The node parity refactor is in `docs/remote-node-parity.md` (plan) and `docs/remote-node-parity-handoff.md` (recovery guide).
 

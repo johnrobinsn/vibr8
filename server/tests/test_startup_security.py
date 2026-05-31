@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from server.main import resolve_bind_host
+from server.main import resolve_bind_host, resolve_self_node_enabled
 
 
 def test_auth_enabled_uses_requested_bind_host() -> None:
@@ -50,4 +50,25 @@ def test_no_auth_public_bind_requires_second_explicit_override() -> None:
             },
         )
         == "0.0.0.0"
+    )
+
+
+def test_self_node_mode_is_enabled_by_default() -> None:
+    assert resolve_self_node_enabled({}) is True
+
+
+def test_disabling_self_node_requires_explicit_legacy_override() -> None:
+    with pytest.raises(RuntimeError, match="legacy in-process fallback"):
+        resolve_self_node_enabled({"VIBR8_DISABLE_SELF_NODE": "1"})
+
+
+def test_legacy_in_process_mode_requires_two_explicit_flags() -> None:
+    assert (
+        resolve_self_node_enabled(
+            {
+                "VIBR8_DISABLE_SELF_NODE": "1",
+                "VIBR8_ALLOW_LEGACY_IN_PROCESS": "1",
+            }
+        )
+        is False
     )

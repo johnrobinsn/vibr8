@@ -279,16 +279,17 @@ the same code path on the local machine. `routes.py` is manager-free;
 voice routing is manager-free; the only direct in-process manager
 references on the hub are dormant pieces in `main.py` (event callback
 wirings, `ws_bridge.set_*` plumbing) that fire only in legacy
-`VIBR8_DISABLE_SELF_NODE=1` mode.
+`VIBR8_DISABLE_SELF_NODE=1` plus `VIBR8_ALLOW_LEGACY_IN_PROCESS=1`
+mode.
 
 **Optional remaining purity work (no user-visible impact):**
 1. Skip the dormant event-callback wirings (`on_cli_session_id`,
    `on_codex_adapter_created`, etc.) and `ws_bridge.set_*` calls when
    in self-node mode. Lines 461-512 in `server/main.py`.
 2. Make in-process `Ring0Manager`/`CliLauncher`/`SessionStore`
-   construction conditional on `VIBR8_DISABLE_SELF_NODE=1`. Currently
-   they're always constructed but dormant in self-node mode.
-3. Remove `VIBR8_DISABLE_SELF_NODE` legacy path entirely. Single code
+   construction conditional on the explicit legacy in-process fallback.
+   Currently they're always constructed but dormant in self-node mode.
+3. Remove the two-flag legacy in-process fallback entirely. Single code
    path. Cost: no fallback if self-node fails to spawn at startup.
 
 None of these change user-visible behavior. They're cleanup that can
@@ -299,8 +300,9 @@ happen organically.
 ### Phase 4c-6 step-by-step history
 
 Self-node mode is now the default startup path (commit `82fd425`).
-Set `VIBR8_DISABLE_SELF_NODE=1` to fall back to legacy in-process
-mode for debugging.
+Set both `VIBR8_DISABLE_SELF_NODE=1` and
+`VIBR8_ALLOW_LEGACY_IN_PROCESS=1` to fall back to legacy in-process
+mode for isolated development/tests.
 
 Voice transcript routing (commit `8428afb`): the hub's WebRTC pipeline
 now calls `local_node_ops.ring0_input(text, source_client_id)` for

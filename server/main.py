@@ -91,6 +91,8 @@ NODE_WS_RATE_WINDOW = 60.0
 ALLOW_NO_AUTH_ENV = "VIBR8_ALLOW_NO_AUTH"
 ALLOW_PUBLIC_NO_AUTH_ENV = "VIBR8_ALLOW_PUBLIC_NO_AUTH"
 HOST_ENV = "VIBR8_HOST"
+DISABLE_SELF_NODE_ENV = "VIBR8_DISABLE_SELF_NODE"
+ALLOW_LEGACY_IN_PROCESS_ENV = "VIBR8_ALLOW_LEGACY_IN_PROCESS"
 
 # Typed key for the WsBridge instance in app state. Mirrors the same
 # idiom used in server/tests/test_smoke_ws_path.py so the smoke gate
@@ -141,6 +143,28 @@ def resolve_bind_host(auth_enabled: bool, environ: Mapping[str, str] = os.enviro
         requested_host,
     )
     return "127.0.0.1"
+
+
+def resolve_self_node_enabled(environ: Mapping[str, str] = os.environ) -> bool:
+    """Return whether the hub should use the self-node path.
+
+    Self-node mode is the only normal runtime path. The legacy in-process
+    fallback remains available only for explicit development/test isolation.
+    """
+    if not _env_flag(environ, DISABLE_SELF_NODE_ENV):
+        return True
+    if not _env_flag(environ, ALLOW_LEGACY_IN_PROCESS_ENV):
+        raise RuntimeError(
+            f"{DISABLE_SELF_NODE_ENV}=1 is a legacy in-process fallback. "
+            f"Set {ALLOW_LEGACY_IN_PROCESS_ENV}=1 as well if you need it for "
+            "explicit local development or isolated tests."
+        )
+    logger.warning(
+        "[server] %s=1 and %s=1; using legacy in-process node path",
+        DISABLE_SELF_NODE_ENV,
+        ALLOW_LEGACY_IN_PROCESS_ENV,
+    )
+    return False
 
 
 # ── WebSocket route handlers ─────────────────────────────────────────────────
@@ -526,7 +550,7 @@ def create_app() -> web.Application:
     task_scheduler = TaskScheduler()
     node_registry = NodeRegistry()
 
-    _use_self_node = os.environ.get("VIBR8_DISABLE_SELF_NODE") != "1"
+    _use_self_node = resolve_self_node_enabled()
 
     # SwappableNodeClient's initial target:
     #
@@ -534,9 +558,10 @@ def create_app() -> web.Application:
     #   before the self-node registers returns {"error": "Self-node not
     #   ready"} — preferable to silently executing dormant in-process
     #   code paths that don't reflect the node's actual state.
-    # - Legacy mode (VIBR8_DISABLE_SELF_NODE=1): build NodeOperations
-    #   against the hub's in-process managers, which then own session
-    #   state for the lifetime of the process.
+    # - Legacy mode (VIBR8_DISABLE_SELF_NODE=1 plus
+    #   VIBR8_ALLOW_LEGACY_IN_PROCESS=1): build NodeOperations against
+    #   the hub's in-process managers, which then own session state for
+    #   the lifetime of the process.
     if _use_self_node:
         local_node_ops = SwappableNodeClient(NOT_READY)
     else:
@@ -562,8 +587,8 @@ def create_app() -> web.Application:
     # startup that connects back via the loopback tunnel. After it
     # registers, local_node_ops is retargeted at it (RemoteNodeClient
     # wrapped in QualifyingNodeClient) and all node-scoped operations
-    # flow through the tunnel. Set VIBR8_DISABLE_SELF_NODE=1 to fall
-    # back to the legacy in-process path.
+    # flow through the tunnel. Legacy in-process fallback requires both
+    # VIBR8_DISABLE_SELF_NODE=1 and VIBR8_ALLOW_LEGACY_IN_PROCESS=1.
     self_node_state: dict[str, object] = {"proc": None, "node_id": "", "api_key": ""}
 
     try:
@@ -614,7 +639,7 @@ def create_app() -> web.Application:
     # `hub_browser_bridge.get_client_active_node(client_id)`. Events
     # without a source client fall back to the self-node (Phase 8 replaces
     # the hub-wide `node_registry.active_node_id` with this per-client map).
-    if os.environ.get("VIBR8_DISABLE_SELF_NODE") != "1":
+    if _use_self_node:
         async def _forward_event_to_active_node(event) -> None:
             try:
                 source_cid = getattr(event, "source_client_id", None) or ""
@@ -669,8 +694,8 @@ def create_app() -> web.Application:
     # (default for Option A keystone). In that mode the self-node
     # subprocess is the sole owner of the on-disk session/ring0 state;
     # the hub's in-process managers stay empty and route through the
-    # loopback. Set VIBR8_DISABLE_SELF_NODE=1 to fall back to the legacy
-    # in-process path.
+    # loopback. Legacy in-process fallback requires both
+    # VIBR8_DISABLE_SELF_NODE=1 and VIBR8_ALLOW_LEGACY_IN_PROCESS=1.
     if not _use_self_node:
         launcher.restore_from_disk()
         ws_bridge.restore_from_disk()
@@ -1061,9 +1086,9 @@ def create_app() -> web.Application:
         # in-process WsBridge/Ring0Manager/CliLauncher/SessionStore exist
         # but are dormant (no restore_from_disk, no auto-launch); the
         # self-node owns ~/.vibr8/ and routes go through the loopback.
-        # Set VIBR8_DISABLE_SELF_NODE=1 to fall back to the legacy
-        # in-process path.
-        if os.environ.get("VIBR8_DISABLE_SELF_NODE") != "1":
+        # Legacy in-process fallback requires both VIBR8_DISABLE_SELF_NODE=1
+        # and VIBR8_ALLOW_LEGACY_IN_PROCESS=1.
+        if _use_self_node:
             spawn(_spawn_self_node())
             # Refresh the WebRTC Ring0 status cache periodically so voice
             # broadcasts (mode change, audio off, etc.) target the

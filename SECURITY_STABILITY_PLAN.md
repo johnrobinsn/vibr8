@@ -89,7 +89,7 @@ Goal: replace ad hoc node API keys with user-owned, revocable credentials.
 Goal: remove dual local execution paths so local and remote nodes share one debugging surface.
 
 - Make self-node path mandatory in normal operation.
-- Remove or quarantine `VIBR8_DISABLE_SELF_NODE` legacy mode.
+- Remove or quarantine `VIBR8_DISABLE_SELF_NODE` legacy mode. **Quarantined behind a second explicit `VIBR8_ALLOW_LEGACY_IN_PROCESS=1` development/test override.**
 - Move remaining hub-owned execution behavior behind node operations or delete it after parity.
 - Ensure local self-node and remote nodes use the same interface contract for:
   - session create/list/kill/relaunch
