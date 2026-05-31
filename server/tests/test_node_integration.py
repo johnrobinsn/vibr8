@@ -11,6 +11,7 @@ import json
 import logging
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -107,6 +108,31 @@ class TestNodeRegistry:
 
         with pytest.raises(PermissionError, match="already bound"):
             registry.register("node-b", raw_key)
+
+    def test_concurrent_registers_bind_token_to_one_node(self, registry):
+        raw_key, entry = registry.generate_api_key("shared-token")
+
+        def register(name: str) -> tuple[str, str]:
+            try:
+                node = registry.register(name, raw_key)
+                return ("ok", node.id)
+            except PermissionError as exc:
+                return ("error", str(exc))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(register, ["node-a", "node-b"]))
+
+        assert [status for status, _ in results].count("ok") == 1
+        assert [status for status, _ in results].count("error") == 1
+        assert any("already bound" in value for status, value in results if status == "error")
+
+        registered = [
+            node for node in registry.get_all_nodes()
+            if node.id != registry.LOCAL_NODE_ID
+        ]
+        assert len(registered) == 1
+        assert entry.node_id == registered[0].id
+        assert registry.validate_api_key(registered[0].id, raw_key) is True
 
     def test_register_new_node_requires_issued_api_key(self, registry):
         with pytest.raises(PermissionError):
@@ -207,6 +233,31 @@ class TestNodeRegistry:
         registry.revoke_api_key(entry.id)
 
         assert registry.validate_api_key(node.id, raw_key) is False
+
+    def test_concurrent_register_and_revoke_never_leave_revoked_token_valid(
+        self,
+        registry,
+    ):
+        raw_key, entry = registry.generate_api_key("race-node")
+
+        def register() -> str:
+            try:
+                registry.register("race-node", raw_key)
+                return "registered"
+            except PermissionError:
+                return "rejected"
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            register_future = executor.submit(register)
+            revoke_future = executor.submit(registry.revoke_api_key, entry.id)
+
+        assert register_future.result() in {"registered", "rejected"}
+        assert revoke_future.result() is True
+        assert registry.validate_standalone_key(raw_key) is None
+
+        node = registry.get_node_by_name("race-node")
+        if node:
+            assert registry.validate_api_key(node.id, raw_key) is False
 
     def test_revoke_api_key_marks_registered_online_nodes_offline(self, registry):
         raw_key, entry = registry.generate_api_key("online-node")
