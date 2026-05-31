@@ -3056,6 +3056,65 @@ def create_routes(
         keys = node_registry.list_api_keys(username=username)
         return web.json_response([k.to_api_dict() for k in keys])
 
+    @routes.patch("/api/nodes/keys/{key_id}")
+    @routes.patch("/api/nodes/tokens/{key_id}")
+    async def update_node_key(request: web.Request) -> web.Response:
+        """Update editable node token metadata."""
+        if node_registry is None:
+            return web.json_response({"error": "Node registry not available"}, status=503)
+        key_id = request.match_info["key_id"]
+        username = request.get("auth_user", None)
+        ip = request.remote or "unknown"
+        path = request.path
+        try:
+            body = await request.json() if request.content_length else {}
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        name = (body.get("name") if isinstance(body, dict) else None)
+        if not isinstance(name, str) or not name.strip():
+            return web.json_response({"error": "name required"}, status=400)
+
+        entry = node_registry.update_api_key_metadata(
+            key_id,
+            username=username,
+            name=name,
+        )
+        if entry:
+            logger.info(
+                "[audit] node token metadata updated path=%s ip=%s user=%s key_id=%s name=%s",
+                path,
+                ip,
+                username or "",
+                key_id,
+                entry.name[:32],
+                extra={
+                    "audit_event": "node_token_metadata_updated",
+                    "path": path,
+                    "ip": ip,
+                    "username": username or "",
+                    "api_key_id": key_id,
+                    "token_name": entry.name[:32],
+                },
+            )
+            return web.json_response(entry.to_api_dict())
+
+        logger.warning(
+            "[audit] node token metadata update rejected path=%s ip=%s user=%s key_id=%s reason=not_found_or_forbidden",
+            path,
+            ip,
+            username or "",
+            key_id,
+            extra={
+                "audit_event": "node_token_metadata_update_rejected",
+                "path": path,
+                "ip": ip,
+                "username": username or "",
+                "api_key_id": key_id,
+                "reason": "not_found_or_forbidden",
+            },
+        )
+        return web.json_response({"error": "Key not found"}, status=404)
+
     @routes.delete("/api/nodes/keys/{key_id}")
     @routes.delete("/api/nodes/tokens/{key_id}")
     async def revoke_node_key(request: web.Request) -> web.Response:

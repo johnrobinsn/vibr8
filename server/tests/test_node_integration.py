@@ -325,6 +325,54 @@ class TestNodeRegistry:
         assert registry.revoke_api_key(entry.id, username="alice") is True
         assert registry.validate_standalone_key(raw_key) is None
 
+    def test_update_api_key_metadata_requires_matching_owner(self, registry):
+        _, entry = registry.generate_api_key("alice-node", username="alice")
+
+        assert (
+            registry.update_api_key_metadata(
+                entry.id,
+                username="bob",
+                name="bob-name",
+            )
+            is None
+        )
+        assert registry._api_keys[entry.id].name == "alice-node"
+
+        updated = registry.update_api_key_metadata(
+            entry.id,
+            username="alice",
+            name="alice-renamed",
+        )
+
+        assert updated is entry
+        assert updated.name == "alice-renamed"
+
+    def test_update_api_key_metadata_allows_legacy_ownerless_keys(self, registry):
+        _, entry = registry.generate_api_key("legacy-node")
+
+        updated = registry.update_api_key_metadata(
+            entry.id,
+            username="alice",
+            name="legacy-renamed",
+        )
+
+        assert updated is entry
+        assert updated.name == "legacy-renamed"
+
+    def test_update_api_key_metadata_rejects_revoked_keys(self, registry):
+        _, entry = registry.generate_api_key("alice-node", username="alice")
+        assert registry.revoke_api_key(entry.id, username="alice") is True
+
+        assert (
+            registry.update_api_key_metadata(
+                entry.id,
+                username="alice",
+                name="renamed",
+            )
+            is None
+        )
+        assert registry._api_keys[entry.id].name == "alice-node"
+
     def test_api_key_metadata_persists_revocation(self, tmp_vibr8_dir):
         reg1 = NodeRegistry()
         raw_key, entry = reg1.generate_api_key("persist-revoke", username="alice")
@@ -335,6 +383,20 @@ class TestNodeRegistry:
         assert loaded_entry.username == "alice"
         assert loaded_entry.revoked_at > 0
         assert reg2.validate_standalone_key(raw_key) is None
+
+    def test_api_key_metadata_update_persists(self, tmp_vibr8_dir):
+        reg1 = NodeRegistry()
+        _, entry = reg1.generate_api_key("alice-node", username="alice")
+
+        updated = reg1.update_api_key_metadata(
+            entry.id,
+            username="alice",
+            name="alice-renamed",
+        )
+
+        assert updated is not None
+        reg2 = NodeRegistry()
+        assert reg2._api_keys[entry.id].name == "alice-renamed"
 
     def test_find_by_name_fuzzy(self, registry):
         raw_key, _ = registry.generate_api_key("cloud-dev")
@@ -854,6 +916,127 @@ class TestNodeTokenEndpoints:
             data = await resp.json()
 
         assert {entry["id"] for entry in data} == {alice_entry.id, legacy_entry.id}
+
+    async def test_update_node_token_metadata_enforces_authenticated_owner(
+        self,
+        app,
+        registry,
+    ):
+        _, entry = registry.generate_api_key("alice-node", username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            bob_resp = await client.patch(
+                f"/api/nodes/tokens/{entry.id}",
+                json={"name": "bob-name"},
+                headers={"X-Test-User": "bob"},
+            )
+            assert bob_resp.status == 404
+            assert registry._api_keys[entry.id].name == "alice-node"
+
+            alice_resp = await client.patch(
+                f"/api/nodes/tokens/{entry.id}",
+                json={"name": "alice-renamed"},
+                headers={"X-Test-User": "alice"},
+            )
+            data = await alice_resp.json()
+
+        assert alice_resp.status == 200
+        assert data["id"] == entry.id
+        assert data["name"] == "alice-renamed"
+        assert "apiKey" not in data
+        assert "keyHash" not in data
+        assert registry._api_keys[entry.id].name == "alice-renamed"
+
+    async def test_update_node_token_metadata_rejects_revoked_token(
+        self,
+        app,
+        registry,
+    ):
+        _, entry = registry.generate_api_key("alice-node", username="alice")
+        registry.revoke_api_key(entry.id, username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.patch(
+                f"/api/nodes/tokens/{entry.id}",
+                json={"name": "alice-renamed"},
+                headers={"X-Test-User": "alice"},
+            )
+
+        assert resp.status == 404
+        assert registry._api_keys[entry.id].name == "alice-node"
+
+    async def test_update_node_token_metadata_validates_name(self, app, registry):
+        _, entry = registry.generate_api_key("alice-node", username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.patch(
+                f"/api/nodes/tokens/{entry.id}",
+                json={"name": "   "},
+                headers={"X-Test-User": "alice"},
+            )
+            body = await resp.json()
+
+        assert resp.status == 400
+        assert body == {"error": "name required"}
+        assert registry._api_keys[entry.id].name == "alice-node"
+
+    async def test_update_node_token_metadata_emits_audit_logs(
+        self,
+        app,
+        registry,
+        caplog,
+    ):
+        caplog.set_level(logging.INFO)
+        _, entry = registry.generate_api_key("alice-node", username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            bob_resp = await client.patch(
+                f"/api/nodes/tokens/{entry.id}",
+                json={"name": "bob-name"},
+                headers={"X-Test-User": "bob"},
+            )
+            alice_resp = await client.patch(
+                f"/api/nodes/tokens/{entry.id}",
+                json={"name": "alice-renamed"},
+                headers={"X-Test-User": "alice"},
+            )
+
+        assert bob_resp.status == 404
+        rejected = _audit_records(caplog, "node_token_metadata_update_rejected")
+        assert rejected[-1].path == f"/api/nodes/tokens/{entry.id}"
+        assert rejected[-1].username == "bob"
+        assert rejected[-1].api_key_id == entry.id
+        assert rejected[-1].reason == "not_found_or_forbidden"
+        assert rejected[-1].ip
+
+        assert alice_resp.status == 200
+        updated = _audit_records(caplog, "node_token_metadata_updated")
+        assert updated[-1].path == f"/api/nodes/tokens/{entry.id}"
+        assert updated[-1].username == "alice"
+        assert updated[-1].api_key_id == entry.id
+        assert updated[-1].token_name == "alice-renamed"
+        assert updated[-1].ip
+
+    async def test_legacy_update_node_key_emits_legacy_path_in_audit_log(
+        self,
+        app,
+        registry,
+        caplog,
+    ):
+        caplog.set_level(logging.INFO)
+        _, entry = registry.generate_api_key("legacy-node", username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.patch(
+                f"/api/nodes/keys/{entry.id}",
+                json={"name": "legacy-renamed"},
+                headers={"X-Test-User": "alice"},
+            )
+
+        assert resp.status == 200
+        records = _audit_records(caplog, "node_token_metadata_updated")
+        assert records[-1].path == f"/api/nodes/keys/{entry.id}"
+        assert records[-1].api_key_id == entry.id
 
     async def test_revoke_node_token_enforces_authenticated_owner(self, app, registry):
         raw_key, entry = registry.generate_api_key("alice-node", username="alice")
