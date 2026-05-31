@@ -353,9 +353,15 @@ class NodeRegistry:
             if username is not None and entry.username and entry.username != username:
                 return None
             if name is not None:
-                entry.name = name.strip() or entry.name
-            self._save()
-            logger.info("[nodes] Updated API key metadata %r (id=%s)", entry.name, key_id)
+                updated_name = name.strip()
+                if updated_name and updated_name != entry.name:
+                    entry.name = updated_name
+                    self._save()
+                    logger.info(
+                        "[nodes] Updated API key metadata %r (id=%s)",
+                        entry.name,
+                        key_id,
+                    )
             return entry
 
     def validate_standalone_key(self, api_key: str) -> ApiKeyEntry | None:

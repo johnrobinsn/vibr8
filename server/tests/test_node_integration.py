@@ -373,6 +373,19 @@ class TestNodeRegistry:
         )
         assert registry._api_keys[entry.id].name == "alice-node"
 
+    def test_update_api_key_metadata_skips_save_for_same_name(self, registry):
+        _, entry = registry.generate_api_key("alice-node", username="alice")
+        registry._save = MagicMock()  # type: ignore[method-assign]
+
+        updated = registry.update_api_key_metadata(
+            entry.id,
+            username="alice",
+            name="alice-node",
+        )
+
+        assert updated is entry
+        registry._save.assert_not_called()
+
     def test_api_key_metadata_persists_revocation(self, tmp_vibr8_dir):
         reg1 = NodeRegistry()
         raw_key, entry = reg1.generate_api_key("persist-revoke", username="alice")
@@ -980,6 +993,21 @@ class TestNodeTokenEndpoints:
         assert body == {"error": "name required"}
         assert registry._api_keys[entry.id].name == "alice-node"
 
+    async def test_update_node_token_metadata_limits_name_length(self, app, registry):
+        _, entry = registry.generate_api_key("alice-node", username="alice")
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.patch(
+                f"/api/nodes/tokens/{entry.id}",
+                json={"name": "x" * 257},
+                headers={"X-Test-User": "alice"},
+            )
+            body = await resp.json()
+
+        assert resp.status == 400
+        assert body == {"error": "name too long"}
+        assert registry._api_keys[entry.id].name == "alice-node"
+
     async def test_update_node_token_metadata_emits_audit_logs(
         self,
         app,
@@ -1003,19 +1031,19 @@ class TestNodeTokenEndpoints:
 
         assert bob_resp.status == 404
         rejected = _audit_records(caplog, "node_token_metadata_update_rejected")
-        assert rejected[-1].path == f"/api/nodes/tokens/{entry.id}"
-        assert rejected[-1].username == "bob"
-        assert rejected[-1].api_key_id == entry.id
-        assert rejected[-1].reason == "not_found_or_forbidden"
-        assert rejected[-1].ip
+        bob_rejected = [record for record in rejected if record.username == "bob"]
+        assert bob_rejected[-1].path == f"/api/nodes/tokens/{entry.id}"
+        assert bob_rejected[-1].api_key_id == entry.id
+        assert bob_rejected[-1].reason == "not_found_or_forbidden"
+        assert bob_rejected[-1].ip
 
         assert alice_resp.status == 200
         updated = _audit_records(caplog, "node_token_metadata_updated")
-        assert updated[-1].path == f"/api/nodes/tokens/{entry.id}"
-        assert updated[-1].username == "alice"
-        assert updated[-1].api_key_id == entry.id
-        assert updated[-1].token_name == "alice-renamed"
-        assert updated[-1].ip
+        alice_updated = [record for record in updated if record.username == "alice"]
+        assert alice_updated[-1].path == f"/api/nodes/tokens/{entry.id}"
+        assert alice_updated[-1].api_key_id == entry.id
+        assert alice_updated[-1].token_name == "alice-renamed"
+        assert alice_updated[-1].ip
 
     async def test_legacy_update_node_key_emits_legacy_path_in_audit_log(
         self,

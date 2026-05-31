@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 NODE_REGISTER_RATE_LIMIT = 10
 NODE_REGISTER_RATE_WINDOW = 60.0
+NODE_TOKEN_NAME_MAX_LENGTH = 256
 
 
 def _extract_assistant_text(message: Any) -> tuple[str, bool]:
@@ -3073,6 +3074,9 @@ def create_routes(
         name = (body.get("name") if isinstance(body, dict) else None)
         if not isinstance(name, str) or not name.strip():
             return web.json_response({"error": "name required"}, status=400)
+        name = name.strip()
+        if len(name) > NODE_TOKEN_NAME_MAX_LENGTH:
+            return web.json_response({"error": "name too long"}, status=400)
 
         entry = node_registry.update_api_key_metadata(
             key_id,
