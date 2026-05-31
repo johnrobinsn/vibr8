@@ -122,6 +122,7 @@ def test_self_node_disable_flag_uses_env_truthiness() -> None:
 
 
 async def test_self_node_mode_skips_legacy_session_startup_sync() -> None:
+    """Default self-node mode must not touch dormant launcher session state."""
     launcher = MagicMock()
     session_registry = SimpleNamespace(sync_from_launcher=AsyncMock())
     spawn_task = MagicMock()
@@ -140,6 +141,7 @@ async def test_self_node_mode_skips_legacy_session_startup_sync() -> None:
 
 
 async def test_legacy_mode_runs_launcher_session_startup_sync() -> None:
+    """Explicit legacy mode still syncs restored launcher sessions."""
     launcher = MagicMock()
     launcher.get_starting_sessions.return_value = []
     session_registry = SimpleNamespace(sync_from_launcher=AsyncMock())
@@ -156,3 +158,28 @@ async def test_legacy_mode_runs_launcher_session_startup_sync() -> None:
     launcher.get_starting_sessions.assert_called_once_with()
     session_registry.sync_from_launcher.assert_awaited_once_with("ring0")
     spawn_task.assert_not_called()
+
+
+async def test_legacy_mode_schedules_reconnect_watchdog_for_starting_sessions() -> None:
+    """Explicit legacy mode preserves the reconnect watchdog."""
+    launcher = MagicMock()
+    launcher.get_starting_sessions.return_value = [
+        SimpleNamespace(sessionId="s1", archived=False),
+    ]
+    session_registry = SimpleNamespace(sync_from_launcher=AsyncMock())
+    spawn_task = MagicMock()
+
+    await run_legacy_session_startup_sync(
+        use_self_node=False,
+        launcher=launcher,
+        ring0_manager=SimpleNamespace(session_id="ring0"),
+        session_registry=session_registry,
+        spawn_task=spawn_task,
+    )
+
+    launcher.get_starting_sessions.assert_called_once_with()
+    session_registry.sync_from_launcher.assert_awaited_once_with("ring0")
+    spawn_task.assert_called_once()
+    scheduled = spawn_task.call_args.args[0]
+    assert hasattr(scheduled, "__await__")
+    scheduled.close()

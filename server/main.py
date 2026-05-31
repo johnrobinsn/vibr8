@@ -11,7 +11,8 @@ import os
 import sys
 import time
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any
 
 import aiohttp
 from aiohttp import web
@@ -178,7 +179,7 @@ async def run_legacy_session_startup_sync(
     launcher: object,
     ring0_manager: object | None,
     session_registry: object,
-    spawn_task,
+    spawn_task: Callable[[Awaitable[Any]], Any],
 ) -> None:
     """Run startup work for the legacy in-process session owner."""
     if use_self_node:
