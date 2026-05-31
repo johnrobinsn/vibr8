@@ -338,6 +338,32 @@ class NodeRegistry:
             logger.info("[nodes] Revoked API key %r (id=%s)", entry.name, key_id)
             return True
 
+    def update_api_key_metadata(
+        self,
+        key_id: str,
+        *,
+        username: str | None = None,
+        name: str | None = None,
+    ) -> ApiKeyEntry | None:
+        """Update editable metadata for an active API key."""
+        with self._lock:
+            entry = self._api_keys.get(key_id)
+            if not entry or entry.revoked_at:
+                return None
+            if username is not None and entry.username and entry.username != username:
+                return None
+            if name is not None:
+                updated_name = name.strip()
+                if updated_name and updated_name != entry.name:
+                    entry.name = updated_name
+                    self._save()
+                    logger.info(
+                        "[nodes] Updated API key metadata %r (id=%s)",
+                        entry.name,
+                        key_id,
+                    )
+            return entry
+
     def validate_standalone_key(self, api_key: str) -> ApiKeyEntry | None:
         """Validate an API key against the issued keys list. Updates last_used."""
         with self._lock:

@@ -79,6 +79,7 @@ async def test_current_public_paths_bypass_auth(path: str) -> None:
         "/api/nodes/node-1/activate",
         "/api/nodes/generate-key",
         "/api/nodes/tokens",
+        "/api/nodes/tokens/key-1",
         "/api/nodes/active",
         "/api/ring0/status",
         "/api/ring0/query-client",

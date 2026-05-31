@@ -72,9 +72,9 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
 
 1. Move node registration from anonymous API-key-in-body bootstrap toward
    authenticated, revocable, user-owned node tokens. The authenticated
-   `/api/nodes/tokens` create/list/revoke API is now in place while legacy
-   `/api/nodes/register` remains public for compatibility. Token-bound nodes
-   persist the issuing token id; revocation marks matching online nodes
+   `/api/nodes/tokens` create/list/update/revoke API is now in place while
+   legacy `/api/nodes/register` remains public for compatibility. Token-bound
+   nodes persist the issuing token id; revocation marks matching online nodes
    offline and blocks reconnect through their stored node credential. Public
    registration and node WebSocket tunnel authentication are rate-limited per
    client key and emit audit events when throttled. When
@@ -91,8 +91,8 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
    `node_token_bound` event as they pick up a real binding.
    Unregistering a node does not free a previously bound token for reuse;
    operators should issue a new token for a replacement node. Pre-migration
-   ownerless keys are visible and revocable by any authenticated user so
-   operators can clean up legacy credentials after upgrade.
+   ownerless keys are visible, editable, and revocable by any authenticated
+   user so operators can clean up legacy credentials after upgrade.
 2. Narrow node listing and activation to authenticated clients while preserving
    second-screen and voice routing workflows. `/api/nodes` and
    `/api/nodes/{node_id}/activate` now require valid auth; direct browser
