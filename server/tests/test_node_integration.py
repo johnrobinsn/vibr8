@@ -701,6 +701,23 @@ class TestRemoteSessionMessages:
         })
         assert "perm-1" not in proxy.pending_permissions
 
+    async def test_handle_remote_clears_permissions_on_cancelled(self, bridge):
+        bridge._broadcast_to_browsers = AsyncMock()
+
+        await bridge.handle_remote_session_message("node-abc:s1", {
+            "type": "permission_request",
+            "request": {"request_id": "perm-1", "tool_name": "Write"},
+        })
+
+        proxy = bridge._sessions["node-abc:s1"]
+        assert "perm-1" in proxy.pending_permissions
+
+        await bridge.handle_remote_session_message("node-abc:s1", {
+            "type": "permission_cancelled",
+            "request_id": "perm-1",
+        })
+        assert "perm-1" not in proxy.pending_permissions
+
     async def test_handle_remote_broadcasts(self, bridge):
         bridge._broadcast_to_browsers = AsyncMock()
 

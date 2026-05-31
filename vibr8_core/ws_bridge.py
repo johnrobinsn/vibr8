@@ -471,7 +471,7 @@ class WsBridge:
             req_id = req.get("request_id", "")
             if req_id:
                 session.pending_permissions[req_id] = req
-        elif msg_type == "permission_response":
+        elif msg_type in ("permission_response", "permission_cancelled"):
             req_id = message.get("request_id", "")
             session.pending_permissions.pop(req_id, None)
 
