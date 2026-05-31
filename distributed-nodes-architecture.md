@@ -2,6 +2,15 @@
 
 > Design document for extending vibr8 from a single-host application to a distributed multi-node system where Claude Code agents run across multiple machines.
 
+> **STATUS (2026-05-27): IMPLEMENTED.** All five phases described below have shipped. This document is preserved as a record of the design — *what* we built and *why*. For the **current** architecture (post-implementation, with the self-node loopback and per-tab active node) read `CLAUDE.md` first, then `docs/remote-node-parity-handoff.md` for the phase-by-phase landing record.
+>
+> Key differences from the original design:
+> - **Self-node subprocess**: the hub-host spawns its own `vibr8_node` child at boot and routes "local" operations through a loopback tunnel. The hub itself owns no node-scoped state. This was decided during the Phase 4 "remote-node parity" refactor (`docs/remote-node-parity.md`). The "Local Node" / "Section 3.8" in this doc imagined an in-process local path that was retired in commit `82fd425`.
+> - **Active node is per-client (per-tab)**, not hub-wide. `HubBrowserBridge._client_active_nodes` is the source of truth. `node_registry.active_node_id` is gone (commit `75dd507`).
+> - **WebRTC peers keyed by `peer_key = clientId#tabId`** (commit `ea97025`), so two browser tabs of the same client run independent voice peers.
+> - **Hub-side Ring0 events** route via `event.source_client_id` → that client's active node, not via a global active node.
+> - **In-session permission mode switches accept all three values** (`bypassPermissions`, `acceptEdits`, `plan`). The Composer footer has a 3-way popover picker; Shift+Tab cycles through them. `server/routes.py:_ALLOWED_SESSION_MODES` was extended to include `bypassPermissions`.
+
 ---
 
 ## 1. Current Architecture

@@ -129,7 +129,11 @@ Every vibr8 instance is a "node" — including the hub-host. The hub spawns its 
 
 **Hub-side events**: `note_mode_ended`, `second_screen_*` etc. are emitted on the hub and forwarded to the source client's active node's Ring0. Callers populate `Ring0Event.source_client_id`; the forwarder in `server/main.py` calls `HubBrowserBridge.get_client_active_node(source_client_id)` and routes via `local_node_ops.emit_ring0_event` (self-node) or the remote tunnel directly. Events without a source client fall back to the self-node. Session-bound events (`user_returned`, `task_completed`, scheduler `task_due`) fire on the *node-side* WsBridge and reach that node's own Ring0 without going through the forwarder.
 
-**Key files**: `server/main.py` (self-node spawn + swap), `vibr8_core/node_client.py` (SwappableNodeClient + QualifyingNodeClient), `vibr8_core/node_operations.py` (canonical per-node ops), `vibr8_node/node_agent.py`, `server/node_tunnel.py`, `server/node_registry.py`, `install-node.sh`, `Dockerfile.node*`
+**Hub-proxy middleware (`vibr8_node/node_agent.py:_make_hub_proxy_middleware`)**: Routes that operate on hub-only state — `/api/clients`, `/api/nodes`, `/api/ring0/query-client`, `/api/ring0/switch-ui`, `/api/ring0/switch-audio`, `/api/ring0/clients`, `/api/ring0/prompt-context`, `/api/second-screen/`, `/api/artifacts` — get forwarded from the node back to the hub. Also forwarded: session-resolving Ring0 routes (`/api/ring0/send-message`, `/interrupt`, `/respond-permission`, `/rename-session`, `/session-output/`, `/set-guard`) because the node has no cross-node `session_registry` and its local fallback can only exact-match, breaking the 8-char prefix lookups Ring0 sends from `list_sessions` output. Routes left local: `/api/ring0/sessions` (this node's list), `/status`, `/toggle`, `/switch-backend`, `/switch-model`, `/mute-events`, `/create-session`, `/node-environment`, `/tasks*`, `/get-session-mode`, `/set-session-mode` — all per-node config or scheduler.
+
+**Native-push forwarding**: `WsBridge._push_to_native_clients` (session-scoped notifications like `permission_cancelled`, `status_change`, `cli_connected`/`cli_disconnected`, `permission_request`) is short-circuited on the node via `_native_push_hook` (`vibr8_node/node_agent.py:_forward_native_push_to_hub`). Native clients (watch, second-screen) connect to the hub, not the node, so a node-local push would find an empty subscriber map and drop the message. The forwarder sends a `native_push` tunnel message; the hub's `on_node_message` re-dispatches via the hub's own `_push_to_native_clients` with the session id qualified.
+
+**Key files**: `server/main.py` (self-node spawn + swap, voice warmup), `vibr8_core/node_client.py` (SwappableNodeClient + QualifyingNodeClient + NOT_READY), `vibr8_core/node_operations.py` (canonical per-node ops), `vibr8_node/node_agent.py` (hub-proxy + native-push hooks), `server/node_tunnel.py`, `server/node_registry.py`, `install-node.sh`, `Dockerfile.node*`
 
 ### Computer-Use Pipeline
 
@@ -147,6 +151,20 @@ UITarsAgent (Act/Watch modes, server/ui_tars_agent.py)
 **Execution modes**: AUTO (immediate), CONFIRM (ask user), GATED (auto if parsed cleanly, else confirm).
 
 **Coordinates**: UI-TARS normalizes to 1000×1000 grid → `execute_action()` converts to 0.0-1.0 fractions → target converts to absolute pixels.
+
+### Permission flow
+
+CLI emits a `control_request` (e.g. `tool=Bash`). The bridge stores it in `session.pending_permissions[request_id]`, broadcasts `permission_request` to browsers, pushes to native clients, and notifies Ring0 via a `waiting_for_permission` state change.
+
+**Approval paths**:
+- **Browser**: dismiss button → `permission_response` over WS → `_handle_permission_response` pops pending, sends `control_response` to CLI, broadcasts `permission_cancelled`. For remote sessions the control_response goes via tunnel as a `cli_input`.
+- **Ring0 MCP**: `mcp__vibr8__respond_to_permission` → `POST /api/ring0/respond-permission` → `TunneledSessionRouter.respond_permission` → tunnel command `respond_permission`. **Wire field is `permissionRequestId`, not `requestId`** — `NodeTunnel.send_command` reserves `requestId` for its own correlation token. Using `requestId` for the permission id causes silent failure: tunnel overwrites it, dispatcher drops it, control_response goes out with `request_id=""` and the CLI ignores it. See commit `f04da6c`.
+
+**Stuck-loop detection** (`WsBridge._record_perm_retry`): identical `(tool_name, JSON-stringified input)` payloads within a 5-minute window count up; at threshold 3 a WARNING fires (`[ws-bridge] STUCK PERMISSION LOOP …`). Logging only — no auto-deny. Typical cause: the agent retries an Edit whose `old_string` no longer matches because a prior approval already applied the change.
+
+**Frontend banner dedupe** (`web/src/store.ts:addPermission`): an incoming `permission_request` with the same `(tool_name, input)` as an existing pending entry replaces it under the new `request_id` and bumps `retryCount`. `PermissionBanner` shows a `retry ×N` chip so the user can tell a re-emit from a genuinely new prompt.
+
+**Permission modes**: `bypassPermissions` ("Auto", matches Claude CLI's own label), `acceptEdits`, `plan`. The Composer footer has a 3-way popover picker for all three modes; Shift+Tab cycles Auto → Accept Edits → Plan → Auto. `server/routes.py:_ALLOWED_SESSION_MODES = {"plan", "acceptEdits", "bypassPermissions"}` accepts all three for in-session switches. HomePage's mode dropdown (new sessions) is sourced from `CLAUDE_MODES` in `web/src/utils/backends.ts`.
 
 ### Pen System (`server/ws_bridge.py`)
 
@@ -177,7 +195,18 @@ Guard word **"vibr8"** (or **"vibrate"**) triggers commands only when followed b
 
 **Ring0 routing:** When Ring0 is enabled, all voice input routes to Ring0 instead of the active session. The target node is the originating client's per-client active node. If that's a remote node, voice transcripts are forwarded via its `ring0_input` tunnel command; if it's the self-node, they go via `local_node_ops.ring0_input`. Falls back to the self-node if the per-client choice is unset or the chosen remote is offline.
 
+**Voice pipeline warmup**: `server/stt.warmup_voice_models()` is spawned as a background task at server startup (see `server/main.py`). It runs one inference each against a 1s silence buffer through Whisper-large-v3 (+ Silero VAD + EOU), SpeechBrain ECAPA (speaker gate), WeSpeaker ECAPA (TSE conditioning), and the BSRNN TSE — all via `asyncio.to_thread` so the event loop stays responsive. Without warmup, the first utterance after voice-enable takes 9–13s end-to-end; with it, ~0.5–1s. Each stage is independently try/excepted so missing checkpoints don't kill the rest.
+
 See `README.md` for full voice command documentation.
+
+### Streaming assistant messages (`vibr8_core/ws_bridge.py` + `web/src/ws.ts`)
+
+The Claude CLI sometimes emits multiple `assistant` events for the same `msg_id` during a turn — first an empty thinking placeholder, later events carrying the real text or tool_use. The bridge stamps `update: true` on the wire when `is_update` (same msg_id seen before, not a replay).
+
+**Frontend handling**:
+- `update: true` → `store.replaceMessage(sessionId, chatMsg)` which **merges** contentBlocks (tool_use deduped by `id`, tool_result by `tool_use_id`, thinking by `signature`; text always appended). Naively replacing would drop earlier blocks since each event's `content` array carries ONLY the new block, not the cumulative message.
+- `update: true` does NOT flip session status to "running" (the result event already settled it to "idle"; the late backfill must not undo that).
+- ContentBlockRenderer suppresses thinking blocks with empty text — and `AssistantMessage` returns `null` when no content is renderable — so the empty thinking placeholder doesn't claim a row.
 
 ## Conventions
 
@@ -187,9 +216,29 @@ See `README.md` for full voice command documentation.
 - **Package managers**: `uv` for Python, `bun` for frontend
 - **pytest-asyncio**: `asyncio_mode = "auto"` — async test functions are auto-detected
 
+## Data layout (`~/.vibr8/`)
+
+- `sessions/{session_id}.json` — per-session persisted state (state, messageHistory, pendingPermissions, pendingMessages). Atomic writes with debouncing.
+- `archives/{session_id}/{YYYY-MM-DD}.jsonl` — overflow message history past the in-memory cap (500 messages).
+- `ring0.json` — Ring0 enable/disable flag, persisted session_id (so the CLI conversation resumes), model selection, backend type.
+- `ring0/` — Ring0 CLI cwd (CLAUDE.md / AGENTS.md system prompt, mcp.json config).
+- `nodes.json` — registered remote nodes (api key hashes, capabilities, hub name). Does NOT persist `activeNodeId` (per-client active node lives in `HubBrowserBridge._client_active_nodes` in memory only).
+- `envs/{slug}.json` — per-node environment variable bundles.
+- `artifacts/` + `artifacts.json` — saved content artifacts.
+- `clients.json` — browser-client metadata (names, device info, lastSeen). Used by Ring0 MCP `get_active_clients`.
+- `device-tokens.json`, `users.json`, `secret.key`, `ice-servers.json` — auth + WebRTC config.
+- `data/voice/logs/{username}/` — voice recordings (one WAV per segment, index.jsonl). CLI replay tool: `uv run python -m server.voice_replay --user X --list`.
+
+**Remote node data lives under `~/.vibr8-node/{node-name}/`** with the same shape (`sessions/`, `ring0/`, `ring0.json`). The hub's self-node uses `~/.vibr8/` directly via the `VIBR8_SELF_NODE_DATA_DIR` env var.
+
 ## Environment
 
 - `PORT` (default 3456) — Backend server port
 - `NODE_ENV=production` — Enables serving built frontend from `web/dist/`
 - `OPENAI_API_KEY` — Required for TTS
+- `VIBR8_DISABLE_SELF_NODE=1` — Fall back to legacy in-process path (no self-node subprocess; hub directly owns session state)
+- `VIBR8_SELF_NODE_DATA_DIR` — Override the self-node's data dir (defaults to `~/.vibr8/`). Parallel test hubs use this to avoid colliding with a live install.
+- `VIBR8_SELF_NODE_PORT` (default 3459) — Self-node's local HTTP port (loopback only)
+- `VIBR8_LOG_FILE` — Log file path (default `server.log` at repo root)
+- `VIBR8_ICE_SERVERS` — JSON-encoded ICE server list; otherwise read from `~/.vibr8/ice-servers.json`
 - Optional TLS: place `key.pem` and `cert.pem` in `certs/` for HTTPS

@@ -7,6 +7,18 @@ import { ShieldIcon } from "./ShieldIcon.js";
 
 let idCounter = 0;
 
+interface SessionMode {
+  value: "bypassPermissions" | "acceptEdits" | "plan";
+  label: string;
+  description: string;
+}
+
+const SESSION_MODES: SessionMode[] = [
+  { value: "bypassPermissions", label: "Auto", description: "Auto-approve all tool use" },
+  { value: "acceptEdits", label: "Accept Edits", description: "Auto-approve edits, prompt for shell" },
+  { value: "plan", label: "Plan", description: "Plan only, no tool use" },
+];
+
 interface FileAttachment {
   name: string;
   base64: string;
@@ -38,15 +50,16 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashMenuIndex, setSlashMenuIndex] = useState(0);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
+  const modeMenuRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const cliConnected = useStore((s) => s.cliConnected);
   const sessionData = useStore((s) => s.sessions.get(sessionId));
-  const previousMode = useStore((s) => s.previousPermissionMode.get(sessionId) || "acceptEdits");
   const activeNodeId = useStore((s) => s.activeNodeId);
 
   const isConnected = cliConnected.get(sessionId) ?? false;
@@ -64,6 +77,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
   }, [pendingFocus, isConnected]);
   const currentMode = sessionData?.permissionMode || "acceptEdits";
   const isPlan = currentMode === "plan";
+  const isAuto = currentMode === "bypassPermissions";
+  const currentModeInfo = SESSION_MODES.find((m) => m.value === currentMode) ?? SESSION_MODES[1];
   const audioMode = useStore((s) => s.audioMode);
   const isGuardEnabled = useStore((s) => s.guardEnabled);
 
@@ -132,6 +147,17 @@ export function Composer({ sessionId }: { sessionId: string }) {
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [attachMenuOpen]);
+
+  useEffect(() => {
+    if (!modeMenuOpen) return;
+    function handleClick(e: MouseEvent) {
+      if (modeMenuRef.current && !modeMenuRef.current.contains(e.target as Node)) {
+        setModeMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [modeMenuOpen]);
 
   const selectCommand = useCallback((cmd: CommandItem) => {
     setText(`/${cmd.name} `);
@@ -219,7 +245,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
     if (e.key === "Tab" && e.shiftKey) {
       e.preventDefault();
-      toggleMode();
+      cycleMode();
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -272,18 +298,18 @@ export function Composer({ sessionId }: { sessionId: string }) {
     }
   }
 
-  function toggleMode() {
+  function selectMode(mode: SessionMode["value"]) {
     if (!isConnected) return;
-    const store = useStore.getState();
-    if (!isPlan) {
-      store.setPreviousPermissionMode(sessionId, currentMode);
-      sendToSession(sessionId, { type: "set_permission_mode", mode: "plan" });
-      store.updateSession(sessionId, { permissionMode: "plan" });
-    } else {
-      const restoreMode = previousMode || "acceptEdits";
-      sendToSession(sessionId, { type: "set_permission_mode", mode: restoreMode });
-      store.updateSession(sessionId, { permissionMode: restoreMode });
-    }
+    if (mode === currentMode) return;
+    sendToSession(sessionId, { type: "set_permission_mode", mode });
+    useStore.getState().updateSession(sessionId, { permissionMode: mode });
+  }
+
+  function cycleMode() {
+    if (!isConnected) return;
+    const idx = SESSION_MODES.findIndex((m) => m.value === currentMode);
+    const next = SESSION_MODES[(idx === -1 ? 0 : idx + 1) % SESSION_MODES.length];
+    selectMode(next.value);
   }
 
   const sessionStatus = useStore((s) => s.sessionStatus);
@@ -334,6 +360,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
         <div className={`relative bg-cc-input-bg border rounded-[14px] overflow-visible transition-colors ${
           isPlan
             ? "border-cc-primary/40"
+            : isAuto
+            ? "border-cc-warning/40"
             : "border-cc-border focus-within:border-cc-primary/30"
         }`}>
           {/* Slash command menu */}
@@ -434,32 +462,73 @@ export function Composer({ sessionId }: { sessionId: string }) {
 
           {/* Bottom toolbar */}
           <div className="flex items-center justify-between px-2.5 pb-2.5">
-            {/* Left: mode indicator */}
-            <button
-              onClick={toggleMode}
-              disabled={!isConnected}
-              className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] font-medium transition-all cursor-pointer select-none ${
-                !isConnected
-                  ? "opacity-30 cursor-not-allowed text-cc-muted"
-                  : isPlan
-                  ? "text-cc-primary hover:bg-cc-primary/10"
-                  : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
-              }`}
-              title="Toggle mode (Shift+Tab)"
-            >
-              {isPlan ? (
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                  <rect x="3" y="3" width="3.5" height="10" rx="0.75" />
-                  <rect x="9.5" y="3" width="3.5" height="10" rx="0.75" />
+            {/* Left: mode picker */}
+            <div className="relative" ref={modeMenuRef}>
+              <button
+                onClick={() => setModeMenuOpen((v) => !v)}
+                disabled={!isConnected}
+                className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] font-medium transition-all cursor-pointer select-none ${
+                  !isConnected
+                    ? "opacity-30 cursor-not-allowed text-cc-muted"
+                    : isAuto
+                    ? "text-cc-warning hover:bg-cc-warning/10"
+                    : isPlan
+                    ? "text-cc-primary hover:bg-cc-primary/10"
+                    : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
+                }`}
+                title="Switch mode (Shift+Tab cycles)"
+              >
+                {isAuto ? (
+                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                    <path d="M8.5 1.5L3 9h3.5l-1 5.5L11 7H7.5l1-5.5z" />
+                  </svg>
+                ) : isPlan ? (
+                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                    <rect x="3" y="3" width="3.5" height="10" rx="0.75" />
+                    <rect x="9.5" y="3" width="3.5" height="10" rx="0.75" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                    <path d="M2.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                    <path d="M8.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                  </svg>
+                )}
+                <span>{currentModeInfo.label.toLowerCase()}</span>
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 opacity-50">
+                  <path d="M4 6l4 4 4-4" />
                 </svg>
-              ) : (
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
-                  <path d="M2.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-                  <path d="M8.5 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-                </svg>
+              </button>
+              {modeMenuOpen && (
+                <div className="absolute left-0 bottom-full mb-1 w-52 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-20 py-1 overflow-hidden">
+                  {SESSION_MODES.map((m) => {
+                    const active = m.value === currentMode;
+                    return (
+                      <button
+                        key={m.value}
+                        onClick={() => { selectMode(m.value); setModeMenuOpen(false); }}
+                        className={`w-full px-3 py-2 text-left hover:bg-cc-hover transition-colors cursor-pointer ${
+                          active ? "bg-cc-hover/40" : ""
+                        }`}
+                      >
+                        <div className={`text-[12px] font-medium ${
+                          active
+                            ? m.value === "bypassPermissions"
+                              ? "text-cc-warning"
+                              : m.value === "plan"
+                              ? "text-cc-primary"
+                              : "text-cc-fg"
+                            : "text-cc-fg"
+                        }`}>{m.label}</div>
+                        <div className="text-[10px] text-cc-muted mt-0.5">{m.description}</div>
+                      </button>
+                    );
+                  })}
+                  <div className="border-t border-cc-border mt-1 pt-1 px-3 pb-1 text-[10px] text-cc-muted">
+                    Shift+Tab to cycle
+                  </div>
+                </div>
               )}
-              <span>{isPlan ? "plan mode" : "accept edits"}</span>
-            </button>
+            </div>
 
             {/* Right: attach + send/stop */}
             <div className="flex items-center gap-1">

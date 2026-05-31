@@ -56,7 +56,7 @@ export const CODEX_MODELS: ModelOption[] = [
 ];
 
 export const CLAUDE_MODES: ModeOption[] = [
-  { value: "bypassPermissions", label: "Agent" },
+  { value: "bypassPermissions", label: "Auto" },
   { value: "plan", label: "Plan" },
 ];
 

@@ -1958,7 +1958,7 @@ def create_routes(
             await hub_browser_bridge.broadcast_name_update(resolved, name, user_renamed=True)
         return web.json_response({"ok": True, "sessionId": resolved, "name": name})
 
-    _ALLOWED_SESSION_MODES = {"plan", "acceptEdits"}
+    _ALLOWED_SESSION_MODES = {"plan", "acceptEdits", "bypassPermissions"}
 
     @routes.post("/api/ring0/set-session-mode")
     async def ring0_set_session_mode(request: web.Request) -> web.Response:
