@@ -1028,6 +1028,38 @@ class TestNodeTokenEndpoints:
         assert records[-1].path == "/api/nodes/register"
         assert records[-1].ip
 
+    async def test_register_node_rate_limit_trusts_forwarded_for_when_enabled(
+        self,
+        app,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("VIBR8_TRUST_PROXY", "1")
+
+        async with TestClient(TestServer(app)) as client:
+            for i in range(10):
+                resp = await client.post(
+                    "/api/nodes/register",
+                    json={
+                        "name": f"probe-{i}",
+                        "apiKey": "sk-node-unissued",
+                        "capabilities": {},
+                    },
+                    headers={"X-Forwarded-For": "203.0.113.10"},
+                )
+                assert resp.status == 403
+
+            resp = await client.post(
+                "/api/nodes/register",
+                json={
+                    "name": "probe-other-ip",
+                    "apiKey": "sk-node-unissued",
+                    "capabilities": {},
+                },
+                headers={"X-Forwarded-For": "203.0.113.11"},
+            )
+
+        assert resp.status == 403
+
     async def test_register_node_success_emits_audit_log(self, app, registry, caplog):
         caplog.set_level(logging.INFO)
         raw_key, entry = registry.generate_api_key("new-node", username="alice")
@@ -1217,3 +1249,29 @@ class TestNodeWebSocketAuth:
         records = _audit_records(caplog, "node_ws_rate_limited")
         assert records[-1].node_id_prefix == "missing-"
         assert records[-1].ip
+
+    async def test_node_ws_rate_limit_trusts_forwarded_for_when_enabled(
+        self,
+        app,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("VIBR8_TRUST_PROXY", "1")
+
+        async with TestClient(TestServer(app)) as client:
+            for _ in range(10):
+                ws = await client.ws_connect(
+                    "/ws/node/missing-node?apiKey=sk-node-nope",
+                    headers={"X-Forwarded-For": "203.0.113.10"},
+                )
+                msg = await ws.receive(timeout=1.0)
+                assert msg.type == web.WSMsgType.CLOSE
+                assert ws.close_code == 4001
+
+            ws = await client.ws_connect(
+                "/ws/node/missing-node?apiKey=sk-node-nope",
+                headers={"X-Forwarded-For": "203.0.113.11"},
+            )
+            msg = await ws.receive(timeout=1.0)
+
+        assert msg.type == web.WSMsgType.CLOSE
+        assert ws.close_code == 4001

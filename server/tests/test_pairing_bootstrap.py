@@ -189,6 +189,58 @@ async def test_pairing_request_route_returns_429_after_rate_limit(app, caplog) -
     assert records[-1].path == "/api/pairing/request"
 
 
+async def test_pairing_request_route_trusts_forwarded_for_when_enabled(
+    app,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VIBR8_TRUST_PROXY", "1")
+
+    async with TestClient(TestServer(app)) as client:
+        for _ in range(auth_module.PAIRING_RATE_LIMIT):
+            resp = await client.post(
+                "/api/pairing/request",
+                json={"type": "native"},
+                headers={"X-Forwarded-For": "203.0.113.10"},
+            )
+            assert resp.status == 200
+
+        resp = await client.post(
+            "/api/pairing/request",
+            json={"type": "native"},
+            headers={"X-Forwarded-For": "203.0.113.11"},
+        )
+
+    assert resp.status == 200
+
+
+async def test_pairing_request_route_buckets_trusted_ipv6_64(
+    app,
+    monkeypatch,
+    caplog,
+) -> None:
+    monkeypatch.setenv("VIBR8_TRUST_PROXY", "1")
+    caplog.set_level(logging.WARNING)
+
+    async with TestClient(TestServer(app)) as client:
+        for index in range(auth_module.PAIRING_RATE_LIMIT):
+            resp = await client.post(
+                "/api/pairing/request",
+                json={"type": "native"},
+                headers={"X-Forwarded-For": f"2001:db8:abcd:1234::{index + 1}"},
+            )
+            assert resp.status == 200
+
+        limited = await client.post(
+            "/api/pairing/request",
+            json={"type": "native"},
+            headers={"X-Forwarded-For": "2001:db8:abcd:1234::feed"},
+        )
+
+    assert limited.status == 429
+    records = _audit_records(caplog, "pairing_rate_limited")
+    assert records[-1].ip == "2001:db8:abcd:1234::/64"
+
+
 async def test_pairing_status_route_returns_429_after_failed_lookups(app, caplog) -> None:
     caplog.set_level(logging.WARNING)
     async with TestClient(TestServer(app)) as client:
