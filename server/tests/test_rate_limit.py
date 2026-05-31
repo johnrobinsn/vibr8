@@ -41,3 +41,30 @@ def test_get_client_rate_limit_key_uses_first_forwarded_for_when_trusted() -> No
         get_client_rate_limit_key(request, environ={"VIBR8_TRUST_PROXY": "1"})
         == "203.0.113.10"
     )
+
+
+def test_get_client_rate_limit_key_uses_forwarded_header_when_trusted() -> None:
+    request = FakeRequest(
+        remote="127.0.0.1",
+        headers={"Forwarded": 'for="[2001:db8:abcd:1234::1]:443";proto=https'},
+    )
+
+    assert (
+        get_client_rate_limit_key(request, environ={"VIBR8_TRUST_PROXY": "1"})
+        == "2001:db8:abcd:1234::/64"
+    )
+
+
+def test_get_client_rate_limit_key_skips_malformed_trusted_headers() -> None:
+    request = FakeRequest(
+        remote="127.0.0.1",
+        headers={
+            "X-Forwarded-For": "not-an-ip",
+            "Forwarded": 'for="_hidden";proto=https',
+        },
+    )
+
+    assert (
+        get_client_rate_limit_key(request, environ={"VIBR8_TRUST_PROXY": "1"})
+        == "127.0.0.1"
+    )
