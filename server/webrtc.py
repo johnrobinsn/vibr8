@@ -891,7 +891,7 @@ class WebRTCManager:
                                                node.name, bool(node.tunnel), node.status)
 
                     # Local Ring0 — in Option A this is the self-node, reached via local_node_ops.
-                    # In legacy in-process mode (VIBR8_DISABLE_SELF_NODE=1) this falls through
+                    # In explicit legacy in-process mode this falls through
                     # to the ws_bridge path below.
                     if self._local_node_ops:
                         try:

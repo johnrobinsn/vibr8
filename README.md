@@ -463,6 +463,7 @@ vibr8 stores configuration in `~/.vibr8/`:
 | `VIBR8_ALLOW_NO_AUTH` | — | Required to start without `~/.vibr8/users.json`; intended for local development only |
 | `VIBR8_ALLOW_PUBLIC_NO_AUTH` | — | Also required to bind a no-auth server to a non-loopback host |
 | `VIBR8_TRUST_PROXY` | — | Set to `1` only behind a trusted reverse proxy so rate limits use `X-Forwarded-For`/`Forwarded`; IPv6 clients are bucketed by `/64` |
+| `VIBR8_DISABLE_SELF_NODE` + `VIBR8_ALLOW_LEGACY_IN_PROCESS` | — | Set both to `1` only for isolated development/tests that need the legacy in-process node path |
 | `NODE_ENV` | — | Set to `production` to serve built frontend |
 | `VIBR8_TTS_ENGINE` | `kokoro` | TTS engine: `kokoro` (local) or `openai` (cloud) |
 | `VIBR8_TTS_VOICE` | `af_sarah` | TTS voice name |
