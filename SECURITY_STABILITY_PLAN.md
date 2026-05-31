@@ -59,6 +59,7 @@ Goal: make accidental Internet exposure without auth impossible, while preservin
   - registration/tunnel rate limiting **Done for public `/api/nodes/register` and `/ws/node/{node_id}` per-IP throttling with audit logging.**
   - token binding auditability **Done with `node_token_bound` events on first registration and token rotation.**
   - registry mutation concurrency **Done for node/token registration, revocation, validation, and status updates.**
+  - proxy-aware rate-limit identity **Done with opt-in `VIBR8_TRUST_PROXY=1` X-Forwarded-For handling and IPv6 /64 bucketing.**
   - failed-auth logging **Pinned for registration rejection and node WebSocket tunnel rejection.**
   - reconnect behavior after revocation **Done for token-bound nodes; revocation closes bound online node WebSockets and blocks reconnect.**
 

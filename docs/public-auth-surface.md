@@ -77,12 +77,18 @@ All other `/api/` and `/ws/` paths require a valid cookie, bearer token, or
    persist the issuing token id; revocation marks matching online nodes
    offline and blocks reconnect through their stored node credential. Public
    registration and node WebSocket tunnel authentication are rate-limited per
-   IP and emit audit events when throttled. Issued tokens bind to one node
-   identity on first registration or explicit token rotation, emit
-   `node_token_bound` audit events, and prevent cross-node token reuse. Legacy
-   nodes without a persisted token id retain stored-key behavior until
-   re-registered; on first re-registration with an issued token after upgrade,
-   they emit a `node_token_bound` event as they pick up a real binding.
+   client key and emit audit events when throttled. When
+   `VIBR8_TRUST_PROXY=1` is set, rate limits use the first valid address from
+   `X-Forwarded-For` or `Forwarded`; otherwise they use `request.remote`.
+   Treat this as a deployment-wide trust boundary: direct client access must
+   be blocked or trusted because clients can forge forwarding headers. IPv6
+   clients are bucketed by `/64`; IPv4 clients sharing a NAT share the same
+   rate-limit bucket. Issued tokens bind to one node identity on first
+   registration or explicit token rotation, emit `node_token_bound` audit
+   events, and prevent cross-node token reuse. Legacy nodes without a
+   persisted token id retain stored-key behavior until re-registered; on first
+   re-registration with an issued token after upgrade, they emit a
+   `node_token_bound` event as they pick up a real binding.
    Unregistering a node does not free a previously bound token for reuse;
    operators should issue a new token for a replacement node. Pre-migration
    ownerless keys are visible and revocable by any authenticated user so

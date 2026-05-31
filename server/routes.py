@@ -19,7 +19,7 @@ from vibr8_core import artifacts, env_manager, session_names
 from vibr8_core import git_utils
 from server import speaker_fingerprints, voice_profiles, voice_logger
 from server.usage_limits import get_usage_limits
-from server.rate_limit import check_rate_limit
+from server.rate_limit import check_rate_limit, get_client_rate_limit_key
 from vibr8_core.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
 from server.session_registry import LOCAL_NODE_ID
 from vibr8_core.worktree_tracker import WorktreeTracker, WorktreeMapping
@@ -307,7 +307,7 @@ def create_routes(
         """Public — device requests a pairing code to display."""
         if not auth_manager or not auth_manager.enabled:
             return web.json_response({"error": "Auth not configured"}, status=501)
-        ip = request.remote or "unknown"
+        ip = get_client_rate_limit_key(request)
         if auth_manager.check_pairing_rate_limit(ip):
             logger.warning(
                 "[audit] pairing request rate limited path=/api/pairing/request ip=%s",
@@ -350,7 +350,7 @@ def create_routes(
             return web.json_response({"error": "code and name are required"}, status=400)
         result = auth_manager.confirm_pairing(code, username, name)
         if not result:
-            ip = request.remote or "unknown"
+            ip = get_client_rate_limit_key(request)
             logger.warning(
                 "[audit] pairing confirmation rejected path=/api/pairing/confirm ip=%s user=%s",
                 ip,
@@ -404,7 +404,7 @@ def create_routes(
         """Public — device polls to check if pairing was confirmed."""
         if not auth_manager or not auth_manager.enabled:
             return web.json_response({"error": "Auth not configured"}, status=501)
-        ip = request.remote or "unknown"
+        ip = get_client_rate_limit_key(request)
         if auth_manager.check_pairing_brute_force(ip):
             logger.warning(
                 "[audit] pairing status brute-force cooldown path=/api/pairing/status ip=%s",
@@ -2640,7 +2640,7 @@ def create_routes(
         client_id = body.get("clientId", "")
         if not client_id:
             return web.json_response({"error": "clientId required"}, status=400)
-        ip = request.remote or "unknown"
+        ip = get_client_rate_limit_key(request)
         if auth_manager.check_pairing_rate_limit(ip):
             logger.warning(
                 "[audit] pairing request rate limited path=/api/second-screen/pair-code ip=%s",
@@ -2824,7 +2824,7 @@ def create_routes(
         """Register a remote node (API-key auth, not cookie auth)."""
         if node_registry is None:
             return web.json_response({"error": "Node registry not available"}, status=503)
-        ip = request.remote or "unknown"
+        ip = get_client_rate_limit_key(request)
         if check_rate_limit(
             node_register_rate,
             ip,

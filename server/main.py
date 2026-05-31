@@ -23,7 +23,7 @@ from vibr8_core.ws_bridge import WsBridge
 from server.auto_namer import generate_session_title, AutoNamerOptions
 from vibr8_core import session_names
 from server.routes import create_routes
-from server.rate_limit import check_rate_limit
+from server.rate_limit import check_rate_limit, get_client_rate_limit_key
 from server.terminal import TerminalManager
 
 try:
@@ -351,7 +351,7 @@ async def handle_terminal_ws(request: web.Request) -> web.WebSocketResponse:
 async def handle_node_ws(request: web.Request) -> web.StreamResponse:
     """Handle persistent WebSocket tunnel from a remote vibr8-node."""
     node_id = request.match_info["node_id"]
-    ip = request.remote or "unknown"
+    ip = get_client_rate_limit_key(request)
     node_ws_rate = request.app[NODE_WS_RATE_KEY]
     if check_rate_limit(
         node_ws_rate,

@@ -80,6 +80,12 @@ server {
 }
 ```
 
+If vibr8 is behind this trusted nginx proxy, set `VIBR8_TRUST_PROXY=1` on the
+vibr8 server so pairing and node-credential rate limits use the original
+client address from `X-Forwarded-For` or `Forwarded` instead of the local
+tunnel/proxy address. Only enable this when all direct access to vibr8 is
+blocked or otherwise trusted; untrusted clients can forge forwarding headers.
+
 ```bash
 sudo ln -s /etc/nginx/sites-available/vibr8 /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
