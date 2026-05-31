@@ -172,6 +172,46 @@ def resolve_self_node_enabled(environ: Mapping[str, str] = os.environ) -> bool:
     return False
 
 
+async def run_legacy_session_startup_sync(
+    *,
+    use_self_node: bool,
+    launcher: object,
+    ring0_manager: object | None,
+    session_registry: object,
+    spawn_task,
+) -> None:
+    """Run startup work for the legacy in-process session owner."""
+    if use_self_node:
+        logger.info("[server] Self-node mode — skipping legacy launcher session sync")
+        return
+
+    # Reconnection watchdog: give restored CLI processes time to reconnect.
+    starting = launcher.get_starting_sessions()
+    if starting:
+        logger.info(
+            f"[server] Waiting {RECONNECT_GRACE_S}s for "
+            f"{len(starting)} CLI process(es) to reconnect..."
+        )
+
+        async def _watchdog() -> None:
+            await asyncio.sleep(RECONNECT_GRACE_S)
+            stale = launcher.get_starting_sessions()
+            for info in stale:
+                if info.archived:
+                    continue
+                logger.info(
+                    f"[server] CLI for session {info.sessionId} "
+                    "did not reconnect, relaunching..."
+                )
+                await launcher.relaunch(info.sessionId)
+
+        spawn_task(_watchdog())
+
+    # Populate session registry from launcher's restored sessions.
+    r0_id = ring0_manager.session_id if ring0_manager else ""
+    await session_registry.sync_from_launcher(r0_id)
+
+
 # ── WebSocket route handlers ─────────────────────────────────────────────────
 
 
@@ -1027,31 +1067,13 @@ def create_app() -> web.Application:
 
         loop.set_exception_handler(_ice_exception_handler)
 
-        # Reconnection watchdog: give restored CLI processes time to reconnect
-        starting = launcher.get_starting_sessions()
-        if starting:
-            logger.info(
-                f"[server] Waiting {RECONNECT_GRACE_S}s for "
-                f"{len(starting)} CLI process(es) to reconnect..."
-            )
-
-            async def _watchdog() -> None:
-                await asyncio.sleep(RECONNECT_GRACE_S)
-                stale = launcher.get_starting_sessions()
-                for info in stale:
-                    if info.archived:
-                        continue
-                    logger.info(
-                        f"[server] CLI for session {info.sessionId} "
-                        "did not reconnect, relaunching..."
-                    )
-                    await launcher.relaunch(info.sessionId)
-
-            spawn(_watchdog())
-
-        # Populate session registry from launcher's restored sessions
-        r0_id = ring0_manager.session_id if ring0_manager else ""
-        await session_registry.sync_from_launcher(r0_id)
+        await run_legacy_session_startup_sync(
+            use_self_node=_use_self_node,
+            launcher=launcher,
+            ring0_manager=ring0_manager,
+            session_registry=session_registry,
+            spawn_task=spawn,
+        )
 
         # Periodic heartbeat checker for remote nodes
         async def _heartbeat_checker() -> None:

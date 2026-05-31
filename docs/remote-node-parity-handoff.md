@@ -283,13 +283,15 @@ wirings, `ws_bridge.set_*` plumbing) that fire only in legacy
 mode.
 
 **Optional remaining purity work (no user-visible impact):**
-1. Skip the dormant event-callback wirings (`on_cli_session_id`,
+1. Skip the dormant legacy launcher reconnect watchdog and
+   session-registry sync in default self-node mode. **Done.**
+2. Skip the dormant event-callback wirings (`on_cli_session_id`,
    `on_codex_adapter_created`, etc.) and `ws_bridge.set_*` calls when
    in self-node mode. Lines 461-512 in `server/main.py`.
-2. Make in-process `Ring0Manager`/`CliLauncher`/`SessionStore`
+3. Make in-process `Ring0Manager`/`CliLauncher`/`SessionStore`
    construction conditional on the explicit legacy in-process fallback.
    Currently they're always constructed but dormant in self-node mode.
-3. Remove the two-flag legacy in-process fallback entirely. Single code
+4. Remove the two-flag legacy in-process fallback entirely. Single code
    path. Cost: no fallback if self-node fails to spawn at startup.
 
 None of these change user-visible behavior. They're cleanup that can
