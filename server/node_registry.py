@@ -130,7 +130,11 @@ class RegisteredNode:
 
 
 class NodeRegistry:
-    """Central registry of all nodes, including the local hub node."""
+    """Central registry of all nodes, including the local hub node.
+
+    The in-memory lock is per instance; production should use one registry
+    instance per process so node/token mutations serialize around one state.
+    """
 
     LOCAL_NODE_ID = "local"
 
@@ -409,6 +413,7 @@ class NodeRegistry:
     # ── Persistence ───────────────────────────────────────────────────────
 
     def _load(self) -> None:
+        """Load persisted state during initialization before concurrent use."""
         if not NODES_FILE.exists():
             return
         try:
