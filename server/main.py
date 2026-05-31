@@ -163,6 +163,11 @@ def resolve_self_node_enabled(environ: Mapping[str, str] = os.environ) -> bool:
         "[server] %s=1 and %s=1; using legacy in-process node path",
         DISABLE_SELF_NODE_ENV,
         ALLOW_LEGACY_IN_PROCESS_ENV,
+        extra={
+            "audit_event": "legacy_in_process_mode_enabled",
+            "env": DISABLE_SELF_NODE_ENV,
+            "allow_env": ALLOW_LEGACY_IN_PROCESS_ENV,
+        },
     )
     return False
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from server.main import resolve_bind_host, resolve_self_node_enabled
@@ -62,12 +64,51 @@ def test_disabling_self_node_requires_explicit_legacy_override() -> None:
         resolve_self_node_enabled({"VIBR8_DISABLE_SELF_NODE": "1"})
 
 
-def test_legacy_in_process_mode_requires_two_explicit_flags() -> None:
+def test_legacy_in_process_mode_requires_two_explicit_flags(caplog) -> None:
+    caplog.set_level(logging.WARNING)
+
     assert (
         resolve_self_node_enabled(
             {
                 "VIBR8_DISABLE_SELF_NODE": "1",
                 "VIBR8_ALLOW_LEGACY_IN_PROCESS": "1",
+            }
+        )
+        is False
+    )
+    assert "legacy in-process node path" in caplog.text
+    records = [
+        record for record in caplog.records
+        if getattr(record, "audit_event", "") == "legacy_in_process_mode_enabled"
+    ]
+    assert records[-1].env == "VIBR8_DISABLE_SELF_NODE"
+    assert records[-1].allow_env == "VIBR8_ALLOW_LEGACY_IN_PROCESS"
+
+
+def test_self_node_disable_flag_uses_env_truthiness() -> None:
+    assert (
+        resolve_self_node_enabled(
+            {
+                "VIBR8_DISABLE_SELF_NODE": "0",
+                "VIBR8_ALLOW_LEGACY_IN_PROCESS": "1",
+            }
+        )
+        is True
+    )
+    assert (
+        resolve_self_node_enabled(
+            {
+                "VIBR8_DISABLE_SELF_NODE": "invalid",
+                "VIBR8_ALLOW_LEGACY_IN_PROCESS": "1",
+            }
+        )
+        is True
+    )
+    assert (
+        resolve_self_node_enabled(
+            {
+                "VIBR8_DISABLE_SELF_NODE": "yes",
+                "VIBR8_ALLOW_LEGACY_IN_PROCESS": "true",
             }
         )
         is False
