@@ -91,7 +91,7 @@ Goal: remove dual local execution paths so local and remote nodes share one debu
 - Make self-node path mandatory in normal operation.
 - Remove or quarantine `VIBR8_DISABLE_SELF_NODE` legacy mode. **Quarantined behind a second explicit `VIBR8_ALLOW_LEGACY_IN_PROCESS=1` development/test override.**
 - Remove the legacy in-process fallback entirely after self-node smoke/e2e coverage no longer depends on it and one release cycle passes without needing the override for local recovery.
-- Move remaining hub-owned execution behavior behind node operations or delete it after parity.
+- Move remaining hub-owned execution behavior behind node operations or delete it after parity. **Legacy launcher reconnect and session-registry startup sync are skipped in default self-node mode; retained behind the legacy in-process override.**
 - Ensure local self-node and remote nodes use the same interface contract for:
   - session create/list/kill/relaunch
   - file operations
