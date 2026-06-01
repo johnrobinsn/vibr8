@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -247,7 +248,72 @@ async def test_browser_close_ignores_non_tracked_ws() -> None:
     assert bridge._client_sessions[client_id] == session_id
 
 
-# ── 5. Adapter backends must request a relaunch when queuing ────────────────
+# ── 5. Dead self-node sessions must request relaunch on browser connect ─────
+
+
+async def test_self_node_remote_session_requests_relaunch_on_dead_backend() -> None:
+    """Self-node sessions are remote-qualified on the hub bridge.
+
+    Browser reconnect to a dead self-node session must still request a
+    relaunch; otherwise prompts can pile up after the node-side adapter exits.
+    """
+    bridge = WsBridge()
+    node_id = "self-node"
+    raw_session_id = "sess-codex"
+    session_id = f"{node_id}:{raw_session_id}"
+    bridge.set_self_node_id(node_id)
+    bridge._node_registry = MagicMock()
+    bridge._node_registry.get_node.return_value = SimpleNamespace(
+        tunnel=SimpleNamespace(connected=False),
+    )
+
+    fired_for: list[str] = []
+    bridge.on_cli_relaunch_needed_callback(fired_for.append)
+
+    await bridge.handle_browser_open(_fake_ws(), session_id, client_id="client-1")
+
+    assert fired_for == [session_id], (
+        "browser reconnect to a dead self-node-qualified session did not "
+        "request node-backed relaunch"
+    )
+
+
+async def test_remote_session_dead_backend_does_not_request_self_node_relaunch() -> None:
+    """Disconnected non-self remote nodes must not relaunch through self-node."""
+    bridge = WsBridge()
+    bridge.set_self_node_id("self-node")
+    session_id = "remote-node:sess-codex"
+    bridge._node_registry = MagicMock()
+    bridge._node_registry.get_node.return_value = SimpleNamespace(
+        tunnel=SimpleNamespace(connected=False),
+    )
+
+    fired_for: list[str] = []
+    bridge.on_cli_relaunch_needed_callback(fired_for.append)
+
+    await bridge.handle_browser_open(_fake_ws(), session_id, client_id="client-1")
+
+    assert fired_for == []
+
+
+async def test_remote_session_dead_backend_without_self_node_id_does_not_relaunch() -> None:
+    """Before self-node registration, qualified sessions remain non-relaunchable."""
+    bridge = WsBridge()
+    session_id = "self-node:sess-codex"
+    bridge._node_registry = MagicMock()
+    bridge._node_registry.get_node.return_value = SimpleNamespace(
+        tunnel=SimpleNamespace(connected=False),
+    )
+
+    fired_for: list[str] = []
+    bridge.on_cli_relaunch_needed_callback(fired_for.append)
+
+    await bridge.handle_browser_open(_fake_ws(), session_id, client_id="client-1")
+
+    assert fired_for == []
+
+
+# ── 6. Adapter backends must request a relaunch when queuing ────────────────
 
 
 from vibr8_core.ws_bridge import Session  # noqa: E402  (kept near the test)

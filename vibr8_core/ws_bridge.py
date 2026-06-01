@@ -97,6 +97,7 @@ class WsBridge:
         self._webrtc_manager: WebRTCManager | None = None
         self._ring0_manager: Any = None  # Ring0Manager (avoid circular import)
         self._node_registry: Any = None  # NodeRegistry (set via setter)
+        self._self_node_id: str = ""
         # _session_node_map removed: node identity is embedded in qualified session IDs
         # Format: "{node_id}:{raw_session_id}" for remote, raw id for local
         # Hook for vibr8-node: intercepts _broadcast_to_browsers for remote forwarding
@@ -368,6 +369,17 @@ class WsBridge:
 
     def set_node_registry(self, registry: Any) -> None:
         self._node_registry = registry
+
+    def set_self_node_id(self, node_id: str) -> None:
+        """Set the node id for the hub's loopback self-node."""
+        self._self_node_id = node_id
+
+    def _should_request_relaunch_for_dead_backend(self, session_id: str) -> bool:
+        """Return whether the hub callback can relaunch this dead backend."""
+        if not self._is_remote_session(session_id):
+            return True
+        node_id, _ = self.parse_qualified_id(session_id)
+        return bool(self._self_node_id and node_id == self._self_node_id)
 
     def set_task_scheduler(self, scheduler: Any) -> None:
         self._task_scheduler = scheduler
@@ -1187,7 +1199,10 @@ class WsBridge:
         if not backend_connected:
             logger.warning(f"[ws-bridge] Sending cli_disconnected to browser for session {session_id[:8]} (backend not connected)")
             await self._send_to_browser(ws, {"type": "cli_disconnected"})
-            if not self._is_remote_session(session_id) and self._on_cli_relaunch_needed:
+            if (
+                self._should_request_relaunch_for_dead_backend(session_id)
+                and self._on_cli_relaunch_needed
+            ):
                 logger.info(f"[ws-bridge] Browser connected but backend is dead for session {session_id}, requesting relaunch")
                 self._on_cli_relaunch_needed(session_id)
 
