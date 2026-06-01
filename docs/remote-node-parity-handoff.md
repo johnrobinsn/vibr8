@@ -287,7 +287,13 @@ mode.
    session-registry sync in default self-node mode. **Done.**
 2. Skip the dormant event-callback wirings (`on_cli_session_id`,
    `on_codex_adapter_created`, etc.) and `ws_bridge.set_*` calls when
-   in self-node mode. Lines 461-512 in `server/main.py`.
+   in self-node mode. Legacy in-process-only callback registration
+   (`on_computer_use_created` and `on_first_turn_completed`) is now
+   skipped in default self-node mode. The prompt relaunch callback
+   remains wired because queued prompts depend on it, but self-node mode
+   routes relaunch through node operations instead of the hub launcher.
+   Remaining `ws_bridge.set_*` calls need a more careful split because
+   some still support hub-owned browser/WebRTC/node routing.
 3. Make in-process `Ring0Manager`/`CliLauncher`/`SessionStore`
    construction conditional on the explicit legacy in-process fallback.
    Currently they're always constructed but dormant in self-node mode.
