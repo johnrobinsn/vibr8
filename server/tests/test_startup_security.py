@@ -12,6 +12,7 @@ from server.main import (
     resolve_bind_host,
     resolve_self_node_enabled,
     run_legacy_session_startup_sync,
+    wire_session_callbacks,
 )
 
 
@@ -183,3 +184,73 @@ async def test_legacy_mode_schedules_reconnect_watchdog_for_starting_sessions() 
     scheduled = spawn_task.call_args.args[0]
     assert hasattr(scheduled, "__await__")
     scheduled.close()
+
+
+def test_self_node_mode_only_wires_node_backed_relaunch_callback() -> None:
+    """Default self-node mode wires relaunch but skips hub-local callbacks."""
+    launcher = MagicMock()
+    ws_bridge = MagicMock()
+    on_cli_relaunch_needed = MagicMock()
+
+    wire_session_callbacks(
+        use_self_node=True,
+        launcher=launcher,
+        ws_bridge=ws_bridge,
+        has_computer_use=True,
+        on_computer_use_created=MagicMock(),
+        on_cli_relaunch_needed=on_cli_relaunch_needed,
+        on_first_turn_completed=MagicMock(),
+    )
+
+    launcher.on_computer_use_created.assert_not_called()
+    ws_bridge.on_cli_relaunch_needed_callback.assert_called_once_with(
+        on_cli_relaunch_needed
+    )
+    ws_bridge.on_first_turn_completed_callback.assert_not_called()
+
+
+def test_legacy_mode_wires_in_process_callbacks() -> None:
+    """Explicit legacy mode preserves hub-local launcher/session callbacks."""
+    launcher = MagicMock()
+    ws_bridge = MagicMock()
+    on_computer_use_created = MagicMock()
+    on_cli_relaunch_needed = MagicMock()
+    on_first_turn_completed = MagicMock()
+
+    wire_session_callbacks(
+        use_self_node=False,
+        launcher=launcher,
+        ws_bridge=ws_bridge,
+        has_computer_use=True,
+        on_computer_use_created=on_computer_use_created,
+        on_cli_relaunch_needed=on_cli_relaunch_needed,
+        on_first_turn_completed=on_first_turn_completed,
+    )
+
+    launcher.on_computer_use_created.assert_called_once_with(on_computer_use_created)
+    ws_bridge.on_cli_relaunch_needed_callback.assert_called_once_with(
+        on_cli_relaunch_needed
+    )
+    ws_bridge.on_first_turn_completed_callback.assert_called_once_with(
+        on_first_turn_completed
+    )
+
+
+def test_legacy_callback_wiring_respects_missing_computer_use() -> None:
+    """Legacy mode must not register the CU callback if CU support is absent."""
+    launcher = MagicMock()
+    ws_bridge = MagicMock()
+
+    wire_session_callbacks(
+        use_self_node=False,
+        launcher=launcher,
+        ws_bridge=ws_bridge,
+        has_computer_use=False,
+        on_computer_use_created=MagicMock(),
+        on_cli_relaunch_needed=MagicMock(),
+        on_first_turn_completed=MagicMock(),
+    )
+
+    launcher.on_computer_use_created.assert_not_called()
+    ws_bridge.on_cli_relaunch_needed_callback.assert_called_once()
+    ws_bridge.on_first_turn_completed_callback.assert_called_once()

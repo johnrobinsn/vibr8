@@ -213,6 +213,31 @@ async def run_legacy_session_startup_sync(
     await session_registry.sync_from_launcher(r0_id)
 
 
+def wire_session_callbacks(
+    *,
+    use_self_node: bool,
+    launcher: object,
+    ws_bridge: object,
+    has_computer_use: bool,
+    on_computer_use_created: Callable[[str, object], None],
+    on_cli_relaunch_needed: Callable[[str], None],
+    on_first_turn_completed: Callable[[str, str], None],
+) -> None:
+    """Wire session callbacks for the active execution mode."""
+    ws_bridge.on_cli_relaunch_needed_callback(on_cli_relaunch_needed)
+
+    if use_self_node:
+        logger.info(
+            "[server] Self-node mode — skipping legacy callback wiring except "
+            "node-backed relaunch"
+        )
+        return
+
+    if has_computer_use:
+        launcher.on_computer_use_created(on_computer_use_created)
+    ws_bridge.on_first_turn_completed_callback(on_first_turn_completed)
+
+
 # ── WebSocket route handlers ─────────────────────────────────────────────────
 
 
@@ -904,14 +929,27 @@ def create_app() -> web.Application:
 
         spawn(_init_agent())
 
-    if HAS_COMPUTER_USE:
-        launcher.on_computer_use_created(on_computer_use_created)
-
     # Auto-relaunch CLI when a browser connects to a session with no CLI
     relaunching: set[str] = set()
 
     def on_cli_relaunch_needed(session_id: str) -> None:
         if session_id in relaunching:
+            return
+        if _use_self_node:
+            relaunching.add(session_id)
+            logger.info(
+                "[server] Requesting self-node relaunch for session %s",
+                session_id[:8],
+            )
+
+            async def _do_node_relaunch() -> None:
+                try:
+                    await local_node_ops.relaunch_session(session_id=session_id)
+                finally:
+                    await asyncio.sleep(5)
+                    relaunching.discard(session_id)
+
+            spawn(_do_node_relaunch())
             return
         info = launcher.get_session(session_id)
         if info and info.archived:
@@ -943,8 +981,6 @@ def create_app() -> web.Application:
 
             spawn(_do_relaunch())
 
-    ws_bridge.on_cli_relaunch_needed_callback(on_cli_relaunch_needed)
-
     # Auto-generate session title after first turn completes
     def on_first_turn_completed(session_id: str, first_user_message: str) -> None:
         # Don't overwrite a name that was already set
@@ -968,7 +1004,15 @@ def create_app() -> web.Application:
 
         spawn(_do_auto_name())
 
-    ws_bridge.on_first_turn_completed_callback(on_first_turn_completed)
+    wire_session_callbacks(
+        use_self_node=_use_self_node,
+        launcher=launcher,
+        ws_bridge=ws_bridge,
+        has_computer_use=HAS_COMPUTER_USE,
+        on_computer_use_created=on_computer_use_created,
+        on_cli_relaunch_needed=on_cli_relaunch_needed,
+        on_first_turn_completed=on_first_turn_completed,
+    )
 
     # ── Routes ────────────────────────────────────────────────────────────
 
