@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from vibr8_core.node_client import SwappableNodeClient
+
 from server.main import (
+    BRIDGE_KEY,
+    LOCAL_NODE_OPS_KEY,
+    create_app,
     resolve_bind_host,
     resolve_self_node_enabled,
     run_legacy_session_startup_sync,
@@ -254,3 +260,38 @@ def test_legacy_callback_wiring_respects_missing_computer_use() -> None:
     launcher.on_computer_use_created.assert_not_called()
     ws_bridge.on_cli_relaunch_needed_callback.assert_called_once()
     ws_bridge.on_first_turn_completed_callback.assert_called_once()
+
+
+async def test_create_app_self_node_relaunch_callback_uses_node_ops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Queued prompts must wake the self-node, not the dormant hub launcher."""
+    monkeypatch.setenv("VIBR8_ALLOW_NO_AUTH", "1")
+    monkeypatch.setenv("VIBR8_FAST_STARTUP", "1")
+    monkeypatch.delenv("VIBR8_DISABLE_SELF_NODE", raising=False)
+    monkeypatch.delenv("VIBR8_ALLOW_LEGACY_IN_PROCESS", raising=False)
+    original_sleep = asyncio.sleep
+
+    async def _no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("server.main.asyncio.sleep", _no_sleep)
+
+    app = create_app()
+    bridge = app[BRIDGE_KEY]
+    launcher = app["launcher"]
+    launcher.get_session = MagicMock()
+    launcher.relaunch = AsyncMock()
+    local_node_ops = app[LOCAL_NODE_OPS_KEY]
+    assert isinstance(local_node_ops, SwappableNodeClient)
+
+    fake_node_ops = SimpleNamespace(relaunch_session=AsyncMock(return_value={"ok": True}))
+    local_node_ops.swap(fake_node_ops)
+
+    assert bridge._on_cli_relaunch_needed is not None
+    bridge._on_cli_relaunch_needed("session-1")
+    await original_sleep(0)
+
+    fake_node_ops.relaunch_session.assert_awaited_once_with(session_id="session-1")
+    launcher.get_session.assert_not_called()
+    launcher.relaunch.assert_not_called()
