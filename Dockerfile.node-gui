@@ -7,6 +7,7 @@ FROM vibr8-node:gui-deps
 # Copy vibr8 source via installer (code copy only, all deps already installed)
 COPY install-node.sh /tmp/install-node.sh
 COPY vibr8_node/ /tmp/vibr8-src/vibr8_node/
+COPY vibr8_core/ /tmp/vibr8-src/vibr8_core/
 COPY server/ /tmp/vibr8-src/server/
 COPY requirements-node.txt requirements-node-desktop.txt pyproject.toml /tmp/vibr8-src/
 COPY bin/docker-entrypoint.sh /tmp/vibr8-src/bin/docker-entrypoint.sh

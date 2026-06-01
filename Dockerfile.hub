@@ -27,6 +27,8 @@ ENV __GLX_VENDOR_LIBRARY_NAME=nvidia
 
 # Copy server code
 COPY server/ /app/server/
+COPY vibr8_core/ /app/vibr8_core/
+COPY vibr8_node/ /app/vibr8_node/
 COPY pyproject.toml /app/pyproject.toml
 
 # Copy built frontend (production static assets)

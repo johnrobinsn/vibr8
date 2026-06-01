@@ -169,6 +169,10 @@ _info "Copying node code from $SOURCE_DIR ..."
 rm -rf "$PREFIX/lib/vibr8_node"
 cp -r "$SOURCE_DIR/vibr8_node" "$PREFIX/lib/vibr8_node"
 
+# Shared node-scoped modules (canonical per-node ops, imported by vibr8_node)
+rm -rf "$PREFIX/lib/vibr8_core"
+cp -r "$SOURCE_DIR/vibr8_core" "$PREFIX/lib/vibr8_core"
+
 # Server modules (only what the node needs)
 rm -rf "$PREFIX/lib/server"
 mkdir -p "$PREFIX/lib/server"
@@ -193,6 +197,9 @@ NODE_SERVER_MODULES=(
     git_utils.py
     voice_profiles.py
     voice_logger.py
+    speaker_fingerprints.py
+    rate_limit.py
+    session_registry.py
     usage_limits.py
     worktree_tracker.py
     terminal.py
