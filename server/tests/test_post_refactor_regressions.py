@@ -245,3 +245,65 @@ async def test_browser_close_ignores_non_tracked_ws() -> None:
     # ws_new must still be tracked.
     assert bridge._ws_by_client[client_id] is ws_new
     assert bridge._client_sessions[client_id] == session_id
+
+
+# ── 5. Adapter backends must request a relaunch when queuing ────────────────
+
+
+from vibr8_core.ws_bridge import Session  # noqa: E402  (kept near the test)
+
+
+@pytest.mark.parametrize("backend_type", ["codex", "opencode", "hermes"])
+async def test_adapter_backend_queues_user_message_and_requests_relaunch(
+    backend_type: str,
+) -> None:
+    """When a codex/opencode/hermes session has no adapter attached, a
+    user_message must both queue *and* fire `_on_cli_relaunch_needed` so
+    the node-side launcher respawns the adapter subprocess.
+
+    Pre-fix, only the queue happened — after any hub/self-node restart,
+    adapter-backend sessions sat with `adapter=None` forever and every
+    prompt added to `pending_messages` without ever waking a relaunch.
+    The claude path doesn't have this gap (it goes through
+    `_handle_user_message`, which fires the hook).
+    """
+    bridge = WsBridge()
+    session_id = f"sess-{backend_type}"
+    session = Session(id=session_id, backend_type=backend_type)
+    session.adapter = None
+    bridge._sessions[session_id] = session
+
+    fired_for: list[str] = []
+    bridge.on_cli_relaunch_needed_callback(fired_for.append)
+
+    await bridge._route_browser_message(
+        session, {"type": "user_message", "content": "hello"}
+    )
+
+    assert fired_for == [session_id], (
+        f"adapter-backend ({backend_type}) failed to request relaunch when "
+        f"queuing user_message — sessions stay stuck after a hub restart"
+    )
+    assert len(session.pending_messages) == 1
+
+
+async def test_adapter_backend_does_not_request_relaunch_when_attached() -> None:
+    """Negative case: when the adapter is attached, the relaunch hook
+    must not fire (or we'd spin up duplicate subprocesses each time the
+    user types)."""
+    bridge = WsBridge()
+    session_id = "sess-codex-live"
+    session = Session(id=session_id, backend_type="codex")
+    session.adapter = MagicMock()
+    bridge._sessions[session_id] = session
+
+    fired_for: list[str] = []
+    bridge.on_cli_relaunch_needed_callback(fired_for.append)
+
+    await bridge._route_browser_message(
+        session, {"type": "user_message", "content": "hello"}
+    )
+
+    assert fired_for == []
+    session.adapter.send_browser_message.assert_called_once()
+    assert session.pending_messages == []

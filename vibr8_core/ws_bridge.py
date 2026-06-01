@@ -1823,6 +1823,8 @@ class WsBridge:
             else:
                 logger.info(f"[ws-bridge] Adapter not yet attached for session {session.id}, queuing {msg.get('type')}")
                 session.pending_messages.append(json.dumps(msg))
+                if self._on_cli_relaunch_needed:
+                    self._on_cli_relaunch_needed(session.id)
             return
 
         # Claude Code path — look up which client sent this message
