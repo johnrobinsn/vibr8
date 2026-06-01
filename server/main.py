@@ -102,6 +102,7 @@ ALLOW_LEGACY_IN_PROCESS_ENV = "VIBR8_ALLOW_LEGACY_IN_PROCESS"
 BRIDGE_KEY = web.AppKey("bridge", WsBridge)
 BIND_HOST_KEY = web.AppKey("bind_host", str)
 NODE_WS_RATE_KEY = web.AppKey("node_ws_rate", dict)
+LOCAL_NODE_OPS_KEY = web.AppKey("local_node_ops", SwappableNodeClient)
 
 
 def _env_flag(environ: Mapping[str, str], name: str) -> bool:
@@ -1061,6 +1062,7 @@ def create_app() -> web.Application:
     app["task_scheduler"] = task_scheduler
     app["node_registry"] = node_registry
     app["session_registry"] = session_registry
+    app[LOCAL_NODE_OPS_KEY] = local_node_ops
     app["android_registry"] = android_registry
     app["request_restart"] = request_restart
 
