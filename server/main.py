@@ -1287,6 +1287,7 @@ def create_app() -> web.Application:
                 n = node_registry.get_node_by_name("self")
                 if n:
                     self_node_state["node_id"] = n.id
+                    ws_bridge.set_self_node_id(n.id)
                     if attempt == 1:
                         logger.info("[server] Self-node registered: id=%s", n.id[:8])
                     else:
