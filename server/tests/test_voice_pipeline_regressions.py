@@ -46,6 +46,77 @@ def test_confirmed_segment_finalizes_after_prompt_wait(monkeypatch) -> None:
     assert stt._state_machine.state == STT.State.IDLE
 
 
+def test_unconfirmed_interim_can_be_force_confirmed_when_frames_stop(monkeypatch) -> None:
+    events: list[tuple[str, dict | None]] = []
+    frame = np.zeros(512, dtype=np.int16)
+    stt = STT(16000, 1, params=STTParams(prompt_timeout_ms=320))
+
+    monkeypatch.setattr(STT, "_transcribe", staticmethod(lambda audio: "are you able to hear me"))
+    monkeypatch.setitem(STT.shared_resources, "eou", lambda text: 0.1)
+    stt.add_listener(lambda _stt, event_type, data: events.append((event_type, data)))
+
+    def tick(event: STT.Event) -> None:
+        stt._state_machine.handle_event(event, stt._segment, frame)
+        stt._capture_time += 0.16
+
+    tick(STT.Event.VOICE_WAS_DETECTED)
+    tick(STT.Event.VOICE_WAS_DETECTED)
+    tick(STT.Event.VOICE_NOT_DETECTED)
+    tick(STT.Event.VOICE_NOT_DETECTED)
+    tick(STT.Event.VOICE_NOT_DETECTED)
+    tick(STT.Event.VOICE_NOT_DETECTED)
+
+    sm = stt._state_machine
+    assert sm.state == STT.State.SEGMENT_N
+    assert sm.prompt_segments == []
+    assert sm.pending_interim is not None
+    last_interim_at = sm.last_interim_at
+    assert last_interim_at is not None
+    assert any(
+        event_type == "interim_transcript" and data and data.get("retry") == 0
+        for event_type, data in events
+    )
+
+    assert sm.force_confirm_pending_interim() is True
+
+    assert sm.state == STT.State.PROMPT_WAIT
+    assert sm.prompt_segments == ["are you able to hear me"]
+    assert sm.last_segment_appended_at == last_interim_at
+    assert sm.pending_interim is None
+    assert any(event_type == "segment_confirmed" for event_type, _data in events)
+    assert events[-1] == (
+        "interim_transcript",
+        {"transcript": "are you able to hear me", "eouProb": 0.1, "retry": -1},
+    )
+
+
+def test_rejected_retry_recovers_pending_interim() -> None:
+    events: list[tuple[str, dict | None]] = []
+    stt = STT(16000, 1, params=STTParams())
+    stt.add_listener(lambda _stt, event_type, data: events.append((event_type, data)))
+
+    sm = stt._state_machine
+    last_interim_at = time.monotonic() - 5
+    sm.state = STT.State.IDLE
+    sm.pending_interim = {
+        "transcript": "are you able to hear me",
+        "eouProb": 0.8321,
+        "audio": np.zeros(512, dtype=np.int16),
+        "params": {},
+        "lastInterimAt": last_interim_at,
+        "segmentFrameCount": 1,
+    }
+    sm.last_interim_at = last_interim_at
+
+    assert sm.recover_pending_interim_on_reject() is True
+
+    assert sm.state == STT.State.PROMPT_WAIT
+    assert sm.prompt_segments == ["are you able to hear me"]
+    assert sm.last_segment_appended_at == last_interim_at
+    assert sm.pending_interim is None
+    assert any(event_type == "segment_confirmed" for event_type, _data in events)
+
+
 @pytest.mark.parametrize(
     "state",
     [
@@ -67,6 +138,69 @@ async def test_watchdog_only_flushes_while_prompt_waiting(state: STT.State) -> N
         sm.state = state
 
         assert stt._watchdog_flush_due(time.monotonic(), grace_seconds=0.2) is None
+    finally:
+        stt.stop()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        STT.State.SEGMENT_N,
+        STT.State.SILENCE_0,
+        STT.State.SILENCE_1,
+        STT.State.SILENCE_2,
+    ],
+)
+@pytest.mark.asyncio
+async def test_watchdog_detects_stalled_unconfirmed_interim(state: STT.State) -> None:
+    stt = AsyncSTT(16000, 1, params=STTParams(prompt_timeout_ms=1500))
+    try:
+        sm = stt._state_machine
+        sm.pending_interim = {
+            "transcript": "partial transcript",
+            "eouProb": 0.1,
+            "audio": np.zeros(512, dtype=np.int16),
+            "params": {},
+            "lastInterimAt": time.monotonic() - 10,
+            "segmentFrameCount": 1,
+        }
+        sm.last_interim_at = sm.pending_interim["lastInterimAt"]
+        sm.state = state
+
+        assert stt._watchdog_interim_due(time.monotonic(), grace_seconds=0.2) is not None
+    finally:
+        stt.stop()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_does_not_confirm_interim_after_segment_resumes() -> None:
+    stt = AsyncSTT(16000, 1, params=STTParams(prompt_timeout_ms=1500))
+    try:
+        sm = stt._state_machine
+        original_interim_at = time.monotonic() - 10
+        sm.pending_interim = {
+            "transcript": "partial transcript",
+            "eouProb": 0.1,
+            "audio": np.zeros(512, dtype=np.int16),
+            "params": {},
+            "lastInterimAt": original_interim_at,
+            "segmentFrameCount": 1,
+        }
+        sm.last_interim_at = original_interim_at
+        sm.state = STT.State.SEGMENT_N
+        stt._segment = [
+            np.zeros(512, dtype=np.int16),
+            np.ones(512, dtype=np.int16),
+        ]
+
+        stt._locked_confirm_pending_interim(grace_seconds=0.2)
+
+        assert sm.state == STT.State.SEGMENT_N
+        assert sm.prompt_segments == []
+        assert sm.pending_interim is not None
+        assert sm.last_interim_at is not None
+        assert sm.last_interim_at > original_interim_at
+        assert len(stt._segment) == 2
     finally:
         stt.stop()
 

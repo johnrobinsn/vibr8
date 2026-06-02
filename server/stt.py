@@ -417,6 +417,7 @@ class STT:
             sm.prompt_segments.clear()
             sm.prompt_wait_counter = 0
             sm.last_segment_appended_at = None
+        sm.clear_pending_interim()
         self._segment = []
         self._capture_time = 0.0
         self._segment_time_begin = 0.0
@@ -448,6 +449,86 @@ class STT:
                 # prompt_wait_counter only advances on incoming silence
                 # frames, so without this the segment hangs forever.
                 self.last_segment_appended_at: Optional[float] = None
+                # Wall-clock timestamp and metadata for a segment that already
+                # produced an interim transcript because EOU was below the
+                # threshold, but has not yet been confirmed. If audio frames
+                # stop here, the normal frame-counted retry path cannot advance.
+                self.last_interim_at: Optional[float] = None
+                self.pending_interim: dict[str, Any] | None = None
+
+                def clear_pending_interim() -> None:
+                    self.last_interim_at = None
+                    self.pending_interim = None
+
+                def confirm_segment(
+                    text: str,
+                    eou_prob: float,
+                    audio: np.ndarray,
+                    params_dict: dict,
+                    *,
+                    log_prefix: str,
+                    appended_at: float | None = None,
+                ) -> None:
+                    logger.info(
+                        "[stt] %s eou=%.4f thr=%.4f retries_used=%d/%d text=%r",
+                        log_prefix,
+                        eou_prob,
+                        stt._params.eou_threshold,
+                        self.eou_counter,
+                        stt._params.eou_max_retries,
+                        text,
+                    )
+                    stt._notify_listeners("voice_not_detected", None)
+                    stt._notify_listeners("segment_confirmed", {
+                        "timeBegin": stt._segment_time_begin,
+                        "timeEnd": stt._segment_time_end,
+                        "transcript": text,
+                        "audio": audio,
+                        "params": params_dict,
+                        "eouProb": float(eou_prob),
+                    })
+
+                    self.prompt_segments.append(text.strip())
+                    self.last_segment_appended_at = appended_at or time.monotonic()
+                    joined = " ".join(self.prompt_segments)
+                    stt._notify_listeners("interim_transcript", {
+                        "transcript": joined,
+                        "eouProb": float(eou_prob),
+                        "retry": -1,  # -1 signals this is a confirmed segment preview
+                    })
+
+                    self.prompt_wait_counter = 0
+                    self.state = STT.State.PROMPT_WAIT
+                    clear_pending_interim()
+
+                def force_confirm_pending_interim() -> bool:
+                    pending = self.pending_interim
+                    if not pending:
+                        return False
+                    logger.warning(
+                        "[stt] watchdog: unconfirmed interim stalled; force-confirming text=%r",
+                        pending["transcript"],
+                    )
+                    confirm_segment(
+                        pending["transcript"],
+                        pending["eouProb"],
+                        pending["audio"],
+                        pending["params"],
+                        log_prefix="SEGMENT_CONFIRMED (watchdog)",
+                        appended_at=pending["lastInterimAt"],
+                    )
+                    stt._segment.clear()
+                    return True
+
+                def recover_pending_interim_on_reject() -> bool:
+                    if self.pending_interim is None:
+                        clear_pending_interim()
+                        return False
+                    return force_confirm_pending_interim()
+
+                self.clear_pending_interim = clear_pending_interim
+                self.force_confirm_pending_interim = force_confirm_pending_interim
+                self.recover_pending_interim_on_reject = recover_pending_interim_on_reject
 
                 def process_segment(s: list, b: np.ndarray) -> None:
                     s.append(b)
@@ -462,6 +543,7 @@ class STT:
                                         duration, params.min_segment_duration)
                         else:
                             logger.debug("[stt] Discarding short segment: %.2fs", duration)
+                        recover_pending_interim_on_reject()
                         s.clear()
                         return
 
@@ -498,8 +580,10 @@ class STT:
                                 "PASS" if best_sim >= threshold else "REJECT",
                             )
                             if best_sim < threshold:
+                                recovered = recover_pending_interim_on_reject()
                                 s.clear()
-                                stt._notify_listeners("voice_not_detected", None)
+                                if not recovered:
+                                    stt._notify_listeners("voice_not_detected", None)
                                 return
 
                             if tse_enabled and best_idx >= 0:
@@ -538,8 +622,10 @@ class STT:
                             logger.info("[stt-verbose] REJECTED hallucination: %r", text)
                         else:
                             logger.info("[stt] Filtered hallucination: %r", text)
+                        recovered = recover_pending_interim_on_reject()
                         s.clear()
-                        stt._notify_listeners("voice_not_detected", None)
+                        if not recovered:
+                            stt._notify_listeners("voice_not_detected", None)
                         return
 
                     # Reject non-Latin script output (e.g. Korean/Chinese/Japanese
@@ -550,8 +636,10 @@ class STT:
                             logger.info("[stt-verbose] REJECTED non-Latin hallucination: %r", text)
                         else:
                             logger.info("[stt] Filtered non-Latin hallucination: %r", text)
+                        recovered = recover_pending_interim_on_reject()
                         s.clear()
-                        stt._notify_listeners("voice_not_detected", None)
+                        if not recovered:
+                            stt._notify_listeners("voice_not_detected", None)
                         return
 
                     # Reject repetition-loop hallucinations (e.g. "Oh my God." × 89)
@@ -564,8 +652,10 @@ class STT:
                                 logger.info("[stt-verbose] REJECTED repetition-loop hallucination: %r", text)
                             else:
                                 logger.info("[stt] Filtered repetition-loop hallucination: %r", text)
+                            recovered = recover_pending_interim_on_reject()
                             s.clear()
-                            stt._notify_listeners("voice_not_detected", None)
+                            if not recovered:
+                                stt._notify_listeners("voice_not_detected", None)
                             return
 
                     eou = STT.shared_resources["eou"]
@@ -576,6 +666,18 @@ class STT:
                                     eou_prob, params.eou_threshold, self.eou_counter, params.eou_max_retries)
 
                     if eou_prob < params.eou_threshold and self.eou_counter < params.eou_max_retries:
+                        now = time.monotonic()
+                        params_dict = dataclasses.asdict(params)
+                        params_dict.pop("verbose", None)
+                        self.pending_interim = {
+                            "transcript": text,
+                            "eouProb": float(eou_prob),
+                            "audio": combined,
+                            "params": params_dict,
+                            "lastInterimAt": now,
+                            "segmentFrameCount": len(s),
+                        }
+                        self.last_interim_at = now
                         logger.info("[stt] INTERIM eou=%.4f thr=%.4f retry=%d/%d text=%r",
                                     eou_prob, params.eou_threshold, self.eou_counter, params.eou_max_retries, text)
                         if params.verbose:
@@ -596,31 +698,13 @@ class STT:
                     params_dict = dataclasses.asdict(params)
                     params_dict.pop("verbose", None)
 
-                    logger.info("[stt] SEGMENT_CONFIRMED eou=%.4f thr=%.4f retries_used=%d/%d text=%r",
-                                eou_prob, params.eou_threshold, self.eou_counter, params.eou_max_retries, text)
-                    stt._notify_listeners("voice_not_detected", None)
-                    stt._notify_listeners("segment_confirmed", {
-                        "timeBegin": stt._segment_time_begin,
-                        "timeEnd": stt._segment_time_end,
-                        "transcript": text,
-                        "audio": combined,
-                        "params": params_dict,
-                        "eouProb": float(eou_prob),
-                    })
-
-                    # Accumulate segment for prompt assembly
-                    self.prompt_segments.append(text.strip())
-                    self.last_segment_appended_at = time.monotonic()
-                    joined = " ".join(self.prompt_segments)
-                    stt._notify_listeners("interim_transcript", {
-                        "transcript": joined,
-                        "eouProb": float(eou_prob),
-                        "retry": -1,  # -1 signals this is a confirmed segment preview
-                    })
-
-                    # Enter PROMPT_WAIT: wait for more speech or timeout
-                    self.prompt_wait_counter = 0
-                    self.state = STT.State.PROMPT_WAIT
+                    confirm_segment(
+                        text,
+                        float(eou_prob),
+                        combined,
+                        params_dict,
+                        log_prefix="SEGMENT_CONFIRMED",
+                    )
                     s.clear()
 
                 def capture_segment(s: list, b: np.ndarray) -> None:
@@ -772,8 +856,26 @@ class AsyncSTT(STT):
             return None
         return elapsed, timeout_s
 
+    def _watchdog_interim_due(self, now: float, grace_seconds: float) -> tuple[float, float] | None:
+        sm = self._state_machine
+        if sm.state not in {
+            STT.State.SEGMENT_N,
+            STT.State.SILENCE_0,
+            STT.State.SILENCE_1,
+            STT.State.SILENCE_2,
+        }:
+            return None
+        last_at = sm.last_interim_at
+        if last_at is None or sm.pending_interim is None:
+            return None
+        elapsed = now - last_at
+        timeout_s = self._params.prompt_timeout_ms / 1000.0 + grace_seconds
+        if elapsed < timeout_s:
+            return None
+        return elapsed, timeout_s
+
     async def _watchdog(self) -> None:
-        """Background timer that force-flushes a stalled PROMPT_WAIT.
+        """Background timer for stalled prompt waits and unconfirmed interims.
 
         The frame-counted `prompt_wait_silence` only advances when audio
         frames arrive. If the upstream goes idle (Opus DTX, mobile background
@@ -784,7 +886,9 @@ class AsyncSTT(STT):
         `last_segment_appended_at`, and enqueues a `flush()` on the worker
         if wall-clock time exceeds `prompt_timeout_ms` plus a small grace
         period (so the frame path wins in the common case and we don't
-        double-fire).
+        double-fire). The same frame-independent timer also promotes a
+        low-EOU interim if it stalls before enough follow-up frames arrive to
+        confirm or reject it through the normal state machine.
         """
         check_interval = 0.3
         grace_seconds = 0.2
@@ -792,19 +896,31 @@ class AsyncSTT(STT):
             try:
                 await asyncio.sleep(check_interval)
                 sm = self._state_machine
-                due = self._watchdog_flush_due(time.monotonic(), grace_seconds)
-                if due is None:
+                now = time.monotonic()
+                due = self._watchdog_flush_due(now, grace_seconds)
+                if due is not None:
+                    elapsed, timeout_s = due
+                    # Clear the timestamp synchronously so a slow flush doesn't
+                    # let us re-fire on the next tick.
+                    sm.last_segment_appended_at = None
+                    logger.warning(
+                        "[stt] watchdog: PROMPT_WAIT stalled %.2fs (timeout=%.2fs) — "
+                        "frame path stopped delivering, forcing flush of %d segment(s)",
+                        elapsed, timeout_s, len(sm.prompt_segments),
+                    )
+                    self.flush()
                     continue
-                elapsed, timeout_s = due
-                # Clear the timestamp synchronously so a slow flush doesn't
-                # let us re-fire on the next tick.
-                sm.last_segment_appended_at = None
+
+                interim_due = self._watchdog_interim_due(now, grace_seconds)
+                if interim_due is None:
+                    continue
+                elapsed, timeout_s = interim_due
                 logger.warning(
-                    "[stt] watchdog: PROMPT_WAIT stalled %.2fs (timeout=%.2fs) — "
-                    "frame path stopped delivering, forcing flush of %d segment(s)",
-                    elapsed, timeout_s, len(sm.prompt_segments),
+                    "[stt] watchdog: interim stalled %.2fs (timeout=%.2fs) — "
+                    "frame path stopped delivering, force-confirming segment",
+                    elapsed, timeout_s,
                 )
-                self.flush()
+                self._worker.add_task(self._locked_confirm_pending_interim, grace_seconds)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -845,6 +961,25 @@ class AsyncSTT(STT):
     def _locked_flush(self) -> None:
         with self._lock:
             super().flush()
+
+    def _locked_confirm_pending_interim(self, grace_seconds: float) -> None:
+        with self._lock:
+            now = time.monotonic()
+            if self._watchdog_interim_due(now, grace_seconds) is None:
+                return
+            pending = self._state_machine.pending_interim
+            expected_frame_count = None if pending is None else pending.get("segmentFrameCount")
+            if expected_frame_count is not None and len(self._segment) != expected_frame_count:
+                logger.info(
+                    "[stt] watchdog: pending interim no longer matches live segment "
+                    "(expected_frames=%d actual_frames=%d); deferring to frame path",
+                    expected_frame_count,
+                    len(self._segment),
+                )
+                self._state_machine.last_interim_at = now
+                return
+            self._state_machine.last_interim_at = None
+            self._state_machine.force_confirm_pending_interim()
 
     def flush(self) -> None:
         """Enqueue a flush operation on the worker thread."""
