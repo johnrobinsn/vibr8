@@ -2235,6 +2235,7 @@ def create_routes(
                 "eouThreshold": defaults.eou_threshold,
                 "eouMaxRetries": defaults.eou_max_retries,
                 "minSegmentDuration": defaults.min_segment_duration,
+                "promptTimeoutMs": defaults.prompt_timeout_ms,
                 "isActive": True,
             })
         return web.json_response(profile)
