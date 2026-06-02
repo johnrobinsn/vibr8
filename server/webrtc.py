@@ -865,7 +865,10 @@ class WebRTCManager:
                 transcript = data["transcript"].strip()
                 logger.info("[stt] client %s transcript: %s", client_id, transcript)
 
-                if not transcript or not self._ws_bridge:
+                if not self._ws_bridge:
+                    return
+                await _clear_voice_preview()
+                if not transcript:
                     return
 
                 # Helper to submit text through Ring0 or the client's current session.

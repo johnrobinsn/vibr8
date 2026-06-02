@@ -759,6 +759,19 @@ class AsyncSTT(STT):
 
     # ── Wall-clock watchdog ───────────────────────────────────────────────
 
+    def _watchdog_flush_due(self, now: float, grace_seconds: float) -> tuple[float, float] | None:
+        sm = self._state_machine
+        if sm.state != STT.State.PROMPT_WAIT:
+            return None
+        last_at = sm.last_segment_appended_at
+        if last_at is None or not sm.prompt_segments:
+            return None
+        elapsed = now - last_at
+        timeout_s = self._params.prompt_timeout_ms / 1000.0 + grace_seconds
+        if elapsed < timeout_s:
+            return None
+        return elapsed, timeout_s
+
     async def _watchdog(self) -> None:
         """Background timer that force-flushes a stalled PROMPT_WAIT.
 
@@ -779,13 +792,10 @@ class AsyncSTT(STT):
             try:
                 await asyncio.sleep(check_interval)
                 sm = self._state_machine
-                last_at = sm.last_segment_appended_at
-                if last_at is None or not sm.prompt_segments:
+                due = self._watchdog_flush_due(time.monotonic(), grace_seconds)
+                if due is None:
                     continue
-                elapsed = time.monotonic() - last_at
-                timeout_s = self._params.prompt_timeout_ms / 1000.0 + grace_seconds
-                if elapsed < timeout_s:
-                    continue
+                elapsed, timeout_s = due
                 # Clear the timestamp synchronously so a slow flush doesn't
                 # let us re-fire on the next tick.
                 sm.last_segment_appended_at = None

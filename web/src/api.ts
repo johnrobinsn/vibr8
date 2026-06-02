@@ -288,6 +288,7 @@ export interface VoiceSegParams {
     eou_threshold: number;
     eou_max_retries: number;
     min_segment_duration: number;
+    prompt_timeout_ms?: number;
   };
   createdAt: number;
 }
