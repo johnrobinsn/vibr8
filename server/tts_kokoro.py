@@ -23,16 +23,28 @@ _SAMPLES_PER_FRAME = 960  # 20ms at 48kHz
 _KOKORO_RATE = 24000
 
 _pipeline = None
-
-
+# Serialize the Kokoro load with the STT load. KModel instantiates a
+# transformers AlbertModel internally, which goes through the same
+# accelerate.init_empty_weights global monkey-patch the STT loader does.
+# Concurrent loads leave one of the loaders staring at meta tensors when
+# it calls .to(device) → "Cannot copy out of meta tensor; no data!".
+# Acquiring STT._load_lock during this load guarantees the transformers
+# state isn't being mutated underneath us by a parallel preload thread.
 def _ensure_pipeline() -> None:
     global _pipeline
     if _pipeline is not None:
         return
+    import threading
+    from server.stt import STT
     from kokoro import KPipeline
-    logger.info("[tts-kokoro] Loading Kokoro pipeline...")
-    _pipeline = KPipeline(lang_code="a")
-    logger.info("[tts-kokoro] Kokoro pipeline ready")
+    if STT._load_lock is None:
+        STT._load_lock = threading.Lock()
+    with STT._load_lock:
+        if _pipeline is not None:
+            return
+        logger.info("[tts-kokoro] Loading Kokoro pipeline...")
+        _pipeline = KPipeline(lang_code="a")
+        logger.info("[tts-kokoro] Kokoro pipeline ready")
 
 
 def _create_opus_codec() -> AudioCodecContext:

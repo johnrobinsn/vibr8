@@ -228,3 +228,93 @@ async def test_final_transcript_clears_voice_preview_before_submit() -> None:
         ("preview", "session-1", {"type": "voice_transcript_preview", "transcript": ""}),
         ("submit", "session-1", ("vibr8 status", "client-1")),
     ]
+
+
+# ── Voice-model preload race ─────────────────────────────────────────────────
+
+
+def test_preload_shared_resources_serializes_concurrent_callers(monkeypatch) -> None:
+    """`STT.preload_shared_resources` must serialize concurrent callers.
+
+    Pre-fix, `_preload_stt`, `warmup_voice_models`, and `_ensure_pipeline`
+    all kicked off as separate background tasks and all called
+    `transformers.from_pretrained(low_cpu_mem_usage=True, ...)`. That path
+    uses `accelerate.init_empty_weights()`, which monkey-patches
+    `nn.Module.__init__` via a *global* (not thread-local) flag. Two
+    concurrent loaders raced — one's exit re-enabled the meta-init for
+    the other thread's modules — and the second loader's `.to(device)`
+    blew up with `Cannot copy out of meta tensor; no data!`.
+
+    The fix is a class-level `threading.Lock` held for the whole load.
+    This test mocks the actual loading work and verifies that two
+    concurrent calls don't overlap.
+    """
+    import threading
+    import time
+    import server.stt as stt_module
+    from server.stt import STT
+
+    # Reset class-level state so the lock is freshly created.
+    STT.shared_resources = {}
+    STT._load_lock = None
+
+    concurrent_inside = 0
+    max_concurrent = 0
+    body_lock = threading.Lock()
+
+    # Stub the *first* heavy load (Silero VAD via torch.hub.load) with a
+    # slow body. If the lock is missing or scoped incorrectly, a second
+    # thread will enter while the first is asleep here and `max_concurrent`
+    # will read 2. The fake also marks the rest of the resources as
+    # already-loaded so the asr/eou blocks short-circuit and the test
+    # stays CI-cheap.
+    def fake_silero_load(*_a, **_kw):
+        nonlocal concurrent_inside, max_concurrent
+        with body_lock:
+            concurrent_inside += 1
+            max_concurrent = max(max_concurrent, concurrent_inside)
+        time.sleep(0.1)
+        with body_lock:
+            concurrent_inside -= 1
+        STT.shared_resources["asr_model"] = object()
+        STT.shared_resources["asr_processor"] = object()
+        STT.shared_resources["assistant_model"] = object()
+        STT.shared_resources["eou"] = object()
+        return (object(), None)
+
+    monkeypatch.setattr(stt_module.torch.hub, "load", fake_silero_load)
+
+    threads = [
+        threading.Thread(target=STT.preload_shared_resources)
+        for _ in range(3)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert all(not t.is_alive() for t in threads), "preload threads deadlocked"
+    assert max_concurrent == 1, (
+        f"preload_shared_resources ran concurrently with itself "
+        f"(max_concurrent={max_concurrent}) — STT._load_lock is missing or "
+        f"isn't held over the whole guarded block. In production this "
+        f"surfaces as 'Cannot copy out of meta tensor; no data!'."
+    )
+
+
+def test_kokoro_pipeline_shares_stt_load_lock() -> None:
+    """`_ensure_pipeline` must acquire `STT._load_lock` so concurrent
+    Kokoro/STT preloads serialize against each other.
+
+    Both loaders ultimately call into transformers under
+    accelerate.init_empty_weights; running them in parallel produces the
+    same meta-tensor error as two concurrent STT loaders.
+    """
+    import inspect
+    from server import tts_kokoro
+    source = inspect.getsource(tts_kokoro._ensure_pipeline)
+    assert "STT._load_lock" in source, (
+        "_ensure_pipeline must hold STT._load_lock for the duration of "
+        "the KPipeline() load — otherwise it races with concurrent STT "
+        "preloads and one side ends up with meta-tensor parameters."
+    )

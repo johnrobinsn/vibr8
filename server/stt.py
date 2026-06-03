@@ -162,6 +162,14 @@ class STT:
     """
 
     shared_resources: dict[str, Any] = {}
+    # Serialize preload across concurrent callers (warmup_voice_models,
+    # main.py's _preload_stt, and a first AsyncSTT() inst can all race).
+    # transformers' `low_cpu_mem_usage=True` / `device_map=` paths go
+    # through accelerate.init_empty_weights, which monkey-patches
+    # nn.Module.__init__ via a *global* (not thread-local) state. Two
+    # concurrent loaders trip over each other and leave modules with
+    # meta tensors that .to(device) refuses to materialize.
+    _load_lock: Any = None  # threading.Lock — initialized on first use
 
     class Event(Enum):
         VOICE_WAS_DETECTED = auto()
@@ -235,61 +243,84 @@ class STT:
 
     @staticmethod
     def preload_shared_resources() -> None:
-        """Load Whisper, Silero VAD, and EOU models (once, shared across instances)."""
-        if "vad" not in STT.shared_resources:
-            logger.info("[stt] Loading Silero VAD...")
-            model, _utils = torch.hub.load(
-                repo_or_dir="snakers4/silero-vad",
-                model="silero_vad",
-                force_reload=False,
-                trust_repo=True,
-            )
-            STT.shared_resources["vad"] = model
-            logger.info("[stt] Silero VAD loaded")
+        """Load Whisper, Silero VAD, and EOU models (once, shared across instances).
 
-        if "asr_model" not in STT.shared_resources:
-            # Requires transformers <5.0 — 5.x has an UnboundLocalError in
-            # WhisperAttention.forward (is_updated) when using assisted generation
-            # with DynamicCache. See HF issues #31987, #34626.
-            from transformers import AutoModelForSpeechSeq2Seq, AutoModelForCausalLM, AutoProcessor
+        The whole body runs under a class-level lock so concurrent callers
+        (warmup_voice_models + main.py's _preload_stt + a first AsyncSTT()
+        materialization) can't both pass the `not in shared_resources`
+        guard at the same time. The transformers loader uses
+        accelerate.init_empty_weights internally — a global, *not*
+        thread-local, monkey-patch on nn.Module.__init__. Two concurrent
+        loaders leave modules with meta tensors that `.to(device)` then
+        refuses to materialize ("Cannot copy out of meta tensor; no data").
+        """
+        import threading
+        if STT._load_lock is None:
+            STT._load_lock = threading.Lock()
+        with STT._load_lock:
+            if "vad" not in STT.shared_resources:
+                logger.info("[stt] Loading Silero VAD...")
+                model, _utils = torch.hub.load(
+                    repo_or_dir="snakers4/silero-vad",
+                    model="silero_vad",
+                    force_reload=False,
+                    trust_repo=True,
+                )
+                STT.shared_resources["vad"] = model
+                logger.info("[stt] Silero VAD loaded")
 
-            device = "cuda"
-            torch_dtype = torch.float16
+            if "asr_model" not in STT.shared_resources:
+                # Requires transformers <5.0 — 5.x has an UnboundLocalError in
+                # WhisperAttention.forward (is_updated) when using assisted generation
+                # with DynamicCache. See HF issues #31987, #34626.
+                from transformers import AutoModelForSpeechSeq2Seq, AutoModelForCausalLM, AutoProcessor
 
-            logger.info("[stt] Loading whisper-large-v3...")
-            model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                "openai/whisper-large-v3",
-                torch_dtype=torch_dtype,
-                low_cpu_mem_usage=True,
-                use_safetensors=True,
-                attn_implementation="sdpa",
-            )
-            model.to(device)
-            model.eval()
-            processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
-            logger.info("[stt] whisper-large-v3 loaded (fp16, %s)", device)
+                device = "cuda"
+                torch_dtype = torch.float16
 
-            logger.info("[stt] Loading distil-large-v3 (assistant)...")
-            assistant = AutoModelForCausalLM.from_pretrained(
-                "distil-whisper/distil-large-v3",
-                torch_dtype=torch_dtype,
-                low_cpu_mem_usage=True,
-                use_safetensors=True,
-                attn_implementation="sdpa",
-            )
-            assistant.to(device)
-            assistant.eval()
-            logger.info("[stt] distil-large-v3 loaded (fp16, %s)", device)
+                # `low_cpu_mem_usage=True` instructs transformers to
+                # materialize parameters lazily — the empty-init phase
+                # mutates a *global* (not thread-local) flag inside
+                # accelerate.init_empty_weights, which is why this
+                # function holds STT._load_lock for the whole block. The
+                # accelerate-managed alternative (`device_map=device`)
+                # would skip the meta intermediary entirely but requires
+                # `pip install accelerate`, which isn't a dependency
+                # here.
+                logger.info("[stt] Loading whisper-large-v3...")
+                model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                    "openai/whisper-large-v3",
+                    torch_dtype=torch_dtype,
+                    low_cpu_mem_usage=True,
+                    use_safetensors=True,
+                    attn_implementation="sdpa",
+                )
+                model.to(device)
+                model.eval()
+                processor = AutoProcessor.from_pretrained("openai/whisper-large-v3")
+                logger.info("[stt] whisper-large-v3 loaded (fp16, %s)", device)
 
-            STT.shared_resources["asr_model"] = model
-            STT.shared_resources["asr_processor"] = processor
-            STT.shared_resources["assistant_model"] = assistant
-            logger.info("[stt] Speculative decoding ready (whisper-large-v3 + distil-large-v3, fp16)")
+                logger.info("[stt] Loading distil-large-v3 (assistant)...")
+                assistant = AutoModelForCausalLM.from_pretrained(
+                    "distil-whisper/distil-large-v3",
+                    torch_dtype=torch_dtype,
+                    low_cpu_mem_usage=True,
+                    use_safetensors=True,
+                    attn_implementation="sdpa",
+                )
+                assistant.to(device)
+                assistant.eval()
+                logger.info("[stt] distil-large-v3 loaded (fp16, %s)", device)
 
-        if "eou" not in STT.shared_resources:
-            logger.info("[stt] Loading EOU model...")
-            STT.shared_resources["eou"] = create_eou()
-            logger.info("[stt] EOU model loaded")
+                STT.shared_resources["asr_model"] = model
+                STT.shared_resources["asr_processor"] = processor
+                STT.shared_resources["assistant_model"] = assistant
+                logger.info("[stt] Speculative decoding ready (whisper-large-v3 + distil-large-v3, fp16)")
+
+            if "eou" not in STT.shared_resources:
+                logger.info("[stt] Loading EOU model...")
+                STT.shared_resources["eou"] = create_eou()
+                logger.info("[stt] EOU model loaded")
 
     @staticmethod
     def unload_shared_resources() -> None:
