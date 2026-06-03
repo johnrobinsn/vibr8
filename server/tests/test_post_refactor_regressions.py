@@ -373,3 +373,101 @@ async def test_adapter_backend_does_not_request_relaunch_when_attached() -> None
     assert fired_for == []
     session.adapter.send_browser_message.assert_called_once()
     assert session.pending_messages == []
+
+
+# ── 7. Spawn must only be called inside a running event loop ────────────────
+
+
+import ast  # noqa: E402
+
+
+def _main_py_path() -> Path:
+    """Resolve server/main.py from the test's installed location."""
+    import server.main as _server_main
+    return Path(_server_main.__file__)
+
+
+def test_spawn_uses_get_running_loop_create_task() -> None:
+    """The `spawn()` helper in `create_app()` must attach tasks to the
+    *running* loop, not whichever loop `asyncio.get_event_loop()` invents.
+
+    Before the fix, `spawn()` called `asyncio.ensure_future(coro)`. When
+    invoked at create_app() top level (before web.run_app's loop exists),
+    `ensure_future` silently created a brand-new "current thread" loop
+    and attached the task there. At shutdown, `asyncio.gather(*background_tasks)`
+    saw a task belonging to a different loop and raised `ValueError:
+    The future belongs to a different loop`, aborting `on_shutdown`
+    mid-flight and leaving the process zombied (listeners gone,
+    interpreter still sleeping).
+    """
+    source = _main_py_path().read_text()
+    assert "asyncio.get_running_loop().create_task" in source, (
+        "server/main.py:spawn() must use asyncio.get_running_loop().create_task(coro). "
+        "Falling back to asyncio.ensure_future(coro) re-introduces the "
+        "loop-mismatch shutdown bug."
+    )
+    assert "asyncio.ensure_future(coro)" not in source, (
+        "Detected `asyncio.ensure_future(coro)` in server/main.py — "
+        "use `asyncio.get_running_loop().create_task(coro)` instead."
+    )
+
+
+def test_no_spawn_call_directly_inside_create_app_body() -> None:
+    """The `spawn(...)` helper must not be invoked at the top level of
+    `create_app()`'s body — at that point `web.run_app` hasn't started
+    its loop yet, so `get_running_loop()` would raise.
+
+    Other call sites (inside nested `async def` callbacks, route
+    handlers, registered event hooks) are fine — by the time they run
+    the loop is up. The bug was specifically the historical
+    `spawn(warmup_voice_models())` at create_app() module body level.
+    """
+    tree = ast.parse(_main_py_path().read_text())
+
+    create_app: ast.FunctionDef | None = None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "create_app":
+            create_app = node
+            break
+    assert create_app is not None, "could not locate create_app() in server/main.py"
+
+    # Walk only the direct statement children of create_app's body.
+    # Anything nested inside an inner `async def` or `def` is fine —
+    # those run later, when the loop exists.
+    def _is_spawn_call(expr: ast.AST) -> bool:
+        return (
+            isinstance(expr, ast.Call)
+            and isinstance(expr.func, ast.Name)
+            and expr.func.id == "spawn"
+        )
+
+    offending: list[int] = []
+    for stmt in ast.walk(ast.Module(body=create_app.body, type_ignores=[])):
+        # Skip into nested function bodies — their call sites are evaluated
+        # later, after the loop is running.
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt is not create_app:
+            continue
+        for node in ast.walk(stmt):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Don't descend further than the first-level body
+                continue
+            if _is_spawn_call(node):
+                offending.append(node.lineno)
+
+    # Filter out any spawn() inside a nested def (we want only the truly
+    # top-level body of create_app).
+    def _enclosing_func(target_lineno: int) -> ast.AST | None:
+        for inner in ast.walk(create_app):
+            if isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef)) and inner is not create_app:
+                if inner.lineno < target_lineno <= (inner.end_lineno or inner.lineno):
+                    return inner
+        return None
+
+    truly_top_level = [ln for ln in offending if _enclosing_func(ln) is None]
+
+    assert not truly_top_level, (
+        f"spawn() called at create_app() top level at server/main.py "
+        f"line(s) {truly_top_level}. No loop is running there — task "
+        f"lands on a phantom loop and shutdown's "
+        f"`asyncio.gather(*background_tasks)` raises ValueError."
+    )

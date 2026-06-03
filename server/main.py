@@ -673,26 +673,24 @@ def create_app() -> web.Application:
     background_tasks: set[asyncio.Task] = set()
 
     def spawn(coro) -> asyncio.Task:
-        """Create a tracked background task that auto-removes on completion."""
-        task = asyncio.ensure_future(coro)
+        """Create a tracked background task that auto-removes on completion.
+
+        Uses `get_running_loop().create_task` rather than `ensure_future`
+        so it raises `RuntimeError` immediately if called outside a
+        running event loop. Previously, `ensure_future` silently fell
+        back to `get_event_loop()` which, in Python 3.10+, creates a
+        brand-new "current thread" loop. Tasks created that way live
+        on a different loop than `web.run_app`'s loop, and `on_shutdown`'s
+        `asyncio.gather(*background_tasks)` raises
+        `ValueError: future belongs to a different loop`, aborting
+        cleanup mid-flight and leaving the process zombied.
+        """
+        task = asyncio.get_running_loop().create_task(coro)
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
         return task
 
-    # Warm the voice pipeline (Whisper + Silero VAD + EOU + ECAPA + TSE)
-    # in the background so the first utterance after the user enables
-    # voice doesn't pay 9-13s of first-inference latency. Runs entirely
-    # on worker threads inside warmup_voice_models so it does NOT block
-    # the event loop — the server is fully responsive while this runs.
-    # VIBR8_FAST_STARTUP=1 skips warmup entirely for tests where voice
-    # isn't exercised — the heavy GPU loads otherwise add 30+ seconds.
     _fast_startup = os.environ.get("VIBR8_FAST_STARTUP") == "1"
-    if HAS_WEBRTC and not _fast_startup:
-        try:
-            from server.stt import warmup_voice_models
-            spawn(warmup_voice_models())
-        except Exception:
-            logger.exception("[server] Failed to schedule voice-model warmup")
 
     # Wire up stores and managers
     ws_bridge.set_store(session_store)
@@ -1096,6 +1094,16 @@ def create_app() -> web.Application:
 
         if HAS_WEBRTC and not _fast_startup:
             spawn(_preload_stt())
+            # Warm the voice pipeline (Whisper + Silero VAD + EOU + ECAPA + TSE)
+            # in the background so the first utterance after the user enables
+            # voice doesn't pay 9-13s of first-inference latency. Runs entirely
+            # on worker threads inside warmup_voice_models so it does NOT block
+            # the event loop — the server is fully responsive while this runs.
+            try:
+                from server.stt import warmup_voice_models
+                spawn(warmup_voice_models())
+            except Exception:
+                logger.exception("[server] Failed to schedule voice-model warmup")
         if not _fast_startup:
             spawn(_preload_tts())
 
