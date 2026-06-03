@@ -900,13 +900,12 @@ class CodexAdapter:
             self._streaming_item_id = item_id
             self._streaming_text = ""
             # Emit message_start stream event
-            self._msg_counter += 1
             self._emit({
                 "type": "stream_event",
                 "event": {
                     "type": "message_start",
                     "message": {
-                        "id": f"codex-msg-{self._msg_counter}",
+                        "id": self._stable_msg_id("msg", item_id),
                         "type": "message",
                         "role": "assistant",
                         "model": self._options.model or "",
@@ -1063,11 +1062,10 @@ class CodexAdapter:
             })
 
             # Emit the full assistant message
-            self._msg_counter += 1
             self._emit({
                 "type": "assistant",
                 "message": {
-                    "id": f"codex-msg-{self._msg_counter}",
+                    "id": self._stable_msg_id("msg", item_id),
                     "type": "message",
                     "role": "assistant",
                     "model": self._options.model or "",
@@ -1176,18 +1174,31 @@ class CodexAdapter:
             self._emit_tool_result(item_id, result_content, False)
 
         elif item_type == "reasoning":
+            # Codex sometimes returns `summary` / `content` as a list of
+            # strings (one per reasoning step) instead of a single string.
+            # Coerce each candidate before .strip() so a list value doesn't
+            # raise AttributeError and silently drop the whole reasoning
+            # emission for the turn.
+            def _coerce_reasoning_text(value: object) -> str:
+                if isinstance(value, str):
+                    return value
+                if isinstance(value, list):
+                    return "\n".join(str(part) for part in value if part)
+                if value is None:
+                    return ""
+                return str(value)
+
             thinking_text = (
-                self._reasoning_text_by_item_id.get(item_id, "")
-                or item.get("summary", "")
-                or item.get("content", "")
+                _coerce_reasoning_text(self._reasoning_text_by_item_id.get(item_id, ""))
+                or _coerce_reasoning_text(item.get("summary", ""))
+                or _coerce_reasoning_text(item.get("content", ""))
             ).strip()
 
             if thinking_text:
-                self._msg_counter += 1
                 self._emit({
                     "type": "assistant",
                     "message": {
-                        "id": f"codex-msg-{self._msg_counter}",
+                        "id": self._stable_msg_id("think", item_id),
                         "type": "message",
                         "role": "assistant",
                         "model": self._options.model or "",
@@ -1292,6 +1303,30 @@ class CodexAdapter:
 
     # ---- Helpers -------------------------------------------------------------
 
+    def _stable_msg_id(self, kind: str, codex_id: str) -> str:
+        """Build a stable assistant-message id that survives adapter restart.
+
+        Earlier, every emit used `f"codex-msg-{self._msg_counter}"`. The
+        counter resets to 0 in `__init__`, so after the hub or adapter
+        restarted, a new turn's first agentMessage re-used the id
+        "codex-msg-1" which already lived in the browser's chat-history
+        store from a *previous* turn. The frontend's `appendMessage`
+        dedupes by id, silently dropped the new entry, and the user saw
+        the streaming text vanish when the `result` event cleared the
+        streaming overlay — i.e. "the response appears then disappears".
+
+        Codex's own item ids (`msg_009...`, `rs_...`, `call_...`) are
+        unique per turn and stable across restarts. Use them, namespaced
+        by `kind` so an item that fans out to multiple assistant emits
+        (agentMessage + reasoning + tool_use + tool_result) doesn't
+        collide with itself. Fall back to the counter when the codex
+        id is missing so the id stays unique.
+        """
+        if codex_id:
+            return f"codex-{kind}-{codex_id}"
+        self._msg_counter += 1
+        return f"codex-{kind}-fallback-{self._msg_counter}"
+
     def _emit(self, msg: dict) -> None:
         if self._browser_message_cb is not None:
             result = self._browser_message_cb(msg)
@@ -1308,11 +1343,10 @@ class CodexAdapter:
         logger.info(
             "[codex-adapter] Emitting tool_use: %s id=%s", tool_name, tool_use_id
         )
-        self._msg_counter += 1
         self._emit({
             "type": "assistant",
             "message": {
-                "id": f"codex-msg-{self._msg_counter}",
+                "id": self._stable_msg_id("tool", tool_use_id),
                 "type": "message",
                 "role": "assistant",
                 "model": self._options.model or "",
@@ -1395,11 +1429,10 @@ class CodexAdapter:
         is_error: bool,
     ) -> None:
         """Emit an assistant message with a tool_result content block."""
-        self._msg_counter += 1
         self._emit({
             "type": "assistant",
             "message": {
-                "id": f"codex-msg-{self._msg_counter}",
+                "id": self._stable_msg_id("result", tool_use_id),
                 "type": "message",
                 "role": "assistant",
                 "model": self._options.model or "",

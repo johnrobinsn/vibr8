@@ -369,6 +369,155 @@ class TestCodexAdapterMessages:
                     and any(c.get("type") == "thinking" for c in m.get("message", {}).get("content", []))]
         assert len(thinking) == 1
 
+    async def test_reasoning_item_with_list_summary_does_not_raise(self, adapter):
+        """Codex sometimes returns `summary` as a list of step strings.
+
+        Pre-fix, `_handle_item_completed` did `(... or summary or ...).strip()`
+        which raised `AttributeError: 'list' object has no attribute 'strip'`
+        when summary was a non-empty list. The exception was caught one
+        frame up by the generic notification handler, so the reasoning
+        item silently dropped its thinking block — the user saw the
+        session "stop emitting" mid-turn even though Codex kept running.
+        """
+        msgs = self.collect_emitted(adapter)
+        adapter._handle_notification("item/completed", {
+            "item": {
+                "type": "reasoning",
+                "id": "r-list",
+                "summary": ["step one", "step two", "step three"],
+            },
+        })
+        thinking = [m for m in msgs if m.get("type") == "assistant"
+                    and any(c.get("type") == "thinking" for c in m.get("message", {}).get("content", []))]
+        assert len(thinking) == 1, (
+            "list-valued `summary` must be coerced (joined) before .strip(), "
+            "not raise AttributeError and drop the whole reasoning block"
+        )
+        block = thinking[0]["message"]["content"][0]
+        # Each step survives the join.
+        assert "step one" in block["thinking"]
+        assert "step three" in block["thinking"]
+
+    async def test_reasoning_item_with_list_content_does_not_raise(self, adapter):
+        """Same coercion must apply to the `content` fallback field."""
+        msgs = self.collect_emitted(adapter)
+        adapter._handle_notification("item/completed", {
+            "item": {
+                "type": "reasoning",
+                "id": "r-list-content",
+                "summary": "",  # empty → falls through to content
+                "content": ["alpha", "beta"],
+            },
+        })
+        thinking = [m for m in msgs if m.get("type") == "assistant"
+                    and any(c.get("type") == "thinking" for c in m.get("message", {}).get("content", []))]
+        assert len(thinking) == 1
+        assert "alpha" in thinking[0]["message"]["content"][0]["thinking"]
+
+    async def test_agent_message_id_is_derived_from_codex_item_id(self, adapter):
+        """Each emit must produce a msg.id built from the codex item id.
+
+        Pre-fix, ids were `f"codex-msg-{self._msg_counter}"`. The counter
+        resets to 0 on every adapter init, so a turn after a hub/adapter
+        restart re-used ids like "codex-msg-1" that were already in the
+        browser's chat-history dedup table. `store.appendMessage` silently
+        no-ops on duplicate ids and the user's reply visibly disappeared
+        once the streaming overlay cleared.
+        """
+        msgs = self.collect_emitted(adapter)
+        adapter._handle_notification("item/completed", {
+            "item": {
+                "type": "agentMessage",
+                "id": "msg_abc123",
+                "text": "hello",
+            },
+        })
+        completed = [m for m in msgs
+                     if m.get("type") == "assistant"
+                     and m.get("message", {}).get("stop_reason") == "end_turn"]
+        assert len(completed) == 1
+        assert completed[0]["message"]["id"] == "codex-msg-msg_abc123"
+
+    async def test_msg_ids_survive_adapter_restart(self):
+        """Two fresh CodexAdapter instances must produce identical msg ids
+        for the same codex item — proving restarts don't trip the
+        frontend's appendMessage dedup."""
+        proc1 = make_mock_proc()
+        adapter1 = CodexAdapter(proc1, "sess-1", CodexAdapterOptions(
+            model="gpt-5.5", cwd="/code", approval_mode="suggest",
+        ))
+        adapter1._init_task.cancel()
+        adapter1._exit_task.cancel()
+        adapter1._connected = True
+        adapter1._initialized = True
+        adapter1._thread_id = "t-1"
+
+        proc2 = make_mock_proc()
+        adapter2 = CodexAdapter(proc2, "sess-1", CodexAdapterOptions(
+            model="gpt-5.5", cwd="/code", approval_mode="suggest",
+        ))
+        adapter2._init_task.cancel()
+        adapter2._exit_task.cancel()
+        adapter2._connected = True
+        adapter2._initialized = True
+        adapter2._thread_id = "t-1"
+
+        msgs1: list[dict] = []
+        msgs2: list[dict] = []
+        adapter1.on_browser_message(msgs1.append)
+        adapter2.on_browser_message(msgs2.append)
+
+        item = {"type": "agentMessage", "id": "msg_shared", "text": "hi"}
+        adapter1._handle_notification("item/completed", {"item": item})
+        adapter2._handle_notification("item/completed", {"item": item})
+
+        id1 = next(m["message"]["id"] for m in msgs1
+                   if m.get("type") == "assistant"
+                   and m["message"].get("stop_reason") == "end_turn")
+        id2 = next(m["message"]["id"] for m in msgs2
+                   if m.get("type") == "assistant"
+                   and m["message"].get("stop_reason") == "end_turn")
+        assert id1 == id2 == "codex-msg-msg_shared", (
+            f"adapter restart changed the assistant id: {id1!r} vs {id2!r}. "
+            f"This is exactly the dedup-drop pattern that made codex "
+            f"responses appear-then-disappear after a hub restart."
+        )
+
+    async def test_msg_ids_are_namespaced_per_emission_kind(self, adapter):
+        """An item that fans out to multiple emissions (agentMessage,
+        reasoning, tool_use, tool_result) must produce distinct ids per
+        emission kind, so they don't collide with each other in the
+        frontend's `appendMessage` dedup."""
+        msgs = self.collect_emitted(adapter)
+        # agentMessage completion
+        adapter._handle_notification("item/completed", {
+            "item": {"type": "agentMessage", "id": "shared", "text": "hi"},
+        })
+        # reasoning completion (same codex id, different emission kind)
+        adapter._handle_notification("item/completed", {
+            "item": {"type": "reasoning", "id": "shared", "summary": "thinking"},
+        })
+        # tool_use emission
+        adapter._emit_tool_use("call-shared", "Bash", {"command": "echo"})
+        # tool_result emission
+        adapter._emit_tool_result("call-shared", "ok", False)
+
+        assistant_msgs = [m for m in msgs if m.get("type") == "assistant"]
+        ids = [m["message"]["id"] for m in assistant_msgs]
+        assert len(ids) == len(set(ids)), (
+            f"emit kinds produced colliding ids: {ids}. The kind prefix "
+            f"(msg/think/tool/result) must keep them distinct."
+        )
+        expected = {
+            "codex-msg-shared",
+            "codex-think-shared",
+            "codex-tool-call-shared",
+            "codex-result-call-shared",
+        }
+        assert expected.issubset(set(ids)), (
+            f"expected namespaced ids {expected} not all present in {ids}"
+        )
+
 
 # ── CodexAdapter Approval Tests ──────────────────────────────��──────────────
 
