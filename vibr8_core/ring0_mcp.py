@@ -1590,32 +1590,27 @@ async def switch_node(node_name: str, client_id: str = "") -> str:
 
 @mcp.tool()
 async def switch_ring0_model(model: str) -> str:
-    """Switch Ring0 to a different Claude model. This will kill the current session
+    """Switch Ring0 to a different model. This will kill the current session
     and start a fresh one with the new model.
 
-    Accepts full model IDs (e.g. "claude-sonnet-4-6") or friendly aliases:
-    - "haiku" → claude-haiku-4-5-20251001
-    - "sonnet" → claude-sonnet-4-6
-    - "opus" → claude-opus-4-6
+    Pass either a full model id (e.g. "claude-sonnet-4-6", "gpt-5.3-codex",
+    "google/gemini-2.5-pro") or a backend-defined alias (e.g. "haiku",
+    "sonnet", "opus", "codex", "max", "gemini"). Alias resolution happens on
+    the server, scoped to the backend currently hosting Ring0 — pass the
+    user's stated value through directly rather than guessing what backend
+    they meant.
 
     WARNING: Calling this tool will terminate your current session. Save any
     important context to memory files BEFORE calling this tool.
 
     Args:
-        model: Model ID or alias (e.g. "haiku", "sonnet", "opus", or full model ID)
+        model: Model ID or backend-specific alias.
     """
-    # Resolve aliases locally for the confirmation message
-    aliases = {
-        "haiku": "claude-haiku-4-5-20251001",
-        "sonnet": "claude-sonnet-4-6",
-        "opus": "claude-opus-4-6",
-    }
-    resolved = aliases.get(model.lower().strip(), model.strip())
-
     result = await _post("/ring0/switch-model", {"model": model})
     if result.get("error"):
         return f"Error: {result['error']}"
 
+    resolved = result.get("model", model.strip())
     previous = result.get("previous", "unknown")
     return (
         f"Model switch initiated: {previous} → {resolved}\n"
@@ -1626,22 +1621,26 @@ async def switch_ring0_model(model: str) -> str:
 
 @mcp.tool()
 async def get_ring0_model() -> str:
-    """Get the current Ring0 model name.
+    """Get the current Ring0 backend and model.
 
     Use this when the user asks "what model are you on" or "which model".
+    The response tells you both the agent backend (claude, codex, opencode,
+    or hermes) AND the model name within that backend, so prefer it over
+    guessing from prior conversation context.
     """
-    # Check env var first (set by Ring0Manager when launching)
+    # Check env vars first (set by Ring0Manager when launching).
+    backend = os.environ.get("RING0_BACKEND")
     model = os.environ.get("RING0_MODEL")
-    if model:
-        return f"Current model: {model}"
 
-    # Fall back to REST API
-    status = await _get("/ring0/status")
-    model = status.get("model")
-    if model:
-        return f"Current model: {model}"
+    # Fall back to REST API for anything not in the env.
+    if not backend or not model:
+        status = await _get("/ring0/status")
+        backend = backend or status.get("backendType") or "unknown"
+        model = model or status.get("model")
 
-    return "Model not specified — using the default Claude model."
+    if model:
+        return f"Backend: {backend}\nModel: {model}"
+    return f"Backend: {backend}\nModel: (default for this backend — not explicitly set)"
 
 
 # ── Scheduled Tasks & Queue ──────────────────────────────────────────────────

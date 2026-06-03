@@ -62,93 +62,29 @@ This is mandatory — never ask the user where something is if it might be in me
 
 """
 
-_MODEL_SWITCHING_CLAUDE = """\
+_MODEL_SWITCHING = """\
 ## Model Switching
 
-You can switch which Claude model you run on. Recognize these voice patterns:
-- **Switch requests:** "switch to haiku", "use opus", "switch model to sonnet", "go to haiku"
+Ring0 may be hosted by any of several backends — Claude Code, Codex, OpenCode,
+or Hermes — and the active model depends on that backend. **Do not assume you
+are a Claude model.** Use the MCP tools to determine your actual identity.
+
+Recognize these voice patterns:
 - **Model queries:** "what model are you using", "which model", "what model is this"
+- **Switch requests:** "switch to <name>", "use <name>", "go to <name>"
 
-**Aliases:** "haiku" → claude-haiku-4-5-20251001, "sonnet" → claude-sonnet-4-6, "opus" → claude-opus-4-6
-
-**For model queries:** Simply tell the user your current model. Check the `CLAUDE_MODEL` \
-environment variable, or if unavailable, state which model you believe you are.
-
-**For switch requests:**
-1. Save any important in-progress context to memory files first
-2. Tell the user what you're saving and which model you're switching to
-3. Call `switch_ring0_model` with the target model
-4. This will kill your current session and start a fresh one — your response after calling \
-the tool is the last thing you'll say in this session
-
-"""
-
-_MODEL_SWITCHING_HERMES = """\
-## Model Switching
-
-You are running on Hermes, which selects models from `~/.hermes/config.yaml`.
-The active model is configured there or via `session/set_model`.
-
-Recognize these voice patterns:
-- **Switch requests:** "switch to opus", "use gpt-5", "go to deepseek"
-- **Model queries:** "what model are you using", "which model"
-
-**Aliases (Hermes):** "opus" → claude-opus-4-20250514, "sonnet" → \
-claude-sonnet-4-20250514, "gpt-5" → gpt-5.5, "gpt-4" → gpt-4o, "deepseek" → deepseek-r1
-
-**For model queries:** Tell the user the current model. Check the `RING0_MODEL` \
-environment variable; otherwise state your best guess based on session context.
+**For model queries:** Call `get_ring0_model` and report both the backend and
+the model name from its response. If you need more context about the host
+environment (node, capabilities), call `get_node_environment` as well.
 
 **For switch requests:**
-1. Save any important in-progress context to memory files first
-2. Tell the user what you're saving and which model you're switching to
-3. Call `switch_ring0_model` with the target model id (or alias)
-4. This will kill your current session and start a fresh one — your response after \
-calling the tool is the last thing you'll say in this session
-
-"""
-
-_MODEL_SWITCHING_CODEX = """\
-## Model Switching
-
-You are running on Codex. The active model is configured via your Codex CLI \
-config (`~/.codex/config.toml`) and the codex `models_cache.json`.
-
-Recognize these voice patterns:
-- **Switch requests:** "switch to gpt-5 codex", "use the max model"
-- **Model queries:** "what model are you using", "which model"
-
-**Aliases (Codex):** "codex" → gpt-5.3-codex, "max" → gpt-5.1-codex-max, \
-"mini" → gpt-5.1-codex-mini
-
-**For switch requests:**
-1. Save any important in-progress context to memory files first
-2. Tell the user what you're saving and which model you're switching to
-3. Call `switch_ring0_model` with the target model id (or alias)
-4. This will kill your current session and start a fresh one
-
-"""
-
-_MODEL_SWITCHING_OPENCODE = """\
-## Model Switching
-
-You are running on OpenCode. Models are addressed as `provider/model` (e.g. \
-`google/gemini-2.5-pro`, `openai/gpt-4o`). The active model is configured in \
-`opencode.jsonc` in your working directory.
-
-Recognize these voice patterns:
-- **Switch requests:** "switch to gemini", "use gpt-4o", "switch to claude sonnet"
-- **Model queries:** "what model are you using", "which model"
-
-**Aliases (OpenCode):** "gemini" → google/gemini-2.5-pro, "flash" → \
-google/gemini-2.5-flash, "gpt-4o" → openai/gpt-4o, "sonnet" → \
-anthropic/claude-sonnet-4-20250514, "grok" → xai/grok-3, "llama" → groq/llama-3.3-70b
-
-**For switch requests:**
-1. Save any important in-progress context to memory files first
-2. Tell the user what you're saving and which model you're switching to
-3. Call `switch_ring0_model` with the target model id (or alias)
-4. This will kill your current session and start a fresh one
+1. Save any important in-progress context to memory files first.
+2. Tell the user what you're saving and which model you're switching to.
+3. Call `switch_ring0_model` and pass the user's stated model id or alias
+   through directly — each backend resolves aliases against its own model
+   registry, so don't second-guess the input.
+4. This will kill your current session and start a fresh one — your response
+   after calling the tool is the last thing you'll say in this session.
 
 """
 
@@ -352,24 +288,30 @@ When you receive `[event task_completed]` with priority "urgent", announce the r
 immediately via voice. Keep it to one sentence. Don't wait for the user to ask.
 """
 
-_MODEL_SWITCHING_BY_BACKEND: dict[str, str] = {
-    "claude": _MODEL_SWITCHING_CLAUDE,
-    "hermes": _MODEL_SWITCHING_HERMES,
-    "codex": _MODEL_SWITCHING_CODEX,
-    "opencode": _MODEL_SWITCHING_OPENCODE,
-}
+_BACKEND_IDENTITY_TEMPLATE = """\
+## Current Backend
+
+You are currently running on the **{backend_type}** backend. The model and \
+the available model-switching aliases depend on this backend. If you ever need \
+to confirm, call `get_ring0_model` — it returns both backend and model name. \
+For host details (node name, OS, container, display), call `get_node_environment`.
+
+"""
 
 
 def build_ring0_system_prompt(backend_type: str = "claude") -> str:
-    """Assemble the Ring0 system prompt with the backend-appropriate
-    Model Switching section."""
-    model_section = _MODEL_SWITCHING_BY_BACKEND.get(
-        backend_type, _MODEL_SWITCHING_CLAUDE,
-    )
-    return _RING0_PROMPT_HEADER + model_section + _RING0_PROMPT_BODY
+    """Assemble the Ring0 system prompt.
+
+    The backend identity is stamped into the prompt so the hosted model knows
+    which agent runtime it is without having to infer. The Model Switching
+    section is backend-agnostic and delegates identity questions to the MCP
+    tools, so the same prompt body works for every backend.
+    """
+    identity = _BACKEND_IDENTITY_TEMPLATE.format(backend_type=backend_type)
+    return _RING0_PROMPT_HEADER + identity + _MODEL_SWITCHING + _RING0_PROMPT_BODY
 
 
-# Backwards-compat alias — defaults to the Claude prompt.
+# Backwards-compat alias — defaults to the Claude backend label.
 RING0_SYSTEM_PROMPT = build_ring0_system_prompt("claude")
 
 
@@ -675,6 +617,7 @@ class Ring0Manager:
         env: dict[str, str] = {
             "VIBR8_PORT": str(self._port),
             "VIBR8_SCHEME": scheme,
+            "RING0_BACKEND": self._backend_type,
         }
         token = self._get_service_token()
         if token:
@@ -699,10 +642,11 @@ class Ring0Manager:
     def _write_config_files(self, work_dir: Path, backend_type: str = "claude") -> Path:
         """Write CLAUDE.md/AGENTS.md and MCP config to the Ring0 working directory.
 
-        The system prompt is assembled with the backend-appropriate Model
-        Switching section so Ring0 receives the right aliases and env-var
-        guidance for whichever agent is hosting it. Both CLAUDE.md and
-        AGENTS.md are written so file-watching backends pick up either."""
+        The system prompt is stamped with the active backend identity so the
+        hosted model knows what runtime it is and routes model-identity
+        questions through `get_ring0_model` rather than assuming Claude. Both
+        CLAUDE.md and AGENTS.md are written so file-watching backends pick up
+        either."""
         prompt = build_ring0_system_prompt(backend_type)
         claude_md = work_dir / "CLAUDE.md"
         claude_md.write_text(prompt)
