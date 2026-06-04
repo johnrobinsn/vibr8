@@ -614,11 +614,19 @@ class CliLauncher:
         from vibr8_core.codex_adapter import CodexAdapter
 
         from vibr8_core.codex_adapter import CodexAdapterOptions
+        # Resume the prior thread if we have a cliSessionId. Codex persists
+        # threads to ~/.codex/sessions/.../rollout-*.jsonl, and the adapter
+        # issues `thread/resume` when thread_id is set. If the resume fails
+        # (e.g. the rollout file was pruned or the model/cwd diverged), the
+        # init_error handler clears cliSessionId so the next relaunch starts
+        # fresh — matches the Claude (--resume) and Hermes (session_id_to_resume)
+        # patterns.
+        resume_thread_id = info.cliSessionId
         adapter = CodexAdapter(proc, session_id, CodexAdapterOptions(
             model=options.model,
             cwd=info.cwd,
             approval_mode=options.permissionMode,
-            thread_id=None,  # Codex threads don't survive process restarts
+            thread_id=resume_thread_id,
         ))
 
         # Handle init errors -- mark session as exited so UI shows failure
@@ -628,6 +636,13 @@ class CliLauncher:
             if session:
                 session.state = "exited"
                 session.exitCode = 1
+                if resume_thread_id and session.cliSessionId == resume_thread_id:
+                    logger.warning(
+                        "Clearing cliSessionId for session %s after failed "
+                        "Codex thread/resume — next relaunch will start fresh",
+                        session_id,
+                    )
+                    session.cliSessionId = None
             self._persist_state()
 
         adapter.on_init_error(_on_init_error)

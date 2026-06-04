@@ -211,6 +211,54 @@ class TestCodexAdapterInterface:
         assert adapter.thread_id == "t-123"
 
 
+# ── CodexAdapter Initialize / Resume Tests ──────────────────────────────────
+
+
+class TestCodexAdapterInitialize:
+    """Verify the adapter picks thread/start vs thread/resume based on options."""
+
+    @pytest.fixture
+    def adapter_factory(self):
+        def _make(thread_id: str | None = None) -> CodexAdapter:
+            proc = make_mock_proc()
+            a = CodexAdapter(proc, "test-session-init", CodexAdapterOptions(
+                model="gpt-5.5", cwd="/code", thread_id=thread_id,
+            ))
+            a._init_task.cancel()
+            a._exit_task.cancel()
+            # Replace transport with a recorder so we can assert which method
+            # the initializer called.
+            a._transport = MagicMock()
+            a._transport.call = AsyncMock()
+            a._transport.notify = AsyncMock()
+            return a
+        return _make
+
+    async def test_initialize_without_thread_id_starts_new_thread(self, adapter_factory):
+        adapter = adapter_factory(thread_id=None)
+        adapter._transport.call.side_effect = [
+            {"protocolVersion": "1.0"},  # initialize
+            {"thread": {"id": "new-thread-xyz"}},  # thread/start
+        ]
+        await adapter._initialize()
+        methods = [c.args[0] for c in adapter._transport.call.call_args_list]
+        assert methods == ["initialize", "thread/start"]
+        assert adapter._thread_id == "new-thread-xyz"
+
+    async def test_initialize_with_thread_id_resumes_existing_thread(self, adapter_factory):
+        adapter = adapter_factory(thread_id="prior-thread-abc")
+        adapter._transport.call.side_effect = [
+            {"protocolVersion": "1.0"},  # initialize
+            {"thread": {"id": "prior-thread-abc"}},  # thread/resume
+        ]
+        await adapter._initialize()
+        methods = [c.args[0] for c in adapter._transport.call.call_args_list]
+        assert methods == ["initialize", "thread/resume"]
+        resume_params = adapter._transport.call.call_args_list[1].args[1]
+        assert resume_params["threadId"] == "prior-thread-abc"
+        assert adapter._thread_id == "prior-thread-abc"
+
+
 # ── CodexAdapter Message Translation Tests ──────────────────────────────────
 
 
