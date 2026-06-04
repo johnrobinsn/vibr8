@@ -4,6 +4,7 @@ import time
 
 from server.stt import AsyncSTT, STT, STTParams
 from server.webrtc import WebRTCManager
+from vibr8_core.ws_bridge import WsBridge
 
 
 def test_default_prompt_timeout_matches_profile_defaults() -> None:
@@ -228,6 +229,31 @@ async def test_final_transcript_clears_voice_preview_before_submit() -> None:
         ("preview", "session-1", {"type": "voice_transcript_preview", "transcript": ""}),
         ("submit", "session-1", ("vibr8 status", "client-1")),
     ]
+
+
+@pytest.mark.asyncio
+async def test_ws_bridge_uses_voice_service_tts_adapter() -> None:
+    calls: list[tuple[str, str, bool]] = []
+
+    class FakeVoiceServiceManager:
+        def set_thinking_any(self, thinking):
+            calls.append(("thinking", str(thinking), False))
+
+        async def say_for_session(self, session_id, text, interrupt=True):
+            calls.append((session_id, text, interrupt))
+            return True
+
+    class FakeTrack:
+        def push_opus_frame(self, _frame):
+            raise AssertionError("local TTS should not receive frames")
+
+    bridge = WsBridge()
+    bridge.set_webrtc_manager(FakeVoiceServiceManager())
+
+    await bridge._speak_text("session-1", "**vibr8** ready", FakeTrack())
+
+    assert ("session-1", "vibrate ready", True) in calls
+    assert calls.count(("thinking", "False", False)) >= 1
 
 
 # ── Voice-model preload race ─────────────────────────────────────────────────

@@ -617,6 +617,17 @@ def create_app() -> web.Application:
         logger.info("[server] Loaded %d ICE server(s)", len(ice_servers))
 
     webrtc_manager = WebRTCManager(ice_servers=ice_servers) if HAS_WEBRTC else None
+    voice_service_url = os.environ.get("VIBR8_VOICE_SERVICE_URL", "").strip()
+    if webrtc_manager and voice_service_url:
+        from server.voice_service_client import VoiceServiceClient
+
+        webrtc_manager = VoiceServiceClient(
+            webrtc_manager,
+            voice_service_url,
+            api_token=os.environ.get("VIBR8_VOICE_SERVICE_API_TOKEN") or None,
+            tenant_id=os.environ.get("VIBR8_VOICE_SERVICE_TENANT", "default"),
+        )
+        logger.info("[server] Audio WebRTC proxy enabled: %s", voice_service_url)
     terminal_manager = TerminalManager()
     ring0_manager = Ring0Manager(PORT, auth_manager=auth_manager)
     task_scheduler = TaskScheduler()

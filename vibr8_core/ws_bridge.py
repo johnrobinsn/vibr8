@@ -514,6 +514,9 @@ class WsBridge:
 
     def cancel_tts(self, session_id: str) -> None:
         """Cancel any in-progress TTS for *session_id* (called on barge-in)."""
+        if self._webrtc_manager and hasattr(self._webrtc_manager, "cancel_tts_for_session"):
+            import asyncio
+            asyncio.ensure_future(self._webrtc_manager.cancel_tts_for_session(session_id))
         tts = self._active_tts.pop(session_id, None)
         if tts:
             tts.cancel()
@@ -1542,6 +1545,15 @@ class WsBridge:
 
             # Pronunciation fixes: replace brand names with phonetic equivalents.
             text = re.sub(r'(?i)\bvibr8\b', 'vibrate', text)
+
+            if self._webrtc_manager and hasattr(self._webrtc_manager, "say_for_session"):
+                self._cancel_thinking_timer(session_id)
+                self._webrtc_manager.set_thinking_any(False)
+                logger.info("[ws-bridge] Remote TTS starting for session %s: %d chars", session_id, len(text))
+                handled = await self._webrtc_manager.say_for_session(session_id, text, interrupt=True)
+                if handled:
+                    logger.info("[ws-bridge] Remote TTS enqueued for session %s", session_id)
+                    return
 
             frame_count = 0
             def on_frame(frame):
