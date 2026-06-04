@@ -710,9 +710,7 @@ class CodexAdapter:
             elif method in ("account/updated", "account/login/completed"):
                 pass
             elif method in ("error", "warning"):
-                logger.warning(
-                    "[codex-adapter] %s: %s", method, params
-                )
+                self._emit_codex_error(method, params)
             else:
                 if not method.startswith("account/") and not method.startswith(
                     "codex/event/"
@@ -1236,6 +1234,29 @@ class CodexAdapter:
                     item_type,
                     json.dumps(item)[:300],
                 )
+
+    def _emit_codex_error(self, method: str, params: Dict[str, Any]) -> None:
+        """Surface a Codex `error`/`warning` notification to the chat.
+
+        Codex emits these for quota exhaustion, model billing errors, network
+        retries, etc. The default behavior was to log them server-side and
+        drop them, leaving the user staring at an unresponsive session. Now
+        we route them through the existing `{type: "error"}` wire path so
+        they render as a system message bubble.
+        """
+        logger.warning("[codex-adapter] %s: %s", method, params)
+        err = params.get("error") if isinstance(params, dict) else None
+        if isinstance(err, dict):
+            text = err.get("message") or ""
+            info = err.get("codexErrorInfo") or err.get("type") or ""
+            if info and info not in text:
+                text = f"{text} ({info})" if text else str(info)
+        else:
+            text = ""
+        if not text:
+            text = f"Codex {method}: {params}"
+        prefix = "Codex" if method == "error" else "Codex warning"
+        self._emit({"type": "error", "message": f"{prefix}: {text}"})
 
     def _handle_turn_completed(self, params: Dict[str, Any]) -> None:
         turn = params.get("turn") or {}

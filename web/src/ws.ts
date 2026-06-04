@@ -277,6 +277,16 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
           content: `Error: ${r.errors.join(", ")}`,
           timestamp: Date.now(),
         });
+      } else if (r.is_error && r.result) {
+        // Backends that put the error text on `result` instead of `errors`
+        // (e.g. Codex's turn.error.message path) — surface as a system bubble
+        // so the user knows the turn failed rather than seeing a silent gap.
+        store.appendMessage(sessionId, {
+          id: nextId(),
+          role: "system",
+          content: `Error: ${r.result}`,
+          timestamp: Date.now(),
+        });
       }
       // Surface result text when assistant had thinking-only content (no text blocks)
       if (r.result && !r.is_error) {
@@ -1001,6 +1011,13 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
               id: nextId(),
               role: "system",
               content: `Error: ${r.errors.join(", ")}`,
+              timestamp: histMsg.timestamp || Date.now(),
+            });
+          } else if (r.is_error && r.result) {
+            chatMessages.push({
+              id: nextId(),
+              role: "system",
+              content: `Error: ${r.result}`,
               timestamp: histMsg.timestamp || Date.now(),
             });
           }

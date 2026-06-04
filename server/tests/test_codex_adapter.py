@@ -344,6 +344,43 @@ class TestCodexAdapterMessages:
         assert len(updates) == 1
         assert updates[0]["session"]["context_used_percent"] == 6
 
+    async def test_error_notification_surfaces_to_chat(self, adapter):
+        """Codex `error` JSON-RPC notifications (e.g. usageLimitExceeded) must
+        be emitted as `{type: "error"}` browser messages so the user sees
+        them in the chat instead of staring at a silent stuck session."""
+        msgs = self.collect_emitted(adapter)
+        adapter._handle_notification("error", {
+            "error": {
+                "message": "You've hit your usage limit. Try again at 6:01 PM.",
+                "codexErrorInfo": "usageLimitExceeded",
+                "additionalDetails": None,
+            },
+            "willRetry": False,
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+        })
+        errors = [m for m in msgs if m.get("type") == "error"]
+        assert len(errors) == 1
+        assert "usage limit" in errors[0]["message"].lower()
+        assert "usagelimitexceeded" in errors[0]["message"].lower()
+        assert errors[0]["message"].startswith("Codex:")
+
+    async def test_warning_notification_surfaces_to_chat(self, adapter):
+        msgs = self.collect_emitted(adapter)
+        adapter._handle_notification("warning", {
+            "error": {"message": "Approaching rate limit"},
+        })
+        errors = [m for m in msgs if m.get("type") == "error"]
+        assert len(errors) == 1
+        assert errors[0]["message"].startswith("Codex warning:")
+
+    async def test_error_notification_with_unparseable_payload_falls_back(self, adapter):
+        msgs = self.collect_emitted(adapter)
+        adapter._handle_notification("error", {"unexpected": "shape"})
+        errors = [m for m in msgs if m.get("type") == "error"]
+        assert len(errors) == 1
+        assert "Codex error:" in errors[0]["message"]
+
     async def test_ensure_tool_use_emitted_backfills_missing_start(self, adapter):
         msgs = self.collect_emitted(adapter)
         adapter._handle_notification("item/completed", {
