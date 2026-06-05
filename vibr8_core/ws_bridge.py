@@ -860,6 +860,13 @@ class WsBridge:
                         session.state["total_cost_usd"] = data["total_cost_usd"]
                     if "num_turns" in data:
                         session.state["num_turns"] = data["num_turns"]
+                # Circuit-breaker: open on terminal error, close on success.
+                if isinstance(data, dict):
+                    terminal = data.get("terminal_error") if isinstance(data.get("terminal_error"), dict) else None
+                    if terminal:
+                        self._open_circuit_breaker(session, terminal)
+                    elif not data.get("is_error"):
+                        self._close_circuit_breaker(session, reason="successful turn")
                 # Auto-clear pending permissions
                 if session.pending_permissions:
                     for req_id in list(session.pending_permissions):
@@ -1823,6 +1830,23 @@ class WsBridge:
         # For adapter-based sessions (Codex / OpenCode / Hermes), delegate to the adapter
         if session.backend_type in ("codex", "opencode", "hermes"):
             msg_type = msg.get("type")
+            # Circuit breaker: refuse new user prompts while the breaker is
+            # open. permission_response/interrupt still flow through so an
+            # in-flight stuck turn can be unwedged.
+            if msg_type == "user_message" and self._circuit_breaker_open(session):
+                breaker = session.state.get("circuit_breaker") or {}
+                logger.warning(
+                    "[ws-bridge] Refusing user_message for session %s — circuit breaker open (%s)",
+                    session.id[:8], breaker.get("code"),
+                )
+                await self._broadcast_to_browsers(session, {
+                    "type": "error",
+                    "message": (
+                        f"Backend unavailable: {self._format_breaker_message(breaker)}. "
+                        "Wait for the limit to reset or try a different backend."
+                    ),
+                })
+                return
             if msg_type == "user_message":
                 import time
                 source_client_id = source_client_id or (session.browser_sockets.get(ws, "") if ws else "")
@@ -2168,6 +2192,70 @@ class WsBridge:
             "highest_priority": highest_priority,
         }))
 
+    # ── Circuit breaker ─────────────────────────────────────────────────
+    #
+    # When a backend signals a non-retryable terminal error for a session
+    # (e.g. Codex `usageLimitExceeded` with `willRetry: False`), we open
+    # a per-session circuit breaker that:
+    #   - refuses to forward new user messages to the adapter (no point —
+    #     the same error will fire again, and a queue of failed turns
+    #     produces the idle->running->idle loop the user reported);
+    #   - drops pending_messages so adapter re-attach doesn't replay
+    #     queued prompts that all hit the same wall;
+    #   - suppresses Ring0 state-change notifications so Ring0 doesn't
+    #     keep poking the session with follow-ups that all fail.
+    #
+    # The breaker auto-closes on (a) a successful turn result arriving
+    # (e.g. the user manually retried and it worked), or (b) when the
+    # parsed retry-after timestamp passes and a new prompt comes in.
+    # A `{type: "error"}` message tells the user why the turn was rejected
+    # so they can see they need to wait.
+
+    def _circuit_breaker_open(self, session: Session) -> bool:
+        breaker = session.state.get("circuit_breaker")
+        if not isinstance(breaker, dict):
+            return False
+        retry_after = breaker.get("retry_after")
+        if isinstance(retry_after, (int, float)) and time.time() >= retry_after:
+            self._close_circuit_breaker(session, reason="retry-after elapsed")
+            return False
+        return True
+
+    def _open_circuit_breaker(self, session: Session, terminal: dict[str, Any]) -> None:
+        prior = session.state.get("circuit_breaker")
+        session.state["circuit_breaker"] = terminal
+        # Drop queued prompts so an adapter relaunch doesn't replay them all
+        # against the same broken backend (one of the loop sources).
+        dropped = len(session.pending_messages)
+        if dropped:
+            session.pending_messages.clear()
+        if prior != terminal:
+            logger.warning(
+                "[ws-bridge] Circuit breaker OPEN for session %s: code=%s "
+                "retry_after=%s dropped_queue=%d",
+                session.id[:8],
+                terminal.get("code"),
+                terminal.get("retry_after"),
+                dropped,
+            )
+        self._persist_session(session)
+
+    def _close_circuit_breaker(self, session: Session, *, reason: str) -> None:
+        if "circuit_breaker" in session.state:
+            session.state.pop("circuit_breaker", None)
+            logger.info(
+                "[ws-bridge] Circuit breaker CLOSED for session %s (%s)",
+                session.id[:8], reason,
+            )
+            self._persist_session(session)
+
+    def _format_breaker_message(self, breaker: dict[str, Any]) -> str:
+        code = breaker.get("code") or "backend unavailable"
+        msg = breaker.get("message") or ""
+        if msg and code not in msg:
+            return f"{code}: {msg}"
+        return msg or str(code)
+
     # ── Ring0 event notifications ────────────────────────────────────────
 
     async def emit_ring0_event(self, event: Any) -> None:
@@ -2263,6 +2351,15 @@ class WsBridge:
             return
         # Don't notify hub Ring0 about remote node sessions (they handle their own)
         if self._is_remote_session(session.id):
+            return
+        # Circuit-breaker: suppress state-change events while the session is
+        # known to be unable to serve new turns (e.g. Codex quota exhausted).
+        # Otherwise Ring0 reacts to the failed turn's running->idle event,
+        # sends a fresh prompt, which also fails, which fires another event,
+        # which Ring0 reacts to again — a loop that ignores interrupts because
+        # each interrupt only cancels the current turn, not the next one
+        # Ring0 is about to enqueue.
+        if self._circuit_breaker_open(session):
             return
         from vibr8_core import session_names
         from vibr8_core.ring0_events import Ring0Event

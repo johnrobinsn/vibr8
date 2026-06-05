@@ -11,9 +11,16 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import time
+
 import pytest
 
-from vibr8_core.codex_adapter import CodexAdapter, CodexAdapterOptions, JsonRpcTransport
+from vibr8_core.codex_adapter import (
+    CodexAdapter,
+    CodexAdapterOptions,
+    JsonRpcTransport,
+    _parse_retry_after,
+)
 from vibr8_core.ws_bridge import WsBridge, Session
 
 
@@ -139,6 +146,36 @@ class TestJsonRpcTransport:
         assert transport.connected is True
         transport._connected = False
         assert transport.connected is False
+
+
+# ── parse_retry_after helper tests ──────────────────────────────────────────
+
+
+class TestParseRetryAfter:
+    def test_pm_in_future(self):
+        # "try again at 11:59 PM" — should round-trip into a future timestamp.
+        ts = _parse_retry_after("Try again at 11:59 PM.")
+        assert ts is not None and ts > 0
+
+    def test_am_clause_parses(self):
+        ts = _parse_retry_after("Try again at 7:30 AM tomorrow.")
+        assert ts is not None
+
+    def test_no_time_clause_returns_none(self):
+        assert _parse_retry_after("Generic failure") is None
+
+    def test_empty_returns_none(self):
+        assert _parse_retry_after("") is None
+        assert _parse_retry_after(None) is None
+
+    def test_real_codex_message_parses(self):
+        msg = (
+            "You've hit your usage limit. Visit "
+            "https://chatgpt.com/codex/settings/usage to purchase more credits "
+            "or try again at 6:01 PM."
+        )
+        ts = _parse_retry_after(msg)
+        assert ts is not None
 
 
 # ── CodexAdapter Interface Tests ────────────────────────────────────────────
@@ -428,6 +465,73 @@ class TestCodexAdapterMessages:
         errors = [m for m in msgs if m.get("type") == "error"]
         assert len(errors) == 1
         assert "Codex error:" in errors[0]["message"]
+
+    async def test_non_retryable_error_captures_terminal_metadata(self, adapter):
+        """willRetry=False with a codexErrorInfo arms the terminal-error flag."""
+        adapter._handle_notification("error", {
+            "error": {
+                "message": "You've hit your usage limit. Try again at 6:01 PM.",
+                "codexErrorInfo": "usageLimitExceeded",
+            },
+            "willRetry": False,
+        })
+        assert adapter._pending_terminal_error is not None
+        assert adapter._pending_terminal_error["code"] == "usageLimitExceeded"
+        assert "usage limit" in adapter._pending_terminal_error["message"].lower()
+        # retry_after should parse the "6:01 PM" clause
+        assert isinstance(adapter._pending_terminal_error["retry_after"], float)
+
+    async def test_retryable_error_does_not_arm_terminal_flag(self, adapter):
+        """willRetry=True means Codex will retry internally — no breaker."""
+        adapter._handle_notification("error", {
+            "error": {"message": "Network blip", "codexErrorInfo": "transient"},
+            "willRetry": True,
+        })
+        assert adapter._pending_terminal_error is None
+
+    async def test_error_without_codex_info_does_not_arm_terminal_flag(self, adapter):
+        adapter._handle_notification("error", {
+            "error": {"message": "Generic failure"},
+            "willRetry": False,
+        })
+        assert adapter._pending_terminal_error is None
+
+    async def test_turn_completed_attaches_terminal_error_and_forces_is_error(self, adapter):
+        msgs = self.collect_emitted(adapter)
+        adapter._handle_notification("error", {
+            "error": {
+                "message": "You've hit your usage limit.",
+                "codexErrorInfo": "usageLimitExceeded",
+            },
+            "willRetry": False,
+        })
+        adapter._handle_notification("turn/completed", {
+            "turn": {"status": "completed"},  # Codex sometimes claims success
+        })
+        results = [m for m in msgs if m.get("type") == "result"]
+        assert len(results) == 1
+        data = results[0]["data"]
+        assert data["is_error"] is True
+        assert data["subtype"] == "error_during_execution"
+        assert data["terminal_error"]["code"] == "usageLimitExceeded"
+        assert "usage limit" in data["result"].lower()
+        # Captured flag must be cleared after the turn completes
+        assert adapter._pending_terminal_error is None
+
+    async def test_turn_completed_without_prior_error_omits_terminal_field(self, adapter):
+        msgs = self.collect_emitted(adapter)
+        adapter._handle_notification("turn/completed", {"turn": {"status": "completed"}})
+        results = [m for m in msgs if m.get("type") == "result"]
+        assert "terminal_error" not in results[0]["data"]
+
+    async def test_new_turn_clears_stale_terminal_error_flag(self, adapter):
+        adapter._pending_terminal_error = {"code": "stale"}
+        adapter._thread_id = "thread-1"
+        # Stub the JSON-RPC transport so the call doesn't hang
+        adapter._transport = MagicMock()
+        adapter._transport.call = AsyncMock(return_value={"turn": {"id": "turn-1"}})
+        await adapter._handle_outgoing_user_message({"content": "hi"})
+        assert adapter._pending_terminal_error is None
 
     async def test_ensure_tool_use_emitted_backfills_missing_start(self, adapter):
         msgs = self.collect_emitted(adapter)
@@ -838,3 +942,85 @@ class TestWsBridgeAdapterIntegration:
 
         await cb({"type": "status_change", "status": None})
         assert session.state["is_compacting"] is False
+
+    async def test_terminal_error_opens_circuit_breaker_and_drops_queue(self, bridge, mock_adapter):
+        bridge.attach_adapter("s1", mock_adapter, "codex")
+        session = bridge._sessions["s1"]
+        session.pending_messages = ["stale-prompt-1", "stale-prompt-2"]
+        cb = mock_adapter._callbacks["on_browser_message"]
+
+        await cb({
+            "type": "result",
+            "data": {
+                "is_error": True,
+                "terminal_error": {
+                    "source": "codex", "code": "usageLimitExceeded",
+                    "message": "Quota exhausted.", "retry_after": None,
+                },
+            },
+        })
+        breaker = session.state.get("circuit_breaker")
+        assert breaker is not None
+        assert breaker["code"] == "usageLimitExceeded"
+        # Queue must be cleared so reattach doesn't replay broken prompts.
+        assert session.pending_messages == []
+
+    async def test_successful_result_closes_circuit_breaker(self, bridge, mock_adapter):
+        bridge.attach_adapter("s1", mock_adapter, "codex")
+        session = bridge._sessions["s1"]
+        session.state["circuit_breaker"] = {"code": "usageLimitExceeded"}
+        cb = mock_adapter._callbacks["on_browser_message"]
+
+        await cb({"type": "result", "data": {"is_error": False, "total_cost_usd": 0.01, "num_turns": 1}})
+        assert "circuit_breaker" not in session.state
+
+    async def test_user_message_refused_when_breaker_open(self, bridge, mock_adapter):
+        bridge.attach_adapter("s1", mock_adapter, "codex")
+        session = bridge._sessions["s1"]
+        session.state["circuit_breaker"] = {
+            "code": "usageLimitExceeded",
+            "message": "Quota.",
+            "retry_after": None,
+        }
+        mock_adapter.send_browser_message.reset_mock()
+
+        await bridge._route_browser_message(session, {"type": "user_message", "content": "hi"}, None)
+        mock_adapter.send_browser_message.assert_not_called()
+        # Error message was broadcast to browsers explaining the breaker
+        error_broadcasts = [
+            c.args[1] for c in bridge._broadcast_to_browsers.call_args_list
+            if c.args[1].get("type") == "error"
+        ]
+        assert len(error_broadcasts) >= 1
+        assert "usageLimitExceeded" in error_broadcasts[0]["message"]
+
+    async def test_user_message_allowed_after_retry_after_elapses(self, bridge, mock_adapter):
+        bridge.attach_adapter("s1", mock_adapter, "codex")
+        session = bridge._sessions["s1"]
+        # retry_after already in the past — breaker should auto-close on check.
+        session.state["circuit_breaker"] = {
+            "code": "usageLimitExceeded",
+            "message": "Quota.",
+            "retry_after": time.time() - 60,
+        }
+        mock_adapter.send_browser_message.reset_mock()
+
+        await bridge._route_browser_message(session, {"type": "user_message", "content": "hi"}, None)
+        mock_adapter.send_browser_message.assert_called_once()
+        assert "circuit_breaker" not in session.state
+
+    async def test_ring0_state_change_suppressed_while_breaker_open(self, bridge, mock_adapter):
+        # Replace the standard AsyncMock with the real method so we can verify
+        # the suppression path.
+        from vibr8_core.ws_bridge import WsBridge as _RealBridge
+        bridge._notify_ring0_state_change = _RealBridge._notify_ring0_state_change.__get__(bridge)
+        bridge.emit_ring0_event = AsyncMock()
+        bridge._ring0_manager = MagicMock()
+        bridge._ring0_manager.session_id = "ring0"
+
+        bridge.attach_adapter("s1", mock_adapter, "codex")
+        session = bridge._sessions["s1"]
+        session.state["circuit_breaker"] = {"code": "usageLimitExceeded", "retry_after": None}
+
+        await bridge._notify_ring0_state_change(session, "running->idle")
+        bridge.emit_ring0_event.assert_not_called()

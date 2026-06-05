@@ -13,8 +13,10 @@ Originally ported from The Vibe Companion (codex-adapter.ts).
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
+import re
 import shutil
 import subprocess
 import time
@@ -123,6 +125,41 @@ def codex_sandbox_reason() -> str:
     if _SANDBOX_MODE_CACHE is None:
         detect_codex_sandbox_mode()
     return _SANDBOX_REASON_CACHE
+
+
+_RETRY_AFTER_TIME_RE = re.compile(
+    r"try again at (\d{1,2}):(\d{2})\s*(AM|PM|am|pm)",
+    re.IGNORECASE,
+)
+
+
+def _parse_retry_after(message: Optional[str]) -> Optional[float]:
+    """Best-effort parse of a 'try again at H:MM AM/PM' clause from a Codex
+    error message into a unix timestamp.
+
+    Returns None if no time clause is found. The returned timestamp is the
+    next future occurrence of the parsed wall-clock time in the host's local
+    timezone — if the parsed time has already passed today, it rolls to
+    tomorrow. The expression covers the only retry-after format codex emits
+    today (`usageLimitExceeded`); other error codes won't have one.
+    """
+    if not message:
+        return None
+    match = _RETRY_AFTER_TIME_RE.search(message)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    meridiem = match.group(3).upper()
+    if meridiem == "PM" and hour != 12:
+        hour += 12
+    elif meridiem == "AM" and hour == 12:
+        hour = 0
+    now = datetime.datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += datetime.timedelta(days=1)
+    return target.timestamp()
 
 
 # ---- Codex JSON-RPC Types (internal) ----------------------------------------
@@ -333,6 +370,12 @@ class CodexAdapter:
         self._current_turn_id: Optional[str] = None
         self._connected: bool = False
         self._initialized: bool = False
+
+        # Non-retryable error captured during the current turn (populated
+        # in `_emit_codex_error` when willRetry=False with a known error
+        # code). Attached to the turn's result message so ws_bridge can
+        # open a circuit breaker. Cleared at the start of every new turn.
+        self._pending_terminal_error: Optional[Dict[str, Any]] = None
 
         # Streaming accumulator for agent messages
         self._streaming_text: str = ""
@@ -582,6 +625,10 @@ class CodexAdapter:
         if not self._thread_id:
             self._emit({"type": "error", "message": "No Codex thread started yet"})
             return
+
+        # New turn — clear any stale terminal-error capture from a prior
+        # turn that didn't reach _handle_turn_completed for some reason.
+        self._pending_terminal_error = None
 
         input_parts: List[Dict[str, Any]] = []
 
@@ -1243,20 +1290,39 @@ class CodexAdapter:
         drop them, leaving the user staring at an unresponsive session. Now
         we route them through the existing `{type: "error"}` wire path so
         they render as a system message bubble.
+
+        Also captures non-retryable error metadata (willRetry=False with a
+        known error code) so the subsequent turn/completed notification can
+        attach a `terminal_error` field to its result. ws_bridge uses that
+        to open a session-level circuit breaker that gates further turns.
         """
         logger.warning("[codex-adapter] %s: %s", method, params)
         err = params.get("error") if isinstance(params, dict) else None
+        will_retry = bool(params.get("willRetry")) if isinstance(params, dict) else False
+        info = ""
+        text = ""
         if isinstance(err, dict):
             text = err.get("message") or ""
             info = err.get("codexErrorInfo") or err.get("type") or ""
             if info and info not in text:
                 text = f"{text} ({info})" if text else str(info)
-        else:
-            text = ""
         if not text:
             text = f"Codex {method}: {params}"
         prefix = "Codex" if method == "error" else "Codex warning"
         self._emit({"type": "error", "message": f"{prefix}: {text}"})
+
+        # Capture terminal-error metadata for the in-flight turn. Only
+        # treat `willRetry: False` with a non-empty `codexErrorInfo` as
+        # terminal — `willRetry: True` means Codex itself will retry
+        # transparently inside the same turn, so vibr8 stays out of it.
+        if method == "error" and not will_retry and info:
+            self._pending_terminal_error = {
+                "source": "codex",
+                "code": info,
+                "message": (err.get("message") if isinstance(err, dict) else "") or text,
+                "retry_after": _parse_retry_after(err.get("message") if isinstance(err, dict) else ""),
+                "captured_at": time.time(),
+            }
 
     def _handle_turn_completed(self, params: Dict[str, Any]) -> None:
         turn = params.get("turn") or {}
@@ -1264,6 +1330,8 @@ class CodexAdapter:
         # Synthesize a CLIResultMessage-like structure
         turn_status = turn.get("status", "")
         turn_error = turn.get("error", {})
+        terminal_error = self._pending_terminal_error
+        self._pending_terminal_error = None
 
         result: CLIResultMessage = {
             "type": "result",
@@ -1288,8 +1356,24 @@ class CodexAdapter:
 
         # Add error result text if present
         error_message = turn_error.get("message") if isinstance(turn_error, dict) else None
+        if not error_message and terminal_error:
+            # Fall back to the captured terminal-error message so the user
+            # sees what failed even when Codex didn't populate turn.error.
+            error_message = terminal_error.get("message")
         if error_message:
             result["result"] = error_message
+
+        # Attach captured non-retryable error info so ws_bridge can open
+        # a circuit breaker for the session. Only present when the turn
+        # failed because of a known terminal condition (e.g. quota).
+        if terminal_error:
+            result["terminal_error"] = terminal_error  # type: ignore[typeddict-unknown-key]
+            # Force is_error so ws_bridge always sees a failed turn even
+            # when Codex emits turn_status == "completed" alongside the
+            # error notification (observed once on quota failures).
+            result["is_error"] = True
+            if result["subtype"] == "success":
+                result["subtype"] = "error_during_execution"
 
         self._emit({"type": "result", "data": result})
         self._current_turn_id = None
