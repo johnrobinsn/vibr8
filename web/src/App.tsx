@@ -120,6 +120,17 @@ export default function App() {
       .catch(() => setAuthState("authenticated")); // If endpoint fails, assume no auth
   }, []);
 
+  // Mid-session expiry: api.ts dispatches `vibr8:session-expired` when any
+  // request returns 401. Flip authState back to "login" so the login screen
+  // re-mounts; previously api.ts called window.location.reload(), which
+  // triggered a reload loop with the same login screen flashing in and out
+  // every polling tick.
+  useEffect(() => {
+    const onExpired = () => setAuthState("login");
+    window.addEventListener("vibr8:session-expired", onExpired);
+    return () => window.removeEventListener("vibr8:session-expired", onExpired);
+  }, []);
+
   useEffect(() => {
     // Second screen manages its own dark mode independently — read hash
     // directly so this is resilient to HMR re-renders where reactive state

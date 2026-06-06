@@ -34,7 +34,13 @@ function checkAuth(res: Response): void {
     if (getDeviceToken()) {
       throw new Error("Device token rejected");
     }
-    window.location.reload();
+    // Surface the session expiry to App.tsx via a window event instead of
+    // calling window.location.reload(). The reload caused an infinite loop
+    // when the cookie was rejected: App.tsx renders the login screen, but a
+    // background poll (Sidebar, ring0/status, active-node) fires through
+    // api.ts, gets 401, reloads the page, and the login screen flashes away
+    // before the user can interact with it.
+    window.dispatchEvent(new CustomEvent("vibr8:session-expired"));
     throw new Error("Session expired");
   }
 }
