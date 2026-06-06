@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import random
 import re
 import secrets
@@ -30,7 +31,27 @@ USERS_FILE = VIBR8_DIR / "users.json"
 SECRET_FILE = VIBR8_DIR / "secret.key"
 DEVICE_TOKENS_FILE = VIBR8_DIR / "device-tokens.json"
 
-SESSION_MAX_AGE = 30 * 86400  # 30 days
+# Session token lifetime. Override via `VIBR8_SESSION_MAX_AGE_DAYS`:
+#   * positive int  → that many days (default 30)
+#   * 0             → never expire (server skips the expiry check and
+#                     the cookie is set with a 10-year max-age so the
+#                     browser keeps it across restarts)
+def _resolve_session_max_age_seconds() -> int:
+    raw = os.environ.get("VIBR8_SESSION_MAX_AGE_DAYS", "30").strip()
+    try:
+        days = int(raw)
+    except ValueError:
+        days = 30
+    if days < 0:
+        days = 30
+    return days * 86400  # 0 → 0, which the validator treats as "never expire"
+
+
+SESSION_MAX_AGE = _resolve_session_max_age_seconds()
+# Cookie max-age sent in Set-Cookie. When SESSION_MAX_AGE is 0 ("never
+# expire" mode) we still need a finite value so the browser persists the
+# cookie across restarts — 10 years is effectively forever.
+SESSION_COOKIE_MAX_AGE = SESSION_MAX_AGE or (10 * 365 * 86400)
 PAIRING_TTL = 600  # 10 minutes
 PAIRING_RATE_LIMIT = 10  # max codes per IP per minute
 PAIRING_RATE_WINDOW = 60  # seconds
@@ -178,7 +199,8 @@ class AuthManager:
         except ValueError:
             return None
         if token_type == "s":
-            if time.time() - created > SESSION_MAX_AGE:
+            # SESSION_MAX_AGE == 0 means "never expire" (env opt-in).
+            if SESSION_MAX_AGE > 0 and time.time() - created > SESSION_MAX_AGE:
                 return None
         # Check revocation (device tokens only)
         if token_type == "d":

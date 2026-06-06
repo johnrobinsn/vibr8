@@ -163,3 +163,89 @@ def test_public_auth_surface_constants_are_named_in_audit_document() -> None:
         assert path in doc
     for pattern in auth._PUBLIC_PATH_PATTERNS:
         assert pattern.pattern in doc
+
+
+# ── Session expiry env knob ──────────────────────────────────────────────────
+
+
+def test_default_session_max_age_is_30_days(monkeypatch) -> None:
+    """Default session lifetime is 30 days when env is unset."""
+    monkeypatch.delenv("VIBR8_SESSION_MAX_AGE_DAYS", raising=False)
+    assert auth._resolve_session_max_age_seconds() == 30 * 86400
+
+
+def test_session_max_age_env_overrides_default(monkeypatch) -> None:
+    """`VIBR8_SESSION_MAX_AGE_DAYS=N` sets lifetime to N days."""
+    monkeypatch.setenv("VIBR8_SESSION_MAX_AGE_DAYS", "7")
+    assert auth._resolve_session_max_age_seconds() == 7 * 86400
+
+
+def test_session_max_age_zero_means_never_expire(monkeypatch) -> None:
+    """`VIBR8_SESSION_MAX_AGE_DAYS=0` opts into never-expire mode.
+
+    The validator treats the resulting `SESSION_MAX_AGE == 0` as "no
+    expiry check", and the cookie max-age falls back to ~10 years so the
+    browser persists the cookie across restarts.
+    """
+    monkeypatch.setenv("VIBR8_SESSION_MAX_AGE_DAYS", "0")
+    assert auth._resolve_session_max_age_seconds() == 0
+
+
+def test_session_max_age_invalid_value_falls_back_to_default(monkeypatch) -> None:
+    """Garbage env values reset to the 30-day default rather than erroring."""
+    monkeypatch.setenv("VIBR8_SESSION_MAX_AGE_DAYS", "not-a-number")
+    assert auth._resolve_session_max_age_seconds() == 30 * 86400
+    monkeypatch.setenv("VIBR8_SESSION_MAX_AGE_DAYS", "-5")
+    assert auth._resolve_session_max_age_seconds() == 30 * 86400
+
+
+def test_validate_session_skips_expiry_when_max_age_zero(monkeypatch) -> None:
+    """When SESSION_MAX_AGE is 0, a token whose timestamp is years old still
+    validates — that's the whole point of the never-expire knob."""
+    import hashlib
+    import hmac as _hmac
+    import time as _time
+
+    monkeypatch.setattr(auth, "SESSION_MAX_AGE", 0)
+
+    # Construct a session token issued 5 years ago with a valid signature.
+    mgr = MagicMock()
+    mgr._secret = "test-secret"
+    mgr._users = {"alice": MagicMock()}
+    mgr._revoked_device_sigs = set()
+
+    old_ts = int(_time.time() - 5 * 365 * 86400)
+    payload = f"alice:{old_ts}"
+    sig = _hmac.new(
+        mgr._secret.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+    token = f"s:alice:{old_ts}:{sig}"
+
+    # Bind the AuthManager's validate_session method to our mock.
+    result = auth.AuthManager.validate_session(mgr, token)
+    assert result == "alice", (
+        "VIBR8_SESSION_MAX_AGE_DAYS=0 should let an ancient token validate"
+    )
+
+
+def test_validate_session_enforces_expiry_when_max_age_positive(monkeypatch) -> None:
+    """The normal (non-zero) path still rejects expired tokens."""
+    import hashlib
+    import hmac as _hmac
+    import time as _time
+
+    monkeypatch.setattr(auth, "SESSION_MAX_AGE", 60)  # 60-second sessions
+
+    mgr = MagicMock()
+    mgr._secret = "test-secret"
+    mgr._users = {"alice": MagicMock()}
+    mgr._revoked_device_sigs = set()
+
+    old_ts = int(_time.time() - 3600)  # 1 hour ago, way past 60-second TTL
+    payload = f"alice:{old_ts}"
+    sig = _hmac.new(
+        mgr._secret.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+    token = f"s:alice:{old_ts}:{sig}"
+
+    assert auth.AuthManager.validate_session(mgr, token) is None

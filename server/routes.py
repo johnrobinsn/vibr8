@@ -228,13 +228,18 @@ def create_routes(
             return web.json_response({"error": "Invalid credentials"}, status=401)
         token = auth_manager.create_session(username)
         resp = web.json_response({"ok": True, "username": username})
+        # `SESSION_COOKIE_MAX_AGE` honors `VIBR8_SESSION_MAX_AGE_DAYS`
+        # (default 30 days). When that env is 0 — "never expire" mode —
+        # the constant falls back to 10 years so the browser keeps the
+        # cookie across restarts; the server side skips the expiry check.
+        from server.auth import SESSION_COOKIE_MAX_AGE
         resp.set_cookie(
             "vibr8_session",
             token,
             httponly=True,
             samesite="Lax",
             secure=request.secure,
-            max_age=30 * 86400,
+            max_age=SESSION_COOKIE_MAX_AGE,
             path="/",
         )
         return resp
