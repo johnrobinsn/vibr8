@@ -65,6 +65,27 @@ class NodeOperations:
             except Exception:
                 logger.exception("on_sessions_changed callback failed")
 
+    def _enrich_session_model_info(self, session_dict: dict[str, Any]) -> dict[str, Any]:
+        from vibr8_core import backend_models
+
+        backend_type = session_dict.get("backendType") or session_dict.get("backend_type") or "claude"
+        bridge_session = self._bridge._sessions.get(session_dict.get("sessionId", ""))
+        explicit_model = session_dict.get("model") or ""
+        work_dir = session_dict.get("cwd") or ""
+        if bridge_session is not None:
+            explicit_model = explicit_model or bridge_session.state.get("model", "")
+            work_dir = work_dir or bridge_session.state.get("cwd", "")
+
+        model_info = backend_models.get_backend_model_info(
+            backend_type,
+            explicit_model=explicit_model,
+            work_dir=work_dir or None,
+        )
+        session_dict["modelInfo"] = model_info
+        if model_info.get("model"):
+            session_dict["model"] = model_info["model"]
+        return session_dict
+
     # ── Session listing & lifecycle ───────────────────────────────────────
 
     async def list_sessions(self) -> dict:
@@ -85,6 +106,7 @@ class NodeOperations:
             if bridge_session is not None:
                 s_dict["controlledBy"] = bridge_session.controlled_by
                 s_dict["agentState"] = self._bridge._derive_agent_status(bridge_session)
+            self._enrich_session_model_info(s_dict)
             sessions.append(s_dict)
         return {"sessions": sessions}
 
@@ -117,6 +139,7 @@ class NodeOperations:
         )
         info = self._launcher.launch(opts)
         result = info.to_dict() if hasattr(info, "to_dict") else info.__dict__
+        self._enrich_session_model_info(result)
         await self._notify_sessions_changed()
         return result
 
@@ -160,6 +183,7 @@ class NodeOperations:
         result = info.to_dict() if hasattr(info, "to_dict") else info.__dict__
         if name:
             result["name"] = name
+        self._enrich_session_model_info(result)
         await self._notify_sessions_changed()
         return result
 
@@ -303,6 +327,8 @@ class NodeOperations:
         bridge_session = self._bridge._sessions.get(session_id)
         if bridge_session is not None:
             d["controlledBy"] = bridge_session.controlled_by
+            d["agentState"] = self._bridge._derive_agent_status(bridge_session)
+        self._enrich_session_model_info(d)
         return d
 
     async def get_message_history(self, session_id: str = "", limit: int = 500) -> dict:
@@ -865,11 +891,13 @@ class NodeOperations:
     async def ring0_status(self) -> dict:
         if self._ring0 is None:
             return {"enabled": False, "sessionId": None}
+        model_info = self._ring0.model_info()
         return {
             "enabled": self._ring0.is_enabled,
             "eventsMuted": getattr(self._ring0, "events_muted", False),
             "sessionId": self._ring0.session_id,
-            "model": self._ring0.model,
+            "model": model_info.get("model") or self._ring0.model,
+            "modelInfo": model_info,
             "backendType": self._ring0.backend_type,
         }
 
@@ -964,7 +992,7 @@ class NodeOperations:
         }
         aliases = backend_aliases.get(self._ring0.backend_type, {})
         resolved = aliases.get(model.lower(), model)
-        previous = self._ring0.model
+        previous = self._ring0.model_info().get("model") or self._ring0.model
 
         async def _do_switch() -> None:
             await asyncio.sleep(1.5)

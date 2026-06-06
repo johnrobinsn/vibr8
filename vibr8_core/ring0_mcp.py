@@ -11,6 +11,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -190,8 +191,57 @@ async def list_sessions() -> str:
         perm_info = f", BLOCKED: {pending} pending permission(s)" if pending else ""
         pen = s.get("controlledBy", "ring0")
         pen_info = ", PEN: user (do not send messages)" if pen == "user" else ""
-        lines.append(f"- {name} (id={_short_id(sid)}, state={state}, type={backend}, cwd={cwd}{perm_info}{pen_info})")
+        model_info = s.get("modelInfo") if isinstance(s.get("modelInfo"), dict) else {}
+        model = model_info.get("model") or s.get("model", "")
+        model_text = f", model={model}" if model else ""
+        lines.append(f"- {name} (id={_short_id(sid)}, state={state}, type={backend}{model_text}, cwd={cwd}{perm_info}{pen_info})")
     return "\n".join(lines) if lines else "No active sessions."
+
+
+@mcp.tool()
+async def get_session_model(session_id: str) -> str:
+    """Get backend, provider, model, and model modes for a specific session.
+
+    Args:
+        session_id: The session ID (full or prefix) to inspect.
+    """
+    requested = session_id.strip()
+    sessions = await _get("/ring0/sessions")
+    full_id = requested
+    for s in sessions:
+        sid = s.get("sessionId", "")
+        if sid == requested or _short_id(sid).startswith(requested) or sid.startswith(requested):
+            full_id = sid
+            break
+
+    result = await _get(f"/sessions/{quote(full_id, safe='')}")
+    if result.get("error"):
+        return f"Error: {result['error']}"
+
+    backend = result.get("backendType") or "unknown"
+    model_info = result.get("modelInfo") if isinstance(result.get("modelInfo"), dict) else {}
+    model = model_info.get("model") or result.get("model") or ""
+    provider = model_info.get("provider") or "unknown"
+    source = model_info.get("source")
+    display_name = model_info.get("displayName")
+    modes = model_info.get("modes") if isinstance(model_info.get("modes"), dict) else {}
+
+    if not model:
+        return f"Session {_short_id(full_id)}\nBackend: {backend}\nModel: unknown"
+
+    lines = [
+        f"Session: {_short_id(result.get('sessionId') or session_id)}",
+        f"Backend: {backend}",
+        f"Provider: {provider}",
+        f"Model: {model}",
+    ]
+    if display_name and display_name != model:
+        lines.append(f"Display name: {display_name}")
+    if source:
+        lines.append(f"Source: {source}")
+    for key, value in modes.items():
+        lines.append(f"{key}: {value}")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -1621,26 +1671,34 @@ async def switch_ring0_model(model: str) -> str:
 
 @mcp.tool()
 async def get_ring0_model() -> str:
-    """Get the current Ring0 backend and model.
+    """Get the current Ring0 backend, provider, model, and model modes.
 
     Use this when the user asks "what model are you on" or "which model".
     The response tells you both the agent backend (claude, codex, opencode,
     or hermes) AND the model name within that backend, so prefer it over
     guessing from prior conversation context.
     """
-    # Check env vars first (set by Ring0Manager when launching).
-    backend = os.environ.get("RING0_BACKEND")
-    model = os.environ.get("RING0_MODEL")
-
-    # Fall back to REST API for anything not in the env.
-    if not backend or not model:
-        status = await _get("/ring0/status")
-        backend = backend or status.get("backendType") or "unknown"
-        model = model or status.get("model")
+    status = await _get("/ring0/status")
+    backend = status.get("backendType") or os.environ.get("RING0_BACKEND") or "unknown"
+    model_info = status.get("modelInfo") if isinstance(status.get("modelInfo"), dict) else {}
+    model = model_info.get("model") or status.get("model") or os.environ.get("RING0_MODEL")
+    provider = model_info.get("provider") or "unknown"
+    source = model_info.get("source")
+    display_name = model_info.get("displayName")
+    modes = model_info.get("modes") if isinstance(model_info.get("modes"), dict) else {}
 
     if model:
-        return f"Backend: {backend}\nModel: {model}"
-    return f"Backend: {backend}\nModel: (default for this backend — not explicitly set)"
+        lines = [f"Backend: {backend}", f"Provider: {provider}", f"Model: {model}"]
+        if display_name and display_name != model:
+            lines.append(f"Display name: {display_name}")
+        if source:
+            lines.append(f"Source: {source}")
+        if modes:
+            for key, value in modes.items():
+                lines.append(f"{key}: {value}")
+        return "\n".join(lines)
+
+    return f"Backend: {backend}\nModel: unknown"
 
 
 # ── Scheduled Tasks & Queue ──────────────────────────────────────────────────

@@ -720,7 +720,22 @@ export function nodeApi(nodeId: string) {
     },
     ring0: {
       status: () =>
-        get<{ enabled: boolean; sessionId: string | null; model?: string; backendType?: string; eventsMuted?: boolean }>(
+        get<{
+          enabled: boolean;
+          sessionId: string | null;
+          model?: string;
+          modelInfo?: {
+            backend: string;
+            provider?: string;
+            model?: string;
+            displayName?: string;
+            source?: string;
+            isExplicit?: boolean;
+            modes?: Record<string, unknown>;
+          };
+          backendType?: string;
+          eventsMuted?: boolean;
+        }>(
           `/ring0/status${qOnly}`,
         ),
       toggle: (enabled: boolean, backendType?: string) =>

@@ -5,9 +5,10 @@ import type {
   BrowserIncomingMessage,
   BrowserOutgoingMessage,
   BackendType,
+  ModelInfo,
 } from "../server/session-types.js";
 
-export type { SessionState, PermissionRequest, ContentBlock, BrowserIncomingMessage, BrowserOutgoingMessage, BackendType };
+export type { SessionState, PermissionRequest, ContentBlock, BrowserIncomingMessage, BrowserOutgoingMessage, BackendType, ModelInfo };
 
 export interface EventMeta {
   eventType: string;
@@ -45,6 +46,7 @@ export interface SdkSessionInfo {
   state: "starting" | "connected" | "running" | "exited";
   exitCode?: number | null;
   model?: string;
+  modelInfo?: ModelInfo;
   permissionMode?: string;
   cwd: string;
   createdAt: number;

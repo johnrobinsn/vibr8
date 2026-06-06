@@ -368,6 +368,14 @@ class Ring0Manager:
     def backend_type(self) -> str:
         return self._backend_type
 
+    def model_info(self) -> dict[str, Any]:
+        from vibr8_core import backend_models
+        return backend_models.get_backend_model_info(
+            self._backend_type,
+            explicit_model=self._model,
+            work_dir=self._work_dir,
+        )
+
     def set_backend_type(self, backend_type: str) -> None:
         """Set the backend type used when launching the Ring0 session.
 
