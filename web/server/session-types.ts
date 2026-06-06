@@ -208,10 +208,21 @@ export type BrowserIncomingMessage =
 
 export type BackendType = "claude" | "codex" | "opencode" | "hermes" | "terminal" | "computer-use";
 
+export interface ModelInfo {
+  backend: string;
+  provider?: string;
+  model?: string;
+  displayName?: string;
+  source?: string;
+  isExplicit?: boolean;
+  modes?: Record<string, unknown>;
+}
+
 export interface SessionState {
   session_id: string;
   backend_type?: BackendType;
   model: string;
+  modelInfo?: ModelInfo;
   cwd: string;
   tools: string[];
   permissionMode: string;

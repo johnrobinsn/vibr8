@@ -32,6 +32,7 @@ def _make_default_state(session_id: str, backend_type: str = "claude") -> dict[s
         "session_id": session_id,
         "backend_type": backend_type,
         "model": "",
+        "modelInfo": {},
         "cwd": "",
         "tools": [],
         "permissionMode": "default",
@@ -135,6 +136,18 @@ class WsBridge:
         self._last_user_interaction: float = 0.0  # time.time() of last user-originated message to Ring0
         self._task_scheduler: Any = None  # TaskScheduler (set via setter)
         self._session_registry: Any = None  # SessionRegistry (set via setter)
+
+    def _refresh_session_model_info(self, session: Session) -> None:
+        from vibr8_core import backend_models
+
+        model_info = backend_models.get_backend_model_info(
+            session.backend_type,
+            explicit_model=session.state.get("model") or None,
+            work_dir=session.state.get("cwd") or None,
+        )
+        session.state["modelInfo"] = model_info
+        if model_info.get("model"):
+            session.state["model"] = model_info["model"]
 
     @staticmethod
     def _schedule_background(coro: Awaitable[Any]) -> None:
@@ -813,9 +826,13 @@ class WsBridge:
 
             if msg_type == "session_init":
                 session.state = {**session.state, **msg.get("session", {}), "backend_type": backend_type}
+                self._refresh_session_model_info(session)
+                msg["session"] = session.state
                 self._persist_session(session)
             elif msg_type == "session_update":
                 session.state = {**session.state, **msg.get("session", {}), "backend_type": backend_type}
+                self._refresh_session_model_info(session)
+                msg["session"] = session.state
                 self._persist_session(session)
             elif msg_type == "status_change":
                 session.state["is_compacting"] = msg.get("status") == "compacting"
@@ -924,6 +941,7 @@ class WsBridge:
             if meta.get("cwd"):
                 session.state["cwd"] = meta["cwd"]
             session.state["backend_type"] = backend_type
+            self._refresh_session_model_info(session)
             self._persist_session(session)
 
         adapter.on_session_meta(on_meta)
@@ -1013,6 +1031,8 @@ class WsBridge:
             },
         }
         session.state.update(init_msg["session"])
+        self._refresh_session_model_info(session)
+        init_msg["session"] = session.state
         self._persist_session(session)
         self._schedule_background(self._broadcast_to_browsers(session, init_msg))
         self._schedule_background(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
@@ -1353,6 +1373,7 @@ class WsBridge:
 
             session.state["model"] = msg.get("model", "")
             session.state["cwd"] = msg.get("cwd", "")
+            self._refresh_session_model_info(session)
             session.state["tools"] = msg.get("tools", [])
             session.state["permissionMode"] = msg.get("permissionMode", "default")
             session.state["claude_code_version"] = msg.get("claude_code_version", "")
