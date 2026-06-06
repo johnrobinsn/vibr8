@@ -119,6 +119,32 @@ class _RelaunchOptions:
 # ─── CliLauncher ─────────────────────────────────────────────────────────────
 
 
+def _codex_rollout_exists(thread_id: str) -> bool:
+    """Return True if codex has a rollout file on disk for `thread_id`.
+
+    Codex names rollouts as
+    `~/.codex/sessions/{YYYY}/{MM}/{DD}/rollout-{timestamp}-{thread_id}.jsonl`
+    and refuses `thread/resume` with "no rollout found for thread id <X>"
+    when the file is missing. Used by `_spawn_codex` to clear a stale
+    cliSessionId before it can produce a user-visible resume error.
+
+    The codex sessions tree is shallow (year/month/day directories of
+    jsonl files) so the recursive glob is cheap.
+    """
+    if not thread_id:
+        return False
+    base = Path.home() / ".codex" / "sessions"
+    if not base.is_dir():
+        return False
+    # Codex's filename pattern ends with `-{thread_id}.jsonl`.
+    try:
+        for _ in base.glob(f"**/rollout-*-{thread_id}.jsonl"):
+            return True
+    except OSError:
+        return False
+    return False
+
+
 class CliLauncher:
     """Manages CLI backend processes (Claude Code via --sdk-url WebSocket,
     or Codex via app-server stdio)."""
@@ -621,7 +647,25 @@ class CliLauncher:
         # init_error handler clears cliSessionId so the next relaunch starts
         # fresh — matches the Claude (--resume) and Hermes (session_id_to_resume)
         # patterns.
+        #
+        # Defensive disk check first: if codex has no rollout file for this
+        # thread, `thread/resume` would hard-fail with
+        # "no rollout found for thread id <X>". The adapter handles that
+        # gracefully (auto-falls back to thread/start with a soft notice),
+        # but we can prevent the user-visible notice entirely by detecting
+        # the missing rollout up front and starting fresh silently. Common
+        # cause: the codex CLI was killed before its first rollout flush,
+        # so the cliSessionId we persisted points at a thread codex itself
+        # has no record of.
         resume_thread_id = info.cliSessionId
+        if resume_thread_id and not _codex_rollout_exists(resume_thread_id):
+            logger.info(
+                "Codex thread %s has no rollout on disk — clearing "
+                "cliSessionId and starting fresh", resume_thread_id,
+            )
+            resume_thread_id = None
+            info.cliSessionId = None
+            self._persist_state()
         adapter = CodexAdapter(proc, session_id, CodexAdapterOptions(
             model=options.model,
             cwd=info.cwd,

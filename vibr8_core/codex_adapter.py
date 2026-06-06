@@ -537,29 +537,58 @@ class CodexAdapter:
 
             sandbox_mode = detect_codex_sandbox_mode()
 
-            # Step 3: Start or resume a thread
+            # Step 3: Start or resume a thread.
+            #
+            # If thread/resume fails specifically because the rollout for
+            # `threadId` was never persisted to ~/.codex/sessions/ (e.g. the
+            # codex CLI was killed before flushing the first turn), codex
+            # returns "no rollout found for thread id <X>". The thread id is
+            # unrecoverable on the codex side, so transparently fall back to
+            # a fresh thread/start and surface a soft notice in chat. Other
+            # resume errors still propagate.
+            start_params = {
+                "model": self._options.model,
+                "cwd": self._options.cwd,
+                "approvalPolicy": self._map_approval_policy(
+                    self._options.approval_mode
+                ),
+                "sandbox": sandbox_mode,
+            }
             if self._options.thread_id:
                 # Resume an existing thread
-                resume_result = await self._transport.call("thread/resume", {
-                    "threadId": self._options.thread_id,
-                    "model": self._options.model,
-                    "cwd": self._options.cwd,
-                    "approvalPolicy": self._map_approval_policy(
-                        self._options.approval_mode
-                    ),
-                    "sandbox": sandbox_mode,
-                })
-                self._thread_id = resume_result["thread"]["id"]
+                resume_params = {"threadId": self._options.thread_id, **start_params}
+                try:
+                    resume_result = await self._transport.call(
+                        "thread/resume", resume_params
+                    )
+                    self._thread_id = resume_result["thread"]["id"]
+                except RuntimeError as exc:
+                    msg = str(exc)
+                    if "no rollout found" not in msg.lower():
+                        raise
+                    logger.warning(
+                        "[codex-adapter] thread/resume %s failed (%s); "
+                        "starting a fresh thread",
+                        self._options.thread_id, msg,
+                    )
+                    self._emit({
+                        "type": "error",
+                        "message": (
+                            "Previous Codex thread couldn't be resumed (no "
+                            "rollout on disk). Starting a fresh thread — "
+                            "the model's prior context is lost, but the "
+                            "chat history above is preserved."
+                        ),
+                    })
+                    thread_result = await self._transport.call(
+                        "thread/start", start_params
+                    )
+                    self._thread_id = thread_result["thread"]["id"]
             else:
                 # Start a new thread
-                thread_result = await self._transport.call("thread/start", {
-                    "model": self._options.model,
-                    "cwd": self._options.cwd,
-                    "approvalPolicy": self._map_approval_policy(
-                        self._options.approval_mode
-                    ),
-                    "sandbox": sandbox_mode,
-                })
+                thread_result = await self._transport.call(
+                    "thread/start", start_params
+                )
                 self._thread_id = thread_result["thread"]["id"]
 
             # Notify session metadata

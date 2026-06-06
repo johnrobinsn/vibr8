@@ -295,6 +295,121 @@ class TestCodexAdapterInitialize:
         assert resume_params["threadId"] == "prior-thread-abc"
         assert adapter._thread_id == "prior-thread-abc"
 
+    async def test_initialize_falls_back_to_fresh_thread_when_rollout_missing(
+        self, adapter_factory,
+    ):
+        """If `thread/resume` errors with codex's "no rollout found" message,
+        the adapter must transparently start a fresh thread instead of
+        bubbling up an unrecoverable error.
+
+        Reproduces the case where the prior codex CLI process was killed
+        before flushing the thread's rollout to ~/.codex/sessions/. The
+        cliSessionId persisted by vibr8 points at a thread codex itself
+        no longer remembers, so resume must auto-degrade.
+        """
+        emitted: list[dict] = []
+        adapter = adapter_factory(thread_id="ghost-thread-019e8d61")
+        adapter._browser_message_cb = emitted.append
+        adapter._transport.call.side_effect = [
+            {"protocolVersion": "1.0"},                # initialize
+            RuntimeError(
+                "no rollout found for thread id ghost-thread-019e8d61"
+            ),                                          # thread/resume FAILS
+            {"thread": {"id": "fresh-thread-xyz"}},    # thread/start (fallback)
+        ]
+        await adapter._initialize()
+
+        methods = [c.args[0] for c in adapter._transport.call.call_args_list]
+        assert methods == ["initialize", "thread/resume", "thread/start"]
+        assert adapter._thread_id == "fresh-thread-xyz"
+        # init_failed must NOT be set — the adapter recovered.
+        assert adapter._init_failed is False
+        # User-visible notice in chat.
+        notices = [m for m in emitted if m.get("type") == "error"]
+        assert len(notices) == 1
+        assert "couldn't be resumed" in notices[0]["message"].lower()
+        assert "fresh thread" in notices[0]["message"].lower()
+
+    async def test_initialize_propagates_non_rollout_resume_errors(
+        self, adapter_factory,
+    ):
+        """Only the specific "no rollout found" failure auto-recovers.
+
+        Any other resume error (auth, transport, codex bug, …) must still
+        surface as a hard init failure so the launcher's init_error
+        handler can mark the session exited rather than silently masking
+        a real problem.
+        """
+        emitted: list[dict] = []
+        adapter = adapter_factory(thread_id="prior-thread-abc")
+        adapter._browser_message_cb = emitted.append
+        adapter._transport.call.side_effect = [
+            {"protocolVersion": "1.0"},                  # initialize
+            RuntimeError("model 'gpt-5.5' is not available"),  # thread/resume
+        ]
+        await adapter._initialize()
+
+        methods = [c.args[0] for c in adapter._transport.call.call_args_list]
+        assert methods == ["initialize", "thread/resume"]
+        # No retry attempted, init flagged as failed.
+        assert adapter._init_failed is True
+        assert "model 'gpt-5.5'" in adapter._init_error_msg
+        # Hard error emitted (the existing "Codex initialization failed" path).
+        errors = [m for m in emitted if m.get("type") == "error"]
+        assert len(errors) == 1
+        assert "initialization failed" in errors[0]["message"].lower()
+
+
+# ── Disk-check helper used to prevent doomed thread/resume calls ────────────
+
+
+class TestCodexRolloutExists:
+    """`_codex_rollout_exists()` lets the launcher detect that a saved
+    cliSessionId points at a thread codex itself no longer has a rollout
+    for — so we can clear it *before* trying to resume rather than
+    surfacing the resume failure to the user."""
+
+    def _make_fake_codex_home(self, tmp_path, *thread_ids: str):
+        sessions = tmp_path / ".codex" / "sessions" / "2026" / "06" / "06"
+        sessions.mkdir(parents=True)
+        for tid in thread_ids:
+            (sessions / f"rollout-2026-06-06T10-00-00-{tid}.jsonl").write_text("")
+        return tmp_path
+
+    def test_returns_true_when_rollout_present(self, tmp_path, monkeypatch):
+        from vibr8_core.cli_launcher import _codex_rollout_exists
+        self._make_fake_codex_home(tmp_path, "019e8d61-3717")
+        monkeypatch.setattr(
+            "vibr8_core.cli_launcher.Path.home", classmethod(lambda cls: tmp_path),
+        )
+        assert _codex_rollout_exists("019e8d61-3717") is True
+
+    def test_returns_false_when_rollout_missing(self, tmp_path, monkeypatch):
+        from vibr8_core.cli_launcher import _codex_rollout_exists
+        self._make_fake_codex_home(tmp_path, "019e8d4f-other")
+        monkeypatch.setattr(
+            "vibr8_core.cli_launcher.Path.home", classmethod(lambda cls: tmp_path),
+        )
+        # Different thread id — not present in the fake codex sessions tree.
+        assert _codex_rollout_exists("019e8d61-3717") is False
+
+    def test_returns_false_when_codex_dir_does_not_exist(self, tmp_path, monkeypatch):
+        from vibr8_core.cli_launcher import _codex_rollout_exists
+        # No .codex/sessions at all.
+        monkeypatch.setattr(
+            "vibr8_core.cli_launcher.Path.home", classmethod(lambda cls: tmp_path),
+        )
+        assert _codex_rollout_exists("anything") is False
+
+    def test_returns_false_on_empty_thread_id(self, tmp_path, monkeypatch):
+        from vibr8_core.cli_launcher import _codex_rollout_exists
+        self._make_fake_codex_home(tmp_path, "some-id")
+        monkeypatch.setattr(
+            "vibr8_core.cli_launcher.Path.home", classmethod(lambda cls: tmp_path),
+        )
+        # Empty / None → False so an unset cliSessionId is correctly handled.
+        assert _codex_rollout_exists("") is False
+
 
 # ── CodexAdapter Message Translation Tests ──────────────────────────────────
 
