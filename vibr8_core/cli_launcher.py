@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import shutil
 import time
@@ -198,6 +199,89 @@ class CliLauncher:
         data = [info.to_dict() for info in self._sessions.values()]
         self._store.save_launcher(data)
 
+    def _mcp_scheme(self) -> str:
+        if self._scheme_override:
+            return "https" if self._scheme_override == "wss" else "http"
+        cert_dir = Path(__file__).parent.parent / "certs"
+        return "https" if (cert_dir / "cert.pem").exists() else "http"
+
+    def _mcp_env(
+        self,
+        session_id: str,
+        backend_type: str,
+        model: Optional[str] = None,
+        cwd: Optional[str] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, str]:
+        env: Dict[str, str] = {
+            "VIBR8_PORT": str(self._port),
+            "VIBR8_SCHEME": self._mcp_scheme(),
+            "VIBR8_SESSION_ID": session_id,
+            "VIBR8_BACKEND": backend_type,
+        }
+        if model:
+            env["VIBR8_MODEL"] = model
+        if cwd:
+            env["VIBR8_CWD"] = cwd
+        if extra_env and extra_env.get("VIBR8_TOKEN"):
+            env["VIBR8_TOKEN"] = extra_env["VIBR8_TOKEN"]
+        return env
+
+    @staticmethod
+    def _mcp_command() -> tuple[str, list[str]]:
+        server_dir = Path(__file__).parent.parent.resolve()
+        mcp_script = str(server_dir / "vibr8_core" / "ring0_mcp.py")
+        uv_bin = shutil.which("uv") or "uv"
+        return uv_bin, ["run", "--project", str(server_dir), "--no-sync", "python", mcp_script]
+
+    @staticmethod
+    def _session_mcp_config_path(session_id: str) -> Path:
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", session_id).strip("._")
+        if not safe_id:
+            safe_id = "session"
+        return Path.home() / ".vibr8" / "mcp-configs" / f"{safe_id}.json"
+
+    def _write_session_mcp_config(
+        self,
+        session_id: str,
+        backend_type: str,
+        cwd: str,
+        model: Optional[str] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> str:
+        command, args = self._mcp_command()
+        config = {
+            "mcpServers": {
+                "vibr8": {
+                    "type": "stdio",
+                    "command": command,
+                    "args": args,
+                    "env": self._mcp_env(session_id, backend_type, model, cwd, extra_env),
+                }
+            }
+        }
+        path = self._session_mcp_config_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, indent=2))
+        return str(path)
+
+    def _build_acp_mcp_servers(
+        self,
+        session_id: str,
+        backend_type: str,
+        cwd: str,
+        model: Optional[str] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> list[dict[str, Any]]:
+        command, args = self._mcp_command()
+        env = self._mcp_env(session_id, backend_type, model, cwd, extra_env)
+        return [{
+            "name": "vibr8",
+            "command": command,
+            "args": args,
+            "env": [{"name": k, "value": v} for k, v in env.items()],
+        }]
+
     def restore_from_disk(self) -> int:
         """Restore sessions from disk and check which PIDs are still alive.
 
@@ -268,6 +352,28 @@ class CliLauncher:
         # Store agent config (e.g. Hermes MCP servers) for relaunch
         if options.agentConfig:
             info.agentConfig = options.agentConfig
+
+        if backend_type not in ("computer-use", "terminal"):
+            if backend_type == "claude" and not info.mcpConfig:
+                info.mcpConfig = self._write_session_mcp_config(
+                    session_id,
+                    backend_type,
+                    cwd,
+                    model=options.model,
+                    extra_env=options.env,
+                )
+                options.mcpConfig = info.mcpConfig
+            elif backend_type == "hermes" and not info.agentConfig:
+                info.agentConfig = {
+                    "mcpServers": self._build_acp_mcp_servers(
+                        session_id,
+                        backend_type,
+                        cwd,
+                        model=options.model,
+                        extra_env=options.env,
+                    )
+                }
+                options.agentConfig = info.agentConfig
 
         # Store worktree metadata if provided
         if options.worktreeInfo:
@@ -404,6 +510,15 @@ class CliLauncher:
                 ),
             )
         elif info.backendType == "hermes":
+            if not info.agentConfig:
+                info.agentConfig = {
+                    "mcpServers": self._build_acp_mcp_servers(
+                        session_id,
+                        "hermes",
+                        info.cwd,
+                        model=info.model,
+                    )
+                }
             await self._spawn_hermes(
                 session_id,
                 info,
@@ -415,6 +530,13 @@ class CliLauncher:
                 ),
             )
         else:
+            if not info.mcpConfig:
+                info.mcpConfig = self._write_session_mcp_config(
+                    session_id,
+                    "claude",
+                    info.cwd,
+                    model=info.model,
+                )
             await self._spawn_cli(
                 session_id,
                 info,
@@ -502,6 +624,9 @@ class CliLauncher:
             env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
         if options.env:
             env.update(options.env)
+        env.update(self._mcp_env(
+            session_id, "claude", options.model, info.cwd, env,
+        ))
 
         preexec_fn = None
         if options.isBackgroundTask:
@@ -604,6 +729,9 @@ class CliLauncher:
         env = {**os.environ}
         if options.env:
             env.update(options.env)
+        env.update(self._mcp_env(
+            session_id, "codex", options.model, info.cwd, env,
+        ))
 
         # Log the chosen sandbox mode once per spawn so it's obvious in logs
         # which mode every session uses.
@@ -747,6 +875,9 @@ class CliLauncher:
         env = {**os.environ}
         if options.env:
             env.update(options.env)
+        env.update(self._mcp_env(
+            session_id, "hermes", options.model, info.cwd, env,
+        ))
 
         logger.info(
             "Spawning Hermes session %s: %s %s",
@@ -877,11 +1008,19 @@ class CliLauncher:
         env["OPENCODE_SERVER_PASSWORD"] = password
         if options.env:
             env.update(options.env)
+        env.update(self._mcp_env(
+            session_id, "opencode", options.model, info.cwd, env,
+        ))
 
         # Write opencode.jsonc config with model + MCP if needed
         cwd_path = Path(info.cwd) if info.cwd else Path.cwd()
         cwd_path.mkdir(parents=True, exist_ok=True)
-        self._write_opencode_config(cwd_path, options.model)
+        self._write_opencode_config(
+            cwd_path,
+            session_id=session_id,
+            model=options.model,
+            extra_env=options.env,
+        )
 
         logger.info(
             "Spawning OpenCode session %s: %s %s (port %d)",
@@ -992,20 +1131,43 @@ class CliLauncher:
 
         return False
 
-    @staticmethod
     def _write_opencode_config(
+        self,
         cwd: Path,
+        session_id: str,
         model: Optional[str] = None,
+        extra_env: Optional[Dict[str, str]] = None,
     ) -> None:
-        """Write opencode.jsonc config file if it doesn't exist."""
+        """Write or update opencode.jsonc with per-session vibr8 MCP config."""
         config_path = cwd / "opencode.jsonc"
-        if config_path.exists():
-            return
-
         config: Dict[str, Any] = {}
+        if config_path.exists():
+            try:
+                raw = config_path.read_text()
+                import json5
+                parsed = json5.loads(raw) if raw.strip() else {}
+                if isinstance(parsed, dict):
+                    config = parsed
+            except Exception:
+                logger.warning(
+                    "Could not parse %s; preserving session startup with fresh config",
+                    config_path,
+                )
         if model:
             config["model"] = model
 
+        command, args = self._mcp_command()
+        config.setdefault("mcp", {})["vibr8"] = {
+            "type": "local",
+            "command": [command, *args],
+            "environment": self._mcp_env(
+                session_id,
+                "opencode",
+                model,
+                str(cwd),
+                extra_env,
+            ),
+        }
         config_path.write_text(json.dumps(config, indent=2))
 
     @staticmethod

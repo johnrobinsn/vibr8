@@ -136,6 +136,9 @@ class WsBridge:
         self._last_user_interaction: float = 0.0  # time.time() of last user-originated message to Ring0
         self._task_scheduler: Any = None  # TaskScheduler (set via setter)
         self._session_registry: Any = None  # SessionRegistry (set via setter)
+        self._prompt_context_by_session: dict[str, dict[str, Any]] = {}
+        self._prompt_context_by_client: dict[str, dict[str, Any]] = {}
+        self._latest_prompt_context: dict[str, Any] = {}
 
     def _refresh_session_model_info(self, session: Session) -> None:
         from vibr8_core import backend_models
@@ -408,25 +411,91 @@ class WsBridge:
         session = self._sessions.get(ring0.session_id)
         return session.prompt_source_client_id if session else ""
 
-    def _apply_ring0_prompt_context(
+    def _build_prompt_context(
+        self, session: Session, source_client_id: str = "",
+    ) -> dict[str, Any]:
+        ring0 = self._ring0_manager
+        node_id, raw_session_id = self.parse_qualified_id(session.id)
+        if not node_id:
+            node_id = self._self_node_id
+        model_info = session.state.get("modelInfo")
+        if not isinstance(model_info, dict) or not model_info:
+            self._refresh_session_model_info(session)
+            model_info = session.state.get("modelInfo")
+        if not isinstance(model_info, dict):
+            model_info = {}
+        return {
+            "sessionId": session.id,
+            "rawSessionId": raw_session_id,
+            "nodeId": node_id,
+            "backendType": session.backend_type,
+            "clientId": source_client_id,
+            "isRing0": bool(ring0 and ring0.session_id == session.id),
+            "model": model_info.get("model") or session.state.get("model", ""),
+            "provider": model_info.get("provider") or "",
+            "modelInfo": dict(model_info),
+            "cwd": session.state.get("cwd", ""),
+            "timestamp": int(time.time() * 1000),
+        }
+
+    def _record_prompt_context(
+        self, session: Session, source_client_id: str = "",
+    ) -> dict[str, Any]:
+        context = self._build_prompt_context(session, source_client_id)
+        self._prompt_context_by_session[session.id] = context
+        if source_client_id:
+            self._prompt_context_by_client[source_client_id] = context
+        self._latest_prompt_context = context
+        return context
+
+    def get_prompt_context(
+        self, client_id: str = "", session_id: str = "",
+    ) -> dict[str, Any]:
+        """Return the most recent user-prompt context for a client/session."""
+        if session_id:
+            context = self._prompt_context_by_session.get(session_id)
+            if context:
+                return dict(context)
+            session = self._sessions.get(session_id)
+            if session:
+                return self._build_prompt_context(
+                    session, session.prompt_source_client_id,
+                )
+            return {"error": "Session not found"}
+        if client_id:
+            context = self._prompt_context_by_client.get(client_id)
+            if context:
+                return dict(context)
+            session_id = self._client_sessions.get(client_id, "")
+            session = self._sessions.get(session_id)
+            if session:
+                return self._build_prompt_context(session, client_id)
+            return {"error": "No prompt context for client"}
+        if self._latest_prompt_context:
+            return dict(self._latest_prompt_context)
+        ring0_client_id = self.get_ring0_prompt_client()
+        if ring0_client_id:
+            context = self._prompt_context_by_client.get(ring0_client_id)
+            if context:
+                return dict(context)
+        return {"error": "No prompt context recorded"}
+
+    def _record_user_prompt_context(
         self, session: Session, content: Any, source_client_id: str,
     ) -> Any:
-        """If `session` is the Ring0 session, set prompt context for MCP
-        tools and prepend `[from client …]` to string content.
+        """Record prompt context without mutating the user's prompt.
 
-        Returns content unchanged for non-Ring0 sessions or non-string
-        content. Both `_route_browser_message` (adapter branch) and
-        `_handle_user_message` call this so the two paths stay in sync.
+        Both `_route_browser_message` (adapter branch) and
+        `_handle_user_message` call this so every text backend gets the same
+        model/session awareness.
         """
+        self._record_prompt_context(session, source_client_id)
         ring0 = self._ring0_manager
-        if not (ring0 and ring0.session_id == session.id):
-            return content
+        is_ring0 = bool(ring0 and ring0.session_id == session.id)
         if source_client_id:
             session.prompt_source_client_id = source_client_id
-            if isinstance(content, str):
-                return f"[from client {source_client_id}]\n{content}"
-            return content
-        session.prompt_source_client_id = ""
+        elif is_ring0:
+            session.prompt_source_client_id = ""
         return content
 
     # ── Remote node session management ────────────────────────────────────
@@ -1792,6 +1861,8 @@ class WsBridge:
                 node = self._node_registry.get_node(node_id)
                 if node and node.tunnel and node.tunnel.connected:
                     source_client_id = source_client_id or (session.browser_sockets.get(ws, "") if ws else "")
+                    if msg.get("type") == "user_message":
+                        self._record_prompt_context(session, source_client_id)
                     await node.tunnel.send_fire_and_forget({
                         "type": "browser_message",
                         "sessionId": raw_id,
@@ -1880,7 +1951,7 @@ class WsBridge:
                     history_entry["sourceClientId"] = source_client_id
                 session.message_history.append(history_entry)
                 self._persist_session(session)
-                new_content = self._apply_ring0_prompt_context(
+                new_content = self._record_user_prompt_context(
                     session, msg.get("content", ""), source_client_id,
                 )
                 if new_content is not msg.get("content"):
@@ -1947,7 +2018,7 @@ class WsBridge:
             history_entry["eventMeta"] = msg["eventMeta"]
         session.message_history.append(history_entry)
 
-        raw_content = self._apply_ring0_prompt_context(
+        raw_content = self._record_user_prompt_context(
             session, msg.get("content", ""), source_client_id,
         )
 
@@ -2135,6 +2206,9 @@ class WsBridge:
             if self._node_registry:
                 node = self._node_registry.get_node(node_id)
                 if node and node.tunnel and node.tunnel.connected:
+                    session = self._sessions.get(session_id)
+                    if session:
+                        self._record_prompt_context(session, source_client_id)
                     await node.tunnel.send_fire_and_forget({
                         "type": "submit_message",
                         "sessionId": raw_id,

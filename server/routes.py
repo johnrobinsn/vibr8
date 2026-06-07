@@ -1744,8 +1744,15 @@ def create_routes(
 
     @routes.get("/api/ring0/prompt-context")
     async def ring0_prompt_context(request: web.Request) -> web.Response:
-        client_id = hub_browser_bridge.get_ring0_prompt_client()
-        return web.json_response({"clientId": client_id})
+        client_id = request.query.get("clientId", "")
+        session_id = request.query.get("sessionId", "")
+        if not client_id and not session_id:
+            client_id = hub_browser_bridge.get_ring0_prompt_client()
+        result = await node_ops.prompt_context(
+            client_id=client_id,
+            session_id=session_id,
+        )
+        return web.json_response(result)
 
     # ── Client metadata ────────────────────────────────────────────────
 
