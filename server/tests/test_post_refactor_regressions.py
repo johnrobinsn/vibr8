@@ -471,3 +471,74 @@ def test_no_spawn_call_directly_inside_create_app_body() -> None:
         f"lands on a phantom loop and shutdown's "
         f"`asyncio.gather(*background_tasks)` raises ValueError."
     )
+
+
+# ── Claude `_send_to_cli` must re-route a closed cli_socket through relaunch ─
+
+
+async def test_send_to_cli_treats_closed_socket_as_not_connected() -> None:
+    """`_send_to_cli` must check `cli_socket.closed` before calling `send_str`.
+
+    Pre-fix, the bridge only checked `if not session.cli_socket:`. After a
+    CLI subprocess died without our cleanup running (e.g. user killed the
+    dev stack mid-session), the in-memory `cli_socket` reference survived
+    but pointed at a half-dead `WebSocketResponse`. `send_str` either
+    dropped data silently into the closed transport or raised on a much
+    later heartbeat — the user's next prompt landed in `_send_to_cli` and
+    vanished into the void without firing `_on_cli_relaunch_needed`.
+
+    The fix: treat `cli_socket.closed == True` as "no socket" so the
+    queue+relaunch path fires on the very next prompt after the silent
+    death.
+    """
+    bridge = WsBridge()
+    session_id = "sess-claude-stuck"
+    session = Session(id=session_id, backend_type="claude")
+    # Closed-but-set cli_socket — the production bug condition.
+    stale_socket = MagicMock()
+    stale_socket.closed = True
+    stale_socket.send_str = AsyncMock()
+    session.cli_socket = stale_socket
+    bridge._sessions[session_id] = session
+
+    fired_for: list[str] = []
+    bridge.on_cli_relaunch_needed_callback(fired_for.append)
+
+    await bridge._send_to_cli(session, '{"type":"user","message":"hello"}')
+
+    # send_str must NOT have been called on the closed socket.
+    stale_socket.send_str.assert_not_called()
+    # The stale reference must be cleared.
+    assert session.cli_socket is None
+    # The message must land in pending_messages so the new CLI gets it on connect.
+    assert session.pending_messages == ['{"type":"user","message":"hello"}']
+    # The relaunch hook must fire so the launcher re-spawns claude.
+    assert fired_for == [session_id], (
+        "closed cli_socket must trigger _on_cli_relaunch_needed — "
+        "otherwise the next user prompt vanishes silently"
+    )
+
+
+async def test_send_to_cli_uses_open_socket_normally() -> None:
+    """Negative case: when the cli_socket is open, write through it
+    instead of re-queueing. Guards against the closed-socket check
+    accidentally swallowing the live path."""
+    bridge = WsBridge()
+    session_id = "sess-claude-live"
+    session = Session(id=session_id, backend_type="claude")
+    live_socket = MagicMock()
+    live_socket.closed = False
+    live_socket.send_str = AsyncMock()
+    session.cli_socket = live_socket
+    bridge._sessions[session_id] = session
+
+    fired_for: list[str] = []
+    bridge.on_cli_relaunch_needed_callback(fired_for.append)
+
+    payload = '{"type":"user","message":"hi"}'
+    await bridge._send_to_cli(session, payload)
+
+    live_socket.send_str.assert_awaited_once_with(payload + "\n")
+    assert session.cli_socket is live_socket  # untouched
+    assert session.pending_messages == []
+    assert fired_for == []

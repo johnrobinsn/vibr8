@@ -2570,8 +2570,28 @@ class WsBridge:
                         self._on_cli_relaunch_needed(session.id)
             return
 
-        if not session.cli_socket:
-            logger.info(f"[ws-bridge] CLI not yet connected for session {session.id}, queuing message")
+        # `session.cli_socket` is a stale reference whenever the CLI
+        # subprocess died without our cleanup running — e.g. the user
+        # killed the dev stack, the new self-node restored the Session
+        # object in memory, and a CLI WS handler fired once but the
+        # subprocess later went away unnoticed. send_str against a closed
+        # aiohttp WebSocketResponse either drops data silently into a
+        # dead transport or raises long after the bridge already returned
+        # success to the user. Treat `.closed == True` as "no socket"
+        # so the very next prompt triggers a clean relaunch.
+        if not session.cli_socket or session.cli_socket.closed:
+            if session.cli_socket and session.cli_socket.closed:
+                logger.info(
+                    "[ws-bridge] CLI socket closed for session %s, clearing "
+                    "stale reference and requesting relaunch",
+                    session.id,
+                )
+                session.cli_socket = None
+            else:
+                logger.info(
+                    "[ws-bridge] CLI not yet connected for session %s, queuing message",
+                    session.id,
+                )
             session.pending_messages.append(ndjson)
             # Auto-relaunch CLI so queued messages get processed
             if self._on_cli_relaunch_needed:
