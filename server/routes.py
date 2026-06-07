@@ -1503,12 +1503,22 @@ def create_routes(
             for se in session_registry.list_all():
                 name = session_names.get_name(se.qualified_id) or se.name or "unnamed"
                 bridge_session = ws_bridge._sessions.get(se.qualified_id)
+                model_info = se.model_info
+                if not model_info and se.node_id == "local":
+                    from vibr8_core import backend_models
+                    model_info = backend_models.get_backend_model_info(
+                        se.backend_type,
+                        explicit_model=se.model or "",
+                        work_dir=se.cwd or None,
+                    )
                 entry = {
                     "sessionId": se.qualified_id,
                     "name": name,
                     "state": se.state,
                     "cwd": se.cwd,
                     "backendType": se.backend_type,
+                    "model": model_info.get("model") or se.model,
+                    "modelInfo": model_info,
                     "archived": se.archived,
                     "nodeId": se.node_id,
                     "pendingPermissionCount": ws_bridge.get_pending_permission_count(se.qualified_id),
@@ -1533,6 +1543,8 @@ def create_routes(
                 "state": s.get("state"),
                 "cwd": s.get("cwd"),
                 "backendType": s.get("backendType"),
+                "model": s.get("model"),
+                "modelInfo": s.get("modelInfo"),
                 "archived": s.get("archived"),
                 "pendingPermissionCount": perm_count,
                 "pendingPermissions": perms,
