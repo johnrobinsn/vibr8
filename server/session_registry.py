@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -38,6 +38,7 @@ class SessionEntry:
     cwd: str = ""
     is_ring0: bool = False
     model: str = ""
+    model_info: dict[str, Any] = field(default_factory=dict)
     archived: bool = False
 
 
@@ -338,6 +339,7 @@ class SessionRegistry:
                 existing.archived = bool(s.get("archived")) if s.get("archived") is not None else existing.archived
                 existing.name = s.get("name") or existing.name
                 existing.model = s.get("model") or existing.model
+                existing.model_info = s.get("modelInfo") or existing.model_info
             else:
                 self.register(SessionEntry(
                     qualified_id=qid,
@@ -349,6 +351,7 @@ class SessionRegistry:
                     cwd=s.get("cwd", ""),
                     is_ring0=(raw_id == ring0_session_id) or bool(s.get("isRing0")),
                     model=s.get("model") or "",
+                    model_info=s.get("modelInfo") or {},
                     archived=bool(s.get("archived")),
                 ))
 
@@ -380,6 +383,10 @@ class SessionRegistry:
                 existing.name = s.get("name", existing.name)
                 existing.backend_type = s.get("backendType", existing.backend_type)
                 existing.is_ring0 = s.get("isRing0", existing.is_ring0)
+                existing.cwd = s.get("cwd", existing.cwd)
+                existing.model = s.get("model") or existing.model
+                existing.model_info = s.get("modelInfo") or existing.model_info
+                existing.archived = bool(s.get("archived")) if s.get("archived") is not None else existing.archived
             else:
                 self.register(SessionEntry(
                     qualified_id=qid,
@@ -390,6 +397,9 @@ class SessionRegistry:
                     backend_type=s.get("backendType", "claude"),
                     cwd=s.get("cwd", ""),
                     is_ring0=s.get("isRing0", False),
+                    model=s.get("model") or "",
+                    model_info=s.get("modelInfo") or {},
+                    archived=bool(s.get("archived")),
                 ))
 
         stale = [qid for qid, e in self._entries.items()
