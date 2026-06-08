@@ -16,6 +16,7 @@ Bugs covered:
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -373,6 +374,238 @@ async def test_adapter_backend_does_not_request_relaunch_when_attached() -> None
     assert fired_for == []
     session.adapter.send_browser_message.assert_called_once()
     assert session.pending_messages == []
+
+
+def _fake_model_info(backend: str, explicit_model: str | None = None, work_dir: str | None = None) -> dict:
+    return {
+        "backend": backend,
+        "provider": "test-provider",
+        "model": explicit_model or f"{backend}-test-model",
+        "displayName": f"{backend} test model",
+        "source": "test",
+        "modes": {"thinkingLevel": "high"},
+    }
+
+
+@pytest.mark.parametrize("backend_type", ["codex", "opencode", "hermes"])
+async def test_prompt_context_is_recorded_without_mutating_adapter_prompts(
+    backend_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex/OpenCode/Hermes share the adapter branch, so model/session
+    identity must be recorded there without modifying the user's prompt.
+    """
+    from vibr8_core import backend_models
+
+    monkeypatch.setattr(backend_models, "get_backend_model_info", _fake_model_info)
+
+    bridge = WsBridge()
+    session_id = f"sess-{backend_type}"
+    session = bridge.get_or_create_session(session_id, backend_type)
+    session.state["cwd"] = "/repo"
+    session.adapter = MagicMock()
+
+    await bridge._route_browser_message(
+        session,
+        {"type": "user_message", "content": "what model are you using"},
+        source_client_id="client-1",
+    )
+
+    sent = session.adapter.send_browser_message.call_args.args[0]
+    assert sent["content"] == "what model are you using"
+
+    context = bridge.get_prompt_context(client_id="client-1")
+    assert context["sessionId"] == session_id
+    assert context["backendType"] == backend_type
+    assert context["clientId"] == "client-1"
+    assert context["modelInfo"]["modes"]["thinkingLevel"] == "high"
+
+
+async def test_prompt_context_is_recorded_without_mutating_claude_ndjson(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude does not use the adapter branch, so cover its socket path too."""
+    from vibr8_core import backend_models
+
+    monkeypatch.setattr(backend_models, "get_backend_model_info", _fake_model_info)
+
+    bridge = WsBridge()
+    session = bridge.get_or_create_session("sess-claude", "claude")
+    session.state["model"] = "claude-test-model"
+    bridge._send_to_cli = AsyncMock()
+
+    await bridge._handle_user_message(
+        session,
+        {"type": "user_message", "content": "what model are you using"},
+        source_client_id="client-2",
+    )
+
+    ndjson = bridge._send_to_cli.call_args.args[1]
+    payload = json.loads(ndjson)
+    content = payload["message"]["content"]
+    assert content == "what model are you using"
+    assert payload["sourceClientId"] == "client-2"
+
+    context = bridge.get_prompt_context(session_id="sess-claude")
+    assert context["sessionId"] == "sess-claude"
+    assert context["backendType"] == "claude"
+    assert context["clientId"] == "client-2"
+
+
+async def test_node_operations_prompt_context_delegates_to_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibr8_core import backend_models
+    from vibr8_core.node_operations import NodeOperations
+
+    monkeypatch.setattr(backend_models, "get_backend_model_info", _fake_model_info)
+
+    bridge = WsBridge()
+    session = bridge.get_or_create_session("sess-opencode", "opencode")
+    bridge._record_prompt_context(session, "client-3")
+    ops = NodeOperations(
+        launcher=MagicMock(),
+        bridge=bridge,
+        store=MagicMock(),
+        ring0=None,
+    )
+
+    result = await ops.prompt_context(client_id="client-3")
+
+    assert result["sessionId"] == "sess-opencode"
+    assert result["backendType"] == "opencode"
+    assert result["model"] == "opencode-test-model"
+
+
+async def test_mcp_current_session_context_formats_model_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibr8_core import ring0_mcp
+
+    async def fake_get(path: str) -> dict:
+        assert path == "/ring0/prompt-context?sessionId=sess-opencode"
+        return {
+            "sessionId": "sess-opencode",
+            "backendType": "opencode",
+            "clientId": "client-3",
+            "nodeId": "hub-node",
+            "cwd": "/repo",
+            "modelInfo": {
+                "provider": "openrouter",
+                "model": "openrouter/test-model",
+                "displayName": "OpenRouter Test",
+                "source": "opencode.jsonc",
+                "modes": {"thinkingLevel": "high"},
+            },
+        }
+
+    monkeypatch.setattr(ring0_mcp, "_get", fake_get)
+
+    result = await ring0_mcp.get_current_session_context(session_id="sess-opencode")
+
+    assert "Session: sess-opencode" in result
+    assert "Backend: opencode" in result
+    assert "Provider: openrouter" in result
+    assert "Model: openrouter/test-model" in result
+    assert "thinkingLevel: high" in result
+
+
+async def test_mcp_current_session_context_defaults_to_env_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibr8_core import ring0_mcp
+
+    async def fake_get(path: str) -> dict:
+        assert path == "/ring0/prompt-context?sessionId=sess-env"
+        return {
+            "sessionId": "sess-env",
+            "backendType": "codex",
+            "modelInfo": {"provider": "openai", "model": "gpt-test"},
+        }
+
+    monkeypatch.setattr(ring0_mcp, "_SESSION_ID", "sess-env")
+    monkeypatch.setattr(ring0_mcp, "_get", fake_get)
+
+    result = await ring0_mcp.get_current_session_context()
+
+    assert "Session: sess-env" in result
+    assert "Backend: codex" in result
+    assert "Model: gpt-test" in result
+
+
+def test_cli_launcher_writes_session_scoped_mcp_config(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    launcher = CliLauncher(port=3459, scheme="ws")
+    cwd = tmp_path / "repo"
+
+    path = launcher._write_session_mcp_config(
+        "node:session/claude",
+        "claude",
+        str(cwd),
+        model="claude-test",
+        extra_env={"VIBR8_TOKEN": "svc-token"},
+    )
+
+    assert Path(path).parent == home / ".vibr8" / "mcp-configs"
+    assert not (cwd / ".vibr8-mcp.json").exists()
+    config = json.loads(Path(path).read_text())
+    env = config["mcpServers"]["vibr8"]["env"]
+    assert env["VIBR8_PORT"] == "3459"
+    assert env["VIBR8_SCHEME"] == "http"
+    assert env["VIBR8_SESSION_ID"] == "node:session/claude"
+    assert env["VIBR8_BACKEND"] == "claude"
+    assert env["VIBR8_MODEL"] == "claude-test"
+    assert env["VIBR8_TOKEN"] == "svc-token"
+
+
+def test_cli_launcher_writes_opencode_session_scoped_mcp_config(tmp_path) -> None:
+    launcher = CliLauncher(port=3462, scheme="ws")
+    config_path = tmp_path / "opencode.jsonc"
+    config_path.write_text(
+        """
+        {
+          // Existing user config with URL-containing strings.
+          "apiUrl": "https://example.com/v1",
+          "model": "existing-model"
+        }
+        """,
+    )
+
+    launcher._write_opencode_config(
+        tmp_path,
+        session_id="sess-opencode",
+        model="opencode-test",
+        extra_env={"VIBR8_TOKEN": "svc-token"},
+    )
+
+    config = json.loads((tmp_path / "opencode.jsonc").read_text())
+    assert config["apiUrl"] == "https://example.com/v1"
+    env = config["mcp"]["vibr8"]["environment"]
+    assert env["VIBR8_PORT"] == "3462"
+    assert env["VIBR8_SESSION_ID"] == "sess-opencode"
+    assert env["VIBR8_BACKEND"] == "opencode"
+    assert env["VIBR8_MODEL"] == "opencode-test"
+    assert env["VIBR8_TOKEN"] == "svc-token"
+
+
+def test_cli_launcher_builds_hermes_session_scoped_mcp_servers(tmp_path) -> None:
+    launcher = CliLauncher(port=3463, scheme="ws")
+
+    servers = launcher._build_acp_mcp_servers(
+        "sess-hermes",
+        "hermes",
+        str(tmp_path),
+        model="hermes-test",
+    )
+
+    env = {item["name"]: item["value"] for item in servers[0]["env"]}
+    assert env["VIBR8_SESSION_ID"] == "sess-hermes"
+    assert env["VIBR8_BACKEND"] == "hermes"
+    assert env["VIBR8_MODEL"] == "hermes-test"
 
 
 # ── 7. Spawn must only be called inside a running event loop ────────────────

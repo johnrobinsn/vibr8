@@ -901,6 +901,12 @@ class NodeOperations:
             "backendType": self._ring0.backend_type,
         }
 
+    async def prompt_context(self, client_id: str = "", session_id: str = "") -> dict:
+        return self._bridge.get_prompt_context(
+            client_id=client_id,
+            session_id=session_id,
+        )
+
     async def ring0_toggle(
         self, enabled: bool = False, backend_type: str | None = None,
     ) -> dict:

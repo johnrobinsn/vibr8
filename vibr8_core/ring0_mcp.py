@@ -24,6 +24,8 @@ _SCHEME = os.environ.get("VIBR8_SCHEME", "http")
 BASE_URL = f"{_SCHEME}://localhost:{PORT}/api"
 _TOKEN = os.environ.get("VIBR8_TOKEN")
 _VERIFY_SSL = _SCHEME != "https"  # Disable for self-signed certs
+_SESSION_ID = os.environ.get("VIBR8_SESSION_ID", "")
+_BACKEND = os.environ.get("VIBR8_BACKEND", "")
 
 mcp = FastMCP("vibr8")
 
@@ -239,6 +241,57 @@ async def get_session_model(session_id: str) -> str:
         lines.append(f"Display name: {display_name}")
     if source:
         lines.append(f"Source: {source}")
+    for key, value in modes.items():
+        lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def get_current_session_context(client_id: str = "", session_id: str = "") -> str:
+    """Get the prompt session's backend, provider, model, modes, and source.
+
+    Use this when the user asks what model this session is using. Without
+    arguments, this resolves the session from VIBR8_SESSION_ID when the MCP
+    server was launched with per-session identity.
+
+    Args:
+        client_id: Optional browser client ID to resolve.
+        session_id: Optional explicit session ID to inspect.
+    """
+    params: list[str] = []
+    if client_id.strip():
+        params.append(f"clientId={quote(client_id.strip(), safe='')}")
+    requested_session_id = session_id.strip() or _SESSION_ID
+    if requested_session_id:
+        params.append(f"sessionId={quote(requested_session_id, safe='')}")
+    suffix = f"?{'&'.join(params)}" if params else ""
+    result = await _get(f"/ring0/prompt-context{suffix}")
+    if result.get("error"):
+        return f"Error: {result['error']}"
+
+    model_info = result.get("modelInfo") if isinstance(result.get("modelInfo"), dict) else {}
+    modes = model_info.get("modes") if isinstance(model_info.get("modes"), dict) else {}
+    model = model_info.get("model") or result.get("model") or ""
+    provider = model_info.get("provider") or result.get("provider") or "unknown"
+    source = model_info.get("source")
+    display_name = model_info.get("displayName")
+
+    lines = [
+        f"Session: {result.get('sessionId') or 'unknown'}",
+        f"Backend: {result.get('backendType') or 'unknown'}",
+        f"Provider: {provider}",
+        f"Model: {model or 'unknown'}",
+    ]
+    if display_name and display_name != model:
+        lines.append(f"Display name: {display_name}")
+    if source:
+        lines.append(f"Source: {source}")
+    if result.get("nodeId"):
+        lines.append(f"Node: {result['nodeId']}")
+    if result.get("clientId"):
+        lines.append(f"Client: {result['clientId']}")
+    if result.get("cwd"):
+        lines.append(f"CWD: {result['cwd']}")
     for key, value in modes.items():
         lines.append(f"{key}: {value}")
     return "\n".join(lines)
