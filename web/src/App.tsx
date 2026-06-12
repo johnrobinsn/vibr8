@@ -340,13 +340,17 @@ export default function App() {
     }
   }
 
-  // Phase 4 staging: opt into the vended path for the local (self-node)
-  // experience too. Once the shell owns voice controls this becomes the
-  // default and the legacy in-shell session UI is deleted.
+  // Phase 4 cutover: the local (self-node) experience runs on the vended
+  // path by default in production — vibr8-legacy-ui=1 is the escape hatch.
+  // The Vite dev server opts in with vibr8-vended-local=1 instead, since
+  // the node vends the last *built* UI, not the live dev bundle.
+  const vendedLocal = import.meta.env.DEV
+    ? localStorage.getItem("vibr8-vended-local") === "1"
+    : localStorage.getItem("vibr8-legacy-ui") !== "1";
   if (
     !NODE_MODE &&
     activeNodeId === "local" &&
-    localStorage.getItem("vibr8-vended-local") === "1" &&
+    vendedLocal &&
     nodes.find((n) => n.name === "self")?.contract?.includes("ui/v1")
   ) {
     return <NodeShellFrame nodeId="local" />;
