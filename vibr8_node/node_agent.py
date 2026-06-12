@@ -201,6 +201,8 @@ class NodeAgent:
         url = f"{http_url}/api/nodes/register"
 
         capabilities = {
+            "protocolVersion": 1,
+            "contract": ["ui/v1", "desktop/v1"],
             "hostname": platform.node(),
             "platform": platform.system().lower(),
             "arch": platform.machine(),
