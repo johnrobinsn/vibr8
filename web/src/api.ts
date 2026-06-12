@@ -1,6 +1,8 @@
 import type { SdkSessionInfo, NodeInfo, AndroidDeviceInfo, DiscoveredDevice, MdnsDevice, Artifact, BackendType } from "./types.js";
 
-const BASE = "/api";
+import { BASE_PREFIX } from "./nodeMode.js";
+
+const BASE = `${BASE_PREFIX}/api`;
 
 // Device token for second screen authentication (set after pairing)
 let _deviceToken: string | null = null;

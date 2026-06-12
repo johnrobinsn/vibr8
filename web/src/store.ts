@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { SessionState, PermissionRequest, ChatMessage, SdkSessionInfo, TaskItem, NodeInfo, AndroidDeviceInfo, Artifact } from "./types.js";
 import { api } from "./api.js";
+import { NODE_MODE } from "./nodeMode.js";
 
 function getClientId(): string {
   if (typeof window === "undefined") return crypto.randomUUID();
@@ -32,6 +33,9 @@ function getTabId(): string {
 // and survives refresh within the tab.
 function getInitialActiveNodeId(): string {
   if (typeof window === "undefined") return "local";
+  // In node mode this UI *is* a single node — node switching belongs to
+  // the hub shell hosting the iframe.
+  if (NODE_MODE) return "local";
   return sessionStorage.getItem("vibr8_active_node_id") || "local";
 }
 

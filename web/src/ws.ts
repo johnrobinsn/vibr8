@@ -1,4 +1,5 @@
 import { useStore } from "./store.js";
+import { BASE_PREFIX } from "./nodeMode.js";
 import { stopWebRTC, getRemoteAudio, queryActiveInputDevice } from "./webrtc.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem } from "./types.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
@@ -106,7 +107,7 @@ function nextId(): string {
 export function getWsUrl(sessionId: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const { clientId, clientRole } = useStore.getState();
-  let url = `${proto}//${location.host}/ws/browser/${sessionId}?clientId=${encodeURIComponent(clientId)}`;
+  let url = `${proto}//${location.host}${BASE_PREFIX}/ws/browser/${sessionId}?clientId=${encodeURIComponent(clientId)}`;
   if (clientRole !== "primary") url += `&role=${encodeURIComponent(clientRole)}`;
   return url;
 }

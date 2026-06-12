@@ -72,6 +72,9 @@ export interface NodeInfo {
   hostname: string;
   sessionCount: number;
   ring0Enabled: boolean;
+  // Contract capability flags (docs/hub-node-contract-v1.md), e.g.
+  // "ui/v1", "desktop/v1". Absent on pre-contract nodes.
+  contract?: string[];
 }
 
 export interface AndroidDeviceInfo {

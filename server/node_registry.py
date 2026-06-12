@@ -115,6 +115,7 @@ class RegisteredNode:
             "sessionCount": len(self.session_ids),
             "ring0Enabled": self.ring0_enabled,
             "defaultBackend": self.capabilities.get("defaultBackend", "claude"),
+            "contract": self.capabilities.get("contract", []),
         }
 
     @staticmethod

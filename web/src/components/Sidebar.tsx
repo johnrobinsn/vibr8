@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
+import { NODE_MODE } from "../nodeMode.js";
 import { connectSession, disconnectSession, applyLocalNodeSwitch } from "../ws.js";
 import { startWebRTC, stopWebRTC, stopDesktopStream } from "../webrtc.js";
 import { destroyTerminal } from "./TerminalView.js";
@@ -687,8 +688,9 @@ export function Sidebar() {
       {/* Session list */}
       <div className="flex-1 overflow-hidden relative">
         <div ref={sidebarListRef} className="h-full overflow-y-auto px-2 pb-14" data-session-list>
-          {/* Node switcher — only shown when remote nodes or android devices exist */}
-          {(nodes.length > 1 || androidDevices.length > 0) && (
+          {/* Node switcher — only shown when remote nodes or android devices
+              exist, and never in node mode (the shell owns node switching) */}
+          {!NODE_MODE && (nodes.length > 1 || androidDevices.length > 0) && (
             <div className="px-3 pt-2 pb-1">
               <select
                 value={activeNodeId}

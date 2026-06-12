@@ -16,8 +16,10 @@ import { CommandPalette } from "./components/CommandPalette.js";
 import { SettingsPage } from "./components/SettingsPage.js";
 import { AgentControls } from "./components/AgentControls.js";
 import { ViewerPane } from "./components/ViewerPane.js";
+import { NodeShellFrame } from "./components/NodeShellFrame.js";
 import { connectSession, disconnectSession } from "./ws.js";
 import { startWebRTC, setAudioInOnly } from "./webrtc.js";
+import { NODE_MODE } from "./nodeMode.js";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 
 function useHash() {
@@ -152,14 +154,18 @@ export default function App() {
   }, [activeNodeId, nodes]);
 
   // Sync the per-client active node to the backend so voice routing
-  // and node-scoped UI ops follow this tab's selection.
+  // and node-scoped UI ops follow this tab's selection. In node mode the
+  // shell owns the active-node concept, not the embedded UI.
   useEffect(() => {
+    if (NODE_MODE) return;
     api.setClientActiveNode(clientId, activeNodeId).catch(() => {});
   }, [clientId, activeNodeId]);
 
-  // Auto-reconnect audio if it was active before reload
+  // Auto-reconnect audio if it was active before reload. Voice lives in
+  // the hub shell — never inside a node-vended iframe (contract §B).
   const audioReconnectedRef = useRef(false);
   useEffect(() => {
+    if (NODE_MODE) return;
     if (audioReconnectedRef.current) return;
     const savedMode = localStorage.getItem("cc-audio-mode");
     if (!savedMode || savedMode === "off") return;
@@ -321,6 +327,17 @@ export default function App() {
 
   if (hash === "#/settings" || hash.startsWith("#/settings/")) {
     return <SettingsPage />;
+  }
+
+  // Node-vended UI (contract ui/v1): a remote node that announces ui/v1
+  // serves its own frontend — built at the node's commit — through the
+  // hub's tunnel proxy. The shell just frames it. (Never nest: in node
+  // mode this app IS the framed UI.)
+  if (!NODE_MODE && activeNodeId !== "local") {
+    const activeNode = nodes.find((n) => n.id === activeNodeId);
+    if (activeNode?.status === "online" && activeNode.contract?.includes("ui/v1")) {
+      return <NodeShellFrame nodeId={activeNodeId} />;
+    }
   }
 
   return (

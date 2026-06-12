@@ -21,6 +21,9 @@ const httpScheme = useHttps ? "https" : "http";
 const wsScheme = useHttps ? "wss" : "ws";
 
 export default defineConfig({
+  // Relative asset paths so the same build works at the hub root AND when
+  // vended by a node under /nodes/{id}/ui/ (contract ui/v1).
+  base: "./",
   plugins: [react(), tailwindcss()],
   test: {
     globals: true,
