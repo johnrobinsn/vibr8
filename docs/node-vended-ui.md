@@ -63,6 +63,15 @@ hub-side with the agent loop layered on the frozen desktop contract).
 
 ## Contract v1 (to be specified in `docs/hub-node-contract-v1.md`)
 
+**Invariant: nodes are outbound-only.** A node behind NAT with zero open
+ports must work forever. The node initiates its single WebSocket to the hub;
+the hub never dials a node, and no contract message may carry a node address
+for the hub (or a browser) to connect to directly. UI vending honors this by
+design: `/nodes/{id}/ui|api|ws/*` requests are wrapped as tunnel messages
+down the node's existing outbound connection and answered by the node's
+loopback-bound local server. Desktop media uses ICE (STUN/TURN) with
+signaling relayed over the tunnel, as today.
+
 Three sides, all versioned, all additive-only after freeze:
 
 ### A. Plumbing (node → hub, outbound WS as today)
