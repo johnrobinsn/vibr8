@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import platform
@@ -12,6 +13,7 @@ import ssl
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import aiohttp
 from aiohttp import web
@@ -72,6 +74,9 @@ class NodeAgent:
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._shutdown_event = asyncio.Event()
+        # ui/v1 proxied browser-WS channels: channelId → local client WS.
+        self._ui_channels: dict[str, aiohttp.ClientWebSocketResponse] = {}
+        self._ui_channel_tasks: dict[str, asyncio.Task] = {}
 
     async def run(self) -> None:
         """Main entry point — register, start local server, connect tunnel."""
@@ -272,7 +277,11 @@ class NodeAgent:
 
         conn = aiohttp.TCPConnector(ssl=self._ssl_ctx) if self._ssl_ctx else None
         async with aiohttp.ClientSession(connector=conn) as session:
-            async with session.ws_connect(ws_url, heartbeat=45, ssl=self._ssl_ctx) as ws:
+            # max_msg_size raised for ui/v1 (large proxied request bodies).
+            async with session.ws_connect(
+                ws_url, heartbeat=45, ssl=self._ssl_ctx,
+                max_msg_size=64 * 1024 * 1024,
+            ) as ws:
                 self._ws = ws
                 logger.info("Tunnel connected")
 
@@ -358,6 +367,16 @@ class NodeAgent:
 
     async def _dispatch_command(self, cmd_type: str, msg: dict) -> dict:
         """Generic dispatch: look up the operation by name on NodeOperations."""
+        # Contract plumbing (ui/v1) handled by the agent itself — these are
+        # transport-level, not node operations.
+        if cmd_type == "http_request":
+            return await self._handle_http_request(msg)
+        if cmd_type == "ws_open":
+            return await self._handle_ws_open(msg)
+        if cmd_type == "ws_data":
+            return await self._handle_ws_data(msg)
+        if cmd_type == "ws_close":
+            return await self._handle_ws_close(msg)
         if not self._ops:
             return {"error": "Node not ready"}
         method = getattr(self._ops, cmd_type, None)
@@ -370,6 +389,127 @@ class NodeAgent:
         except TypeError as e:
             logger.exception("Bad payload for %s", cmd_type)
             return {"error": f"Bad payload for {cmd_type}: {e}"}
+
+    # ── Contract ui/v1: HTTP + WS proxying (docs/hub-node-contract-v1.md §A3)
+
+    async def _send_to_hub(self, payload: dict) -> None:
+        """Send a fire-and-forget NDJSON message up the tunnel."""
+        if self._ws and not self._ws.closed:
+            try:
+                await self._ws.send_str(json.dumps(payload) + "\n")
+            except Exception:
+                logger.warning("Failed to send %s to hub", payload.get("type"))
+
+    async def _handle_http_request(self, msg: dict) -> dict:
+        """Serve a hub-proxied browser HTTP request from the local server."""
+        method = str(msg.get("method", "GET")).upper()
+        path = str(msg.get("path", "/"))
+        if not path.startswith("/") or ".." in path:
+            return {"error": f"Bad path: {path!r}"}
+        url = f"http://127.0.0.1:{self.port}{path}"
+        headers = {
+            k: v for k, v in (msg.get("headers") or {}).items()
+            if k.lower() in ("content-type", "accept", "if-none-match",
+                             "if-modified-since", "range")
+        }
+        body = base64.b64decode(msg["bodyB64"]) if msg.get("bodyB64") else None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.request(
+                    method, url,
+                    params=msg.get("query") or None,
+                    headers=headers,
+                    data=body,
+                    timeout=aiohttp.ClientTimeout(total=55),
+                    allow_redirects=False,
+                ) as resp:
+                    raw = await resp.read()
+                    out_headers = {
+                        k: resp.headers[k]
+                        for k in ("Content-Type", "Cache-Control", "ETag",
+                                  "Last-Modified", "Location")
+                        if k in resp.headers
+                    }
+                    return {
+                        "status": resp.status,
+                        "headers": out_headers,
+                        "bodyB64": base64.b64encode(raw).decode(),
+                    }
+        except Exception as e:
+            logger.warning("http_request %s %s failed: %s", method, path, e)
+            return {"error": str(e)}
+
+    async def _handle_ws_open(self, msg: dict) -> dict:
+        """Open a local WS for a hub-proxied browser WebSocket channel."""
+        channel_id = str(msg.get("channelId", ""))
+        path = str(msg.get("path", "/"))
+        if not channel_id or not path.startswith("/"):
+            return {"error": "Bad ws_open"}
+        qs = urlencode(msg.get("query") or {})
+        url = f"ws://127.0.0.1:{self.port}{path}" + (f"?{qs}" if qs else "")
+        session = aiohttp.ClientSession()
+        try:
+            local_ws = await session.ws_connect(
+                url, max_msg_size=64 * 1024 * 1024,
+            )
+        except Exception as e:
+            await session.close()
+            await self._send_to_hub({"type": "ws_close", "channelId": channel_id})
+            return {"error": f"ws_open failed: {e}"}
+        self._ui_channels[channel_id] = local_ws
+        self._ui_channel_tasks[channel_id] = asyncio.ensure_future(
+            self._pump_ui_channel(channel_id, session, local_ws)
+        )
+        return {"ok": True}
+
+    async def _pump_ui_channel(
+        self,
+        channel_id: str,
+        session: aiohttp.ClientSession,
+        local_ws: aiohttp.ClientWebSocketResponse,
+    ) -> None:
+        """Forward local-server WS messages up to the hub until close."""
+        try:
+            async for m in local_ws:
+                if m.type == aiohttp.WSMsgType.TEXT:
+                    await self._send_to_hub({
+                        "type": "ws_data", "channelId": channel_id, "text": m.data,
+                    })
+                elif m.type == aiohttp.WSMsgType.BINARY:
+                    await self._send_to_hub({
+                        "type": "ws_data", "channelId": channel_id,
+                        "dataB64": base64.b64encode(m.data).decode(),
+                    })
+                elif m.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                    break
+        except Exception:
+            logger.debug("ui channel %s pump error", channel_id, exc_info=True)
+        finally:
+            self._ui_channels.pop(channel_id, None)
+            self._ui_channel_tasks.pop(channel_id, None)
+            try:
+                await local_ws.close()
+            finally:
+                await session.close()
+            await self._send_to_hub({"type": "ws_close", "channelId": channel_id})
+
+    async def _handle_ws_data(self, msg: dict) -> dict:
+        ws = self._ui_channels.get(str(msg.get("channelId", "")))
+        if ws is None or ws.closed:
+            return {"error": "No such channel"}
+        if msg.get("text") is not None:
+            await ws.send_str(msg["text"])
+        elif msg.get("dataB64"):
+            await ws.send_bytes(base64.b64decode(msg["dataB64"]))
+        return {"ok": True}
+
+    async def _handle_ws_close(self, msg: dict) -> dict:
+        channel_id = str(msg.get("channelId", ""))
+        ws = self._ui_channels.pop(channel_id, None)
+        if ws is not None and not ws.closed:
+            # The pump task notices the close and finishes cleanup.
+            await ws.close()
+        return {"ok": True}
 
     # ── Broadcast hook ────────────────────────────────────────────────────
 
@@ -531,6 +671,51 @@ class NodeAgent:
 
         app.router.add_get("/ws/cli/{session_id}", handle_cli_ws)
 
+        # Browser WS — reached via the hub's ui/v1 channel proxy. This
+        # node's WsBridge owns real session state, so the handler mirrors
+        # the hub's handle_browser_ws.
+        async def handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
+            ws = web.WebSocketResponse(heartbeat=45)
+            await ws.prepare(request)
+            session_id = request.match_info["session_id"]
+            client_id = request.rel_url.query.get("clientId", "")
+            role = request.rel_url.query.get("role", "primary")
+            mirror = request.rel_url.query.get("mirror", "") == "true"
+            await bridge.handle_browser_open(
+                ws, session_id, client_id, role=role, mirror=mirror,
+            )
+            try:
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        await bridge.handle_browser_message(ws, msg.data)
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        break
+            finally:
+                await bridge.handle_browser_close(ws)
+            return ws
+
+        app.router.add_get("/ws/browser/{session_id}", handle_browser_ws)
+
+        # Node-vended UI (contract ui/v1): serve the built frontend at /ui/.
+        # The build ships with the node, so UI and backend are always the
+        # same commit — version skew with the hub is impossible here.
+        dist_dir = Path(__file__).resolve().parent.parent / "web" / "dist"
+
+        async def handle_ui(request: web.Request) -> web.StreamResponse:
+            if not dist_dir.is_dir():
+                return web.json_response(
+                    {"error": "Node UI not built (web/dist missing)"}, status=503,
+                )
+            rel = request.match_info.get("path", "")
+            if rel:
+                candidate = (dist_dir / rel).resolve()
+                if candidate.is_file() and dist_dir in candidate.parents:
+                    return web.FileResponse(candidate)
+            return web.FileResponse(dist_dir / "index.html")
+
+        app.router.add_get("/ui", handle_ui)
+        app.router.add_get("/ui/{path:.*}", handle_ui)
+
         # Ring0 MCP routes (reuse from server.routes)
         from server.routes import create_routes
         ring0 = self._ring0
@@ -558,6 +743,10 @@ class NodeAgent:
 
     async def _shutdown(self) -> None:
         """Clean shutdown."""
+        for task in list(self._ui_channel_tasks.values()):
+            task.cancel()
+        self._ui_channel_tasks.clear()
+        self._ui_channels.clear()
         if self._desktop_webrtc:
             await self._desktop_webrtc.close_all()
         if self._scheduler:

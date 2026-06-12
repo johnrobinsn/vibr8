@@ -467,7 +467,9 @@ async def handle_node_ws(request: web.Request) -> web.StreamResponse:
         )
         return web.json_response({"error": "Too many requests"}, status=429)
 
-    ws = web.WebSocketResponse(heartbeat=45)
+    # max_msg_size raised for ui/v1: proxied asset responses travel as
+    # single NDJSON lines with base64 bodies (default 4MB is too small).
+    ws = web.WebSocketResponse(heartbeat=45, max_msg_size=64 * 1024 * 1024)
     await ws.prepare(request)
 
     registry: NodeRegistry = request.app["node_registry"]
@@ -554,6 +556,10 @@ async def handle_node_ws(request: web.Request) -> web.StreamResponse:
             n = registry.get_node(nid)
             if n:
                 n.ring0_enabled = msg.get("enabled", False)
+        elif msg_type in ("ws_data", "ws_close"):
+            # Proxied browser-WS channel traffic (contract ui/v1).
+            from server.node_ui_proxy import dispatch_channel_message
+            await dispatch_channel_message(request.app, msg)
         elif msg_type == "native_push":
             # Native-client notification (permission_cancelled, status_change,
             # etc.) from a remote node. Native clients connect to the hub,
@@ -1039,6 +1045,11 @@ def create_app() -> web.Application:
     # REST API
     api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager, node_registry, session_registry, local_node_ops=local_node_ops, hub_browser_bridge=hub_browser_bridge)
     app.router.add_routes(api_routes)
+
+    # Node-vended UI proxy (contract ui/v1): /nodes/{id}/{ui,api,ws}/* over
+    # the node's tunnel. Must register before the SPA catch-all.
+    from server.node_ui_proxy import register_node_ui_routes
+    register_node_ui_routes(app)
 
     # Production static file serving
     if os.environ.get("NODE_ENV") == "production":
