@@ -340,6 +340,18 @@ export default function App() {
     }
   }
 
+  // Phase 4 staging: opt into the vended path for the local (self-node)
+  // experience too. Once the shell owns voice controls this becomes the
+  // default and the legacy in-shell session UI is deleted.
+  if (
+    !NODE_MODE &&
+    activeNodeId === "local" &&
+    localStorage.getItem("vibr8-vended-local") === "1" &&
+    nodes.find((n) => n.name === "self")?.contract?.includes("ui/v1")
+  ) {
+    return <NodeShellFrame nodeId="local" />;
+  }
+
   return (
     <div className="h-[100dvh] flex font-sans-ui bg-cc-bg text-cc-fg antialiased">
       {/* Mobile overlay backdrop */}

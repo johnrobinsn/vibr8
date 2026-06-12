@@ -1,6 +1,22 @@
 # Node-Vended UI: Architecture Direction and Plan
 
-Status: **proposed** — exploratory direction captured 2026-06-12; no implementation yet.
+Status: **Phases 0–3 implemented and verified** (2026-06-12, this branch);
+Phase 4 staged behind preconditions listed at the bottom.
+
+- Phase 0 — `docs/hub-node-contract-v1.md` written; nodes announce
+  `protocolVersion` + `contract` flags at registration.
+- Phase 1 — `server/node_ui_proxy.py` maps `/nodes/{id}/{ui,api,ws}/*`
+  onto the node's loopback server via `http_request` / `ws_open` /
+  `ws_data` / `ws_close` tunnel messages. Node serves `web/dist` at
+  `/ui/` and accepts browser WebSockets locally.
+- Phase 2 — frontend node mode (prefix-aware API/WS, shell-owned node
+  switching and voice, postMessage bridge); `NodeShellFrame` renders any
+  ui/v1 node's vended UI in the hub shell.
+- Phase 3 — events/v1: `transcript` in; `speak`/`busy`/`attention` out;
+  hub TTS sniffing disabled for contract nodes.
+- Verified end-to-end on a live hub + self-node: vended index/assets/API
+  over the tunnel, session created via `/nodes/local/api/`, browser WS
+  round-trip through the channel proxy delivering `session_init`.
 
 ## Motivation
 
@@ -150,6 +166,31 @@ round-trip on a remote node touches only contract messages.
 **Phase 4 — Demolition (big bang).** Delete the legacy surface listed above;
 hub and all nodes cut over together. Desktop viewer and computer-use keep
 working unchanged throughout (they ride `desktop/v1`).
+
+Phase 4 status: **staged, not executed.** The local experience can already
+run fully vended via `localStorage["vibr8-vended-local"] = "1"` (shell
+iframes the self-node at `/nodes/local/ui/`). Preconditions before the
+deletions are safe:
+
+1. **Shell voice controls.** Mic/TTS/guard controls currently live in the
+   TopBar *inside* the framed app, where node mode hides them. The shell
+   (or the `NodeShellFrame` strip) must own them before the legacy local
+   UI can go.
+2. **Computer-use controls re-homed.** AgentControls/DesktopView ride the
+   legacy session UI today; they move to the shell (they consume frozen
+   `desktop/v1`, so this is a relocation, not a rewrite).
+3. **Default flip + soak.** `vibr8-vended-local` becomes the default;
+   run real workloads (voice, permissions, terminals, remote nodes) on
+   the vended path.
+
+Then delete, in one cutover: `QualifyingNodeClient` + qualified
+`{node_id}:{raw_id}` ids, `server/session_registry.py` (both routers),
+hub-side `WsBridge` proxy mode (`handle_remote_session_message`,
+`update_remote_sessions`, proxy sessions), the hub-proxy middleware's
+session-resolving routes (`vibr8_node/node_agent.py`), native-push
+forwarding, per-session REST routes on the hub, and the legacy in-shell
+session UI (Sidebar session list, ChatView mounting, ws.ts session
+sockets at the hub root).
 
 **v2 parking lot:** `notify`/`present` for watch + second screen (second
 screen becomes "render a node-vended URL", unifying with the iframe model),
