@@ -551,7 +551,34 @@ async def handle_node_ws(request: web.Request) -> web.StreamResponse:
             message = msg.get("message", {})
             if raw_session_id and message:
                 qualified_id = SessionRegistry.qualify(nid, raw_session_id)
-                await bridge.handle_remote_session_message(qualified_id, message)
+                # events/v1 nodes speak via explicit `speak` messages —
+                # don't also sniff their assistant text for TTS.
+                n = registry.get_node(nid)
+                contract = (n.capabilities.get("contract") or []) if n else []
+                await bridge.handle_remote_session_message(
+                    qualified_id, message, suppress_tts="events/v1" in contract,
+                )
+        elif msg_type == "speak":
+            # Contract events/v1: the node's Ring0 wants this spoken (§B).
+            text = msg.get("text", "")
+            wm = request.app.get("webrtc_manager")
+            if text and wm:
+                pair = wm.get_any_outgoing_track()
+                if pair:
+                    audio_client_id, track = pair
+                    if not wm.is_tts_muted(audio_client_id):
+                        asyncio.ensure_future(
+                            bridge._speak_text(f"{nid}:ring0", text, track)
+                        )
+        elif msg_type == "busy":
+            n = registry.get_node(nid)
+            if n:
+                n.ring0_busy = bool(msg.get("busy"))
+        elif msg_type == "attention":
+            logger.info(
+                "[nodes] Attention from node %r: %s",
+                node.name, msg.get("reason", ""),
+            )
         elif msg_type == "ring0_state":
             n = registry.get_node(nid)
             if n:

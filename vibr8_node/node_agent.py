@@ -147,6 +147,11 @@ class NodeAgent:
         # need to reach hub-side native clients too — they connect to the
         # hub, not the node.
         self._bridge._native_push_hook = self._forward_native_push_to_hub
+        # Contract events/v1 (docs/hub-node-contract-v1.md §B): Ring0 speech
+        # and status leave this node as explicit events; the hub owns audio.
+        self._bridge._speak_hook = self._emit_speak
+        self._bridge._busy_hook = self._emit_busy
+        self._bridge._attention_hook = self._emit_attention
 
         async def _on_sessions_changed() -> None:
             if self._ws and not self._ws.closed:
@@ -207,7 +212,7 @@ class NodeAgent:
 
         capabilities = {
             "protocolVersion": 1,
-            "contract": ["ui/v1", "desktop/v1"],
+            "contract": ["ui/v1", "events/v1", "desktop/v1"],
             "hostname": platform.node(),
             "platform": platform.system().lower(),
             "arch": platform.machine(),
@@ -379,6 +384,12 @@ class NodeAgent:
             return await self._handle_ws_close(msg)
         if not self._ops:
             return {"error": "Node not ready"}
+        if cmd_type == "transcript":
+            # Contract §B: voice/typed input for this node's Ring0.
+            return await self._ops.ring0_input(
+                text=msg.get("text", ""),
+                source_client_id=msg.get("clientId", ""),
+            )
         method = getattr(self._ops, cmd_type, None)
         if method is None or not callable(method) or cmd_type.startswith("_"):
             logger.warning("Unknown hub command: %s", cmd_type)
@@ -389,6 +400,17 @@ class NodeAgent:
         except TypeError as e:
             logger.exception("Bad payload for %s", cmd_type)
             return {"error": f"Bad payload for {cmd_type}: {e}"}
+
+    # ── Contract events/v1: speak / busy / attention (§B) ────────────────
+
+    async def _emit_speak(self, text: str) -> None:
+        await self._send_to_hub({"type": "speak", "text": text})
+
+    async def _emit_busy(self, busy: bool) -> None:
+        await self._send_to_hub({"type": "busy", "busy": bool(busy)})
+
+    async def _emit_attention(self, reason: str) -> None:
+        await self._send_to_hub({"type": "attention", "reason": reason})
 
     # ── Contract ui/v1: HTTP + WS proxying (docs/hub-node-contract-v1.md §A3)
 

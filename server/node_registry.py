@@ -90,6 +90,7 @@ class RegisteredNode:
     last_heartbeat: float = 0                # time.time()
     session_ids: list[str] = field(default_factory=list)
     ring0_enabled: bool = False
+    ring0_busy: bool = False                 # events/v1 `busy` (not persisted)
     ws: Optional[web.WebSocketResponse] = None  # Live tunnel WS (not persisted)
     tunnel: Any = None                       # NodeTunnel instance (not persisted)
 
@@ -114,6 +115,7 @@ class RegisteredNode:
             "hostname": self.capabilities.get("hostname", ""),
             "sessionCount": len(self.session_ids),
             "ring0Enabled": self.ring0_enabled,
+            "ring0Busy": self.ring0_busy,
             "defaultBackend": self.capabilities.get("defaultBackend", "claude"),
             "contract": self.capabilities.get("contract", []),
         }

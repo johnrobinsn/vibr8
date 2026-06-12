@@ -883,11 +883,22 @@ class WebRTCManager:
                         if node and node.id != "local":
                             if node.tunnel and node.status == "online":
                                 logger.info("[stt] Routing to remote node %r (id=%s)", node.name, node.id[:8])
-                                await node.tunnel.send_fire_and_forget({
-                                    "type": "ring0_input",
-                                    "text": text,
-                                    "sourceClientId": client_id,
-                                })
+                                # Contract events/v1 nodes take `transcript`
+                                # (docs/hub-node-contract-v1.md §B); older
+                                # nodes keep the legacy ring0_input command.
+                                contract = node.capabilities.get("contract") or []
+                                if "events/v1" in contract:
+                                    await node.tunnel.send_fire_and_forget({
+                                        "type": "transcript",
+                                        "text": text,
+                                        "clientId": client_id,
+                                    })
+                                else:
+                                    await node.tunnel.send_fire_and_forget({
+                                        "type": "ring0_input",
+                                        "text": text,
+                                        "sourceClientId": client_id,
+                                    })
                                 return
                             else:
                                 logger.warning("[stt] Active node %r not routable: tunnel=%s status=%s — falling through to local",

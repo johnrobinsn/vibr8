@@ -110,6 +110,13 @@ class WsBridge:
         # so the node-local push_to_native_clients call would otherwise
         # find an empty subscriber list and drop the message.
         self._native_push_hook: Callable[..., Awaitable[None]] | None = None
+        # Contract events/v1 hooks (docs/hub-node-contract-v1.md §B), set by
+        # NodeAgent. speak(text): this node's Ring0 wants TTS; busy(bool):
+        # Ring0 working/idle; attention(reason): node wants the user. All
+        # None on the hub's own bridge.
+        self._speak_hook: Callable[[str], Awaitable[None]] | None = None
+        self._busy_hook: Callable[[bool], Awaitable[None]] | None = None
+        self._attention_hook: Callable[[str], Awaitable[None]] | None = None
         self._computer_use_agents: dict[str, Any] = {}  # session_id → ComputerUseAgent
         self._active_tts: dict[str, Any] = {}  # session_id → TTSEngine instance
         self._thinking_timers: dict[str, asyncio.TimerHandle] = {}
@@ -540,12 +547,14 @@ class WsBridge:
             self._sessions.pop(sid, None)
 
     async def handle_remote_session_message(
-        self, session_id: str, message: dict[str, Any]
+        self, session_id: str, message: dict[str, Any], *, suppress_tts: bool = False
     ) -> None:
         """Forward a message from a remote node's CLI to connected browsers.
 
         Also triggers TTS for assistant messages from remote Ring0 sessions,
-        since audio is always processed centrally on the hub.
+        since audio is always processed centrally on the hub — unless
+        *suppress_tts* is set because the node speaks via explicit
+        events/v1 `speak` messages (docs/hub-node-contract-v1.md §B).
         """
         session = self._sessions.get(session_id)
         if not session:
@@ -575,8 +584,9 @@ class WsBridge:
             if remote_state:
                 session.state.update(remote_state)
 
-        # TTS for remote Ring0 assistant responses
-        if msg_type == "assistant" and self._webrtc_manager:
+        # TTS for remote Ring0 assistant responses (legacy sniffing path —
+        # events/v1 nodes send explicit `speak` messages instead)
+        if msg_type == "assistant" and self._webrtc_manager and not suppress_tts:
             text = message.get("message")
             if text:
                 track = self._webrtc_manager.get_any_outgoing_track()
@@ -1567,6 +1577,15 @@ class WsBridge:
             if track and not tts_muted and tts_allowed:
                 import asyncio
                 asyncio.ensure_future(self._speak_text(session.id, text, track))
+        elif text and self._speak_hook:
+            # Node side (contract events/v1): no audio here — Ring0 speech is
+            # an explicit `speak` event the hub synthesizes (§B).
+            ring0 = self._ring0_manager
+            if ring0 and ring0.is_enabled and session.id == ring0.session_id:
+                spoken = self._flatten_message_text(text)
+                if spoken.strip():
+                    import asyncio
+                    asyncio.ensure_future(self._speak_hook(spoken))
 
         browser_msg: dict[str, Any] = {
             "type": "assistant",
@@ -1603,27 +1622,34 @@ class WsBridge:
         await self._broadcast_to_browsers(session, browser_msg)
         self._persist_session(session)
 
+    @staticmethod
+    def _flatten_message_text(text) -> str:
+        """Flatten an assistant message (str, content-block list, or dict)
+        into the plain text suitable for TTS. Empty string when nothing
+        speakable."""
+        if isinstance(text, dict):
+            # e.g. {"role": "assistant", "content": "..."} or {"content": [...]}
+            content = text.get("content", "")
+            if isinstance(content, list):
+                text = " ".join(
+                    block.get("text", "") for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+            elif isinstance(content, str):
+                text = content
+            else:
+                text = ""
+        elif isinstance(text, list):
+            text = " ".join(
+                block.get("text", "") for block in text
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        return text if isinstance(text, str) else ""
+
     async def _speak_text(self, session_id: str, text, track) -> None:
         """Synthesize *text* via OpenAI TTS and push Opus frames to *track*."""
         try:
-            # message can be a string, a list of content blocks, or a dict with content
-            if isinstance(text, dict):
-                # e.g. {"role": "assistant", "content": "..."} or {"content": [...]}
-                content = text.get("content", "")
-                if isinstance(content, list):
-                    text = " ".join(
-                        block.get("text", "") for block in content
-                        if isinstance(block, dict) and block.get("type") == "text"
-                    )
-                elif isinstance(content, str):
-                    text = content
-                else:
-                    text = ""
-            elif isinstance(text, list):
-                text = " ".join(
-                    block.get("text", "") for block in text
-                    if isinstance(block, dict) and block.get("type") == "text"
-                )
+            text = self._flatten_message_text(text)
             if not isinstance(text, str) or not text.strip():
                 logger.info("[ws-bridge] TTS skipped: empty or non-string text for session %s (type=%s)", session_id, type(text).__name__)
                 return
@@ -2434,6 +2460,11 @@ class WsBridge:
 
     async def _notify_ring0_state_change(self, session: Session, transition: str, *, detail: str = "") -> None:
         """Notify Ring0 of a session state transition (e.g. idle->running)."""
+        # Contract events/v1 (node side): busy mirrors the Ring0 session's
+        # own activity; attention fires when any session blocks on a
+        # permission. Must run before the early returns below — the Ring0
+        # session itself is excluded from its own notifications.
+        self._emit_contract_status(session, transition)
         ring0 = self._ring0_manager
         if not ring0:
             return
@@ -2468,6 +2499,27 @@ class WsBridge:
         if detail:
             fields["detail"] = detail
         await self.emit_ring0_event(Ring0Event(fields=fields))
+
+    def _emit_contract_status(self, session: Session, transition: str) -> None:
+        """Fire events/v1 busy/attention hooks for a state transition.
+        No-op unless a NodeAgent wired the hooks."""
+        ring0 = self._ring0_manager
+        if (
+            self._busy_hook
+            and ring0
+            and ring0.is_enabled
+            and session.id == ring0.session_id
+        ):
+            if transition.endswith("→running"):
+                asyncio.ensure_future(self._busy_hook(True))
+            elif transition.endswith("→idle"):
+                asyncio.ensure_future(self._busy_hook(False))
+        if self._attention_hook and transition.endswith("waiting_for_permission"):
+            from vibr8_core import session_names
+            name = session_names.get_name(session.id) or session.id[:8]
+            asyncio.ensure_future(
+                self._attention_hook(f"session {name} is waiting for permission")
+            )
 
     # ── "Take the Pen" helpers ───────────────────────────────────────────
 

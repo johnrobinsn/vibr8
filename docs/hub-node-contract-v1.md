@@ -27,7 +27,7 @@ terminated. Binary payloads are base64 strings in `*B64` fields.
   "apiKey": "…",
   "capabilities": {
     "protocolVersion": 1,
-    "contract": ["ui/v1", "desktop/v1"],
+    "contract": ["ui/v1", "events/v1", "desktop/v1"],
     "hostname": "…", "platform": "linux", "arch": "x86_64",
     "ring0Enabled": true, "sessionCount": 0,
     "defaultBackend": "claude", "version": "0.1.0"
@@ -40,9 +40,11 @@ terminated. Binary payloads are base64 strings in `*B64` fields.
 `protocolVersion` (int) and `contract` (list of capability flags) are the
 negotiation surface. A missing `protocolVersion` means a pre-contract node.
 Flags in v1: `ui/v1` (node vends its own web UI, supports `http_request` /
-`ws_*`), `desktop/v1` (screen share + input injection per §C2). The hub
-exposes a node's flags to its own UI; features absent from the flag list
-are simply not offered.
+`ws_*`), `events/v1` (node consumes `transcript` and emits
+`speak`/`busy`/`attention` per §B — the hub must not synthesize TTS from
+this node's session traffic), `desktop/v1` (screen share + input injection
+per §C2). The hub exposes a node's flags to its own UI; features absent
+from the flag list are simply not offered.
 
 ### A2. Tunnel (WebSocket, node → hub)
 
