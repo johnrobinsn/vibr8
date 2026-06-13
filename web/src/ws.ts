@@ -796,6 +796,9 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         if (store.clientRole === "primary") {
           store.setViewerPaneContent(null);
         } else {
+          // nodeId tells the screen which node vends the session over the
+          // ui/v1 path; the hub injects it from the calling Ring0's node.
+          store.setMirroredNodeId(params?.nodeId ?? null);
           store.setMirroredSessionId(sid);
           store.setSecondScreenContent(null);
         }

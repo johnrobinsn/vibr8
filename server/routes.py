@@ -1771,6 +1771,19 @@ def create_routes(
         params = body.get("params")
         if not client_id or not method:
             return web.json_response({"error": "clientId and method required"}, status=400)
+        # Mirroring a session means displaying a node's live session over the
+        # ui/v1 vended path (/nodes/{id}/ws/browser/{sid}). Tell the second
+        # screen which node owns the session: the calling Ring0's node.
+        # Node service tokens are named "node-{nodeId}"; any other caller
+        # (local Ring0, UI) maps to the self-node.
+        if method == "mirror_session" and isinstance(params, dict) and not params.get("nodeId"):
+            auth_user = request.get("auth_user", "") or ""
+            if auth_user.startswith("node-"):
+                params["nodeId"] = auth_user[len("node-"):]
+            elif node_registry:
+                self_node = node_registry.get_node_by_name("self")
+                if self_node:
+                    params["nodeId"] = self_node.id
         # Longer timeout for methods that may trigger browser permission prompts
         interactive_methods = {"get_location", "send_notification", "read_clipboard", "write_clipboard", "capture_screenshot"}
         timeout = 30.0 if method in interactive_methods else 5.0

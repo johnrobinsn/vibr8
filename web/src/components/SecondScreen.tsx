@@ -32,6 +32,7 @@ export function SecondScreen() {
   const [renameOpen, setRenameOpen] = useState(false);
   const pushedContent = useStore((s) => s.secondScreenContent);
   const mirroredSessionId = useStore((s) => s.mirroredSessionId);
+  const mirroredNodeId = useStore((s) => s.mirroredNodeId);
   const sessionNames = useStore((s) => s.sessionNames);
   const scale = useStore((s) => s.secondScreenScale);
   const tvSafe = useStore((s) => s.secondScreenTvSafe);
@@ -209,7 +210,11 @@ export function SecondScreen() {
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       const token = getDeviceToken();
       const tokenParam = token ? `&token=${encodeURIComponent(token)}` : "";
-      const url = `${proto}//${location.host}/ws/browser/${mirroredSessionId}?clientId=${encodeURIComponent(clientId)}&role=secondscreen&mirror=true${tokenParam}`;
+      // The mirrored session lives on a node; reach it over the ui/v1
+      // vended path (/nodes/{id}/ws/browser/{sid}) so the node's own bridge
+      // streams its live broadcasts. Default to the self-node ("local").
+      const node = mirroredNodeId || "local";
+      const url = `${proto}//${location.host}/nodes/${encodeURIComponent(node)}/ws/browser/${mirroredSessionId}?clientId=${encodeURIComponent(clientId)}&role=secondscreen&mirror=true${tokenParam}`;
       const ws = new WebSocket(url);
       mirrorWsRef.current = ws;
 
@@ -238,7 +243,7 @@ export function SecondScreen() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (mirrorWsRef.current) { mirrorWsRef.current.close(); mirrorWsRef.current = null; }
     };
-  }, [mirroredSessionId, clientId]);
+  }, [mirroredSessionId, mirroredNodeId, clientId]);
 
   // Generate a fresh pairing code (used after unpair)
   const generateCode = useCallback(async () => {

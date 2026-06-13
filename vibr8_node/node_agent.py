@@ -657,7 +657,9 @@ class NodeAgent:
         async def handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
             ws = web.WebSocketResponse(heartbeat=45)
             await ws.prepare(request)
-            session_id = request.match_info["session_id"]
+            # Expand an 8-char session prefix (e.g. one a mirroring second
+            # screen got from Ring0's list_sessions) to the full session id.
+            session_id = self._ops._expand_session_id(request.match_info["session_id"])
             client_id = request.rel_url.query.get("clientId", "")
             role = request.rel_url.query.get("role", "primary")
             mirror = request.rel_url.query.get("mirror", "") == "true"

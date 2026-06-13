@@ -141,6 +141,9 @@ interface AppState {
   // Second screen pushed content (_pushId auto-increments to force remount on each push)
   secondScreenContent: { type: string; content: string; filename?: string; nodeId?: string; _pushId?: number } | null;
   mirroredSessionId: string | null;
+  // Node owning the mirrored session (contract ui/v1 vended path). "local"
+  // or absent → the self-node.
+  mirroredNodeId: string | null;
   secondScreenScale: number;
   secondScreenTvSafe: number; // 0 = off, >0 = padding percent
   secondScreenClientName: string | null;
@@ -176,6 +179,7 @@ interface AppState {
   setClientRole: (role: "primary" | "secondscreen") => void;
   setSecondScreenContent: (content: { type: string; content: string; filename?: string; nodeId?: string; _pushId?: number } | null) => void;
   setMirroredSessionId: (id: string | null) => void;
+  setMirroredNodeId: (id: string | null) => void;
   setSecondScreenScale: (scale: number) => void;
   setSecondScreenTvSafe: (padding: number) => void;
   setSecondScreenClientName: (name: string | null) => void;
@@ -370,6 +374,7 @@ export const useStore = create<AppState>((set, get) => ({
   commandPaletteOpen: false,
   secondScreenContent: null,
   mirroredSessionId: null,
+  mirroredNodeId: null,
   secondScreenScale: parseFloat(localStorage.getItem("cc-second-screen-scale") || "1.5"),
   secondScreenClientName: null,
   secondScreenTvSafe: (() => {
@@ -412,6 +417,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
   setMirroredSessionId: (id) => set({ mirroredSessionId: id }),
+  setMirroredNodeId: (id) => set({ mirroredNodeId: id }),
   setSecondScreenScale: (scale) => {
     const clamped = Math.max(0.5, Math.min(3.0, scale));
     localStorage.setItem("cc-second-screen-scale", String(clamped));
