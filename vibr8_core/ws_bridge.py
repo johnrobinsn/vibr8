@@ -498,11 +498,6 @@ class WsBridge:
     # Node identity is embedded in the session ID: "{node_id}:{raw_id}" for remote.
 
     @staticmethod
-    def qualify_session_id(node_id: str, raw_id: str) -> str:
-        """Prefix a raw session ID with the node identity."""
-        return f"{node_id}:{raw_id}"
-
-    @staticmethod
     def parse_qualified_id(qid: str) -> tuple[str, str]:
         """(node_id, raw_id) — for local sessions, node_id is ''."""
         return tuple(qid.split(":", 1)) if ":" in qid else ("", qid)  # type: ignore[return-value]

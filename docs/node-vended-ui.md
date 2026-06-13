@@ -225,9 +225,13 @@ hub-originated broadcast that targeted a node session by id. Audit + status:
   vended model; reviving arbitrary-session voice needs the hub to learn the
   iframe's active session (its own small piece of work).
 - **Vestigial remote-session qualify paths** (`routes.py` `/api/sessions`
-  with `?nodeId=`) — *harmless leftover.* The shell reaches remote nodes via
-  their iframe, not these endpoints; they still emit `{node}:{raw}` ids but
-  are unreached in normal use.
+  with `?nodeId=`) — *removed.* The hub no longer tunnel-fetches or
+  forward-creates a remote node's sessions (those are reached through the
+  node's vended UI); `/api/sessions?nodeId=<remote>` returns `[]` and create
+  errors with a pointer to the node's UI. The seeded `local` node (no
+  tunnel) still falls through to local handling. `WsBridge.qualify_session_id`
+  is deleted (its last callers were these paths); `parse_qualified_id`
+  stays — still used defensively in `ws_bridge.py`.
 
 ## Risks / things to validate early
 

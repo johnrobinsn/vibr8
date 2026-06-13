@@ -547,11 +547,7 @@ class TestNodeTunnel:
 
 
 class TestWsBridgeQualifiedIds:
-    """Qualified session ID handling for multi-node."""
-
-    def test_qualify_session_id(self):
-        qid = WsBridge.qualify_session_id("node-abc", "ring0")
-        assert qid == "node-abc:ring0"
+    """Qualified session ID parsing (defensive; ids are raw post-vending)."""
 
     def test_parse_qualified_id_remote(self):
         node_id, raw_id = WsBridge.parse_qualified_id("node-abc:ring0")

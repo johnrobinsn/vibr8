@@ -467,22 +467,15 @@ def create_routes(
             node = node_registry.get_node(target_node) or node_registry.get_node_by_name(target_node)
             if not node:
                 return web.json_response({"error": f"Node '{target_node}' not found"}, status=404)
-            if node.tunnel and node.tunnel.connected:
-                result = await node.tunnel.send_command({
-                    "type": "create_session",
-                    "options": {k: v for k, v in body.items() if k != "nodeId"},
-                })
-                if result.get("error"):
-                    return web.json_response({"error": result["error"]}, status=500)
-                raw_sid = result.get("sessionId")
-                if raw_sid:
-                    from vibr8_core.ws_bridge import WsBridge
-                    result["sessionId"] = WsBridge.qualify_session_id(node.id, raw_sid)
-                return web.json_response(result)
-            elif node.tunnel is None:
-                pass  # Local node — fall through to local session creation
-            else:
-                return web.json_response({"error": f"Node '{node.name}' is offline"}, status=503)
+            if node.tunnel is not None:
+                # Real remote node: sessions are created through its own
+                # vended UI (/nodes/{id}/api/sessions/create), not the hub.
+                return web.json_response(
+                    {"error": f"Create sessions on node '{node.name}' via its own UI"},
+                    status=400,
+                )
+            # else: the seeded "local" node (no tunnel) — fall through to
+            # local session creation.
 
         try:
             if backend not in ("claude", "codex", "opencode", "hermes", "terminal", "computer-use"):
@@ -635,37 +628,14 @@ def create_routes(
             associated.sort(key=lambda s: (0 if s.get("isRing0") else 1, -(s.get("lastPromptedAt") or s.get("createdAt") or 0)))
             return web.json_response(associated)
 
-        # Remote node — fetch sessions via tunnel
+        # Remote nodes are reached through their own vended UI
+        # (/nodes/{id}/api/sessions), not the hub API. Only the seeded
+        # "local" node (no tunnel) is served here, by falling through to
+        # local handling; any real or unknown node returns empty.
         if requested_node and node_registry:
             node = node_registry.get_node(requested_node)
-            if node and node.tunnel and node.tunnel.connected:
-                result = await node.tunnel.send_command({"type": "list_sessions"})
-                remote_sessions = result.get("sessions", [])
-                # Qualify session IDs at the hub boundary
-                from vibr8_core.ws_bridge import WsBridge
-                for s in remote_sessions:
-                    raw_id = s.get("sessionId", "")
-                    if raw_id:
-                        s["sessionId"] = WsBridge.qualify_session_id(requested_node, raw_id)
-                # Append local CU sessions targeting this remote node (pulled
-                # through NodeClient so they pick up the same enrichment).
-                local_list = (await local_node_ops.list_sessions()).get("sessions", [])
-                for s_dict in local_list:
-                    if s_dict.get("backendType") == "computer-use" and s_dict.get("nodeId") == requested_node:
-                        # NodeOps.list_sessions already enriches agentState.
-                        remote_sessions.append(s_dict)
-                # Sort: Ring0 pinned first, then MRU
-                remote_sessions.sort(
-                    key=lambda s: (
-                        0 if s.get("isRing0") else 1,
-                        -(s.get("lastPromptedAt") or s.get("createdAt") or 0),
-                    )
-                )
-                return web.json_response(remote_sessions)
-            elif node and node.tunnel is None:
-                pass  # Local node — fall through to local handling
-            else:
-                return web.json_response([])  # Offline remote node
+            if not (node and node.tunnel is None):
+                return web.json_response([])
 
         # Local node — pull sessions through NodeClient. NodeOperations
         # already does name/lastPromptedAt/isRing0/controlledBy/agentState
