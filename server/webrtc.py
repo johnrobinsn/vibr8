@@ -282,9 +282,9 @@ class WebRTCManager:
     def set_local_node_ops(self, ops) -> None:
         """Set a reference to the hub's local NodeClient.
 
-        In Option A self-node mode this is QualifyingNodeClient(
-        RemoteNodeClient(self_id, tunnel)) — voice routing forwards
-        transcripts to the self-node's Ring0 via tunnel.
+        In self-node mode this is RemoteNodeClient(self_id, tunnel) —
+        voice routing forwards transcripts to the self-node's Ring0 via
+        the tunnel.
         """
         self._local_node_ops = ops
 
@@ -293,10 +293,7 @@ class WebRTCManager:
 
         ``status`` is the shape returned by NodeOperations.ring0_status():
         {"enabled": bool, "sessionId": str | None, "model": ..., ...}.
-        For Option A self-node mode, QualifyingNodeClient has already
-        qualified the sessionId (e.g. ``{self_id}:ring0``) — exactly what
-        the hub's broadcast targeting + browser proxy-session keying
-        wants.
+        Session ids are raw (node-internal).
         """
         self._ring0_status_cache = status
 

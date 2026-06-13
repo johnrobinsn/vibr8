@@ -1273,14 +1273,10 @@ class TestNodeWebSocketAuth:
     def app(self, bridge, registry):
         from server.main import BRIDGE_KEY, NODE_WS_RATE_KEY, handle_node_ws
 
-        session_registry = MagicMock()
-        session_registry.remove_node_sessions = MagicMock()
-
         app = web.Application()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", NotAppKeyWarning)
             app["node_registry"] = registry
-            app["session_registry"] = session_registry
         app[BRIDGE_KEY] = bridge
         app[NODE_WS_RATE_KEY] = {}
         app.router.add_get("/ws/node/{node_id}", handle_node_ws)
