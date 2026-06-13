@@ -33,6 +33,9 @@ export function SecondScreen() {
   const pushedContent = useStore((s) => s.secondScreenContent);
   const mirroredSessionId = useStore((s) => s.mirroredSessionId);
   const mirroredNodeId = useStore((s) => s.mirroredNodeId);
+  // Default ambient view: the self-node's Ring0 session (mirrored over the
+  // vended path), shown when nothing is explicitly pushed or mirrored.
+  const [ring0Target, setRing0Target] = useState<{ nodeId: string; sessionId: string } | null>(null);
   const sessionNames = useStore((s) => s.sessionNames);
   const scale = useStore((s) => s.secondScreenScale);
   const tvSafe = useStore((s) => s.secondScreenTvSafe);
@@ -127,11 +130,11 @@ export function SecondScreen() {
   const handleMsgRef = useRef(handleMessage);
   handleMsgRef.current = handleMessage;
 
-  // When paired, open a dedicated WebSocket to Ring0 (control channel).
-  // The connectKey is bumped to force a reconnect when messages are lost
-  // (e.g. after HMR replaces the store with an empty messages map).
+  // When paired, open a dedicated WebSocket to the hub (control channel).
+  // It registers this client on the hub bridge so Ring0 RPCs (show_content,
+  // mirror_session, clear_content) reach the screen; it auto-reconnects on
+  // close. The displayed conversation comes from the mirror WS, not here.
   const wsRef = useRef<WebSocket | null>(null);
-  const [connectKey, setConnectKey] = useState(0);
   useEffect(() => {
     if (pairingState !== "paired") return;
     useStore.getState().setCurrentSession(RING0_SESSION_ID);
@@ -177,26 +180,26 @@ export function SecondScreen() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     };
-  }, [pairingState, connectKey]);
+  }, [pairingState]);
 
-  // After HMR, the store may have been recreated with an empty messages map
-  // while the WS is still connected.  Detect this and force a reconnect so
-  // the server re-sends session_init + message_history.  Use a delay to avoid
-  // false positives on normal reconnects (messages arrive shortly after open).
-  const ring0Messages = useStore((s) => s.messages.get(RING0_SESSION_ID));
-  const ring0Connected = useStore((s) => s.connectionStatus.get(RING0_SESSION_ID));
-  useEffect(() => {
-    if (pairingState === "paired" && ring0Connected === "connected" && (!ring0Messages || ring0Messages.length === 0)) {
-      const timer = setTimeout(() => setConnectKey((k) => k + 1), 500);
-      return () => clearTimeout(timer);
-    }
-  }, [pairingState, ring0Connected, ring0Messages]);
+  // (The control channel is RPC-only now — the displayed conversation comes
+  // from the mirror WS, which auto-reconnects on close. The old
+  // reconnect-when-"ring0"-messages-are-empty HMR heuristic was removed: the
+  // hub-root "ring0" session is intentionally empty post-vending, so that
+  // heuristic would spin forever.)
 
-  // Mirror WebSocket — opens a second WS to the mirrored session for live data
+  // The session currently displayed: an explicit mirror if set, else the
+  // default Ring0 view. Both stream over the vended path from the node that
+  // owns the session.
+  const activeMirrorSession = mirroredSessionId || ring0Target?.sessionId || null;
+  const activeMirrorNode = mirroredSessionId
+    ? (mirroredNodeId || "local")
+    : (ring0Target?.nodeId || "local");
+
+  // Mirror WebSocket — opens a second WS to the displayed session for live data
   const mirrorWsRef = useRef<WebSocket | null>(null);
   useEffect(() => {
-    if (!mirroredSessionId || mirroredSessionId === RING0_SESSION_ID) {
-      // No mirror needed (Ring0 is already connected via the control channel)
+    if (!activeMirrorSession || activeMirrorSession === RING0_SESSION_ID) {
       if (mirrorWsRef.current) { mirrorWsRef.current.close(); mirrorWsRef.current = null; }
       return;
     }
@@ -210,11 +213,10 @@ export function SecondScreen() {
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       const token = getDeviceToken();
       const tokenParam = token ? `&token=${encodeURIComponent(token)}` : "";
-      // The mirrored session lives on a node; reach it over the ui/v1
+      // The displayed session lives on a node; reach it over the ui/v1
       // vended path (/nodes/{id}/ws/browser/{sid}) so the node's own bridge
       // streams its live broadcasts. Default to the self-node ("local").
-      const node = mirroredNodeId || "local";
-      const url = `${proto}//${location.host}/nodes/${encodeURIComponent(node)}/ws/browser/${mirroredSessionId}?clientId=${encodeURIComponent(clientId)}&role=secondscreen&mirror=true${tokenParam}`;
+      const url = `${proto}//${location.host}/nodes/${encodeURIComponent(activeMirrorNode)}/ws/browser/${activeMirrorSession}?clientId=${encodeURIComponent(clientId)}&role=secondscreen&mirror=true${tokenParam}`;
       const ws = new WebSocket(url);
       mirrorWsRef.current = ws;
 
@@ -224,7 +226,7 @@ export function SecondScreen() {
         }, 15000);
       };
 
-      ws.onmessage = (event) => handleMessage(mirroredSessionId!, event, ws);
+      ws.onmessage = (event) => handleMessage(activeMirrorSession!, event, ws);
 
       ws.onclose = () => {
         if (keepalive) { clearInterval(keepalive); keepalive = null; }
@@ -243,7 +245,7 @@ export function SecondScreen() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (mirrorWsRef.current) { mirrorWsRef.current.close(); mirrorWsRef.current = null; }
     };
-  }, [mirroredSessionId, mirroredNodeId, clientId]);
+  }, [activeMirrorSession, activeMirrorNode, clientId]);
 
   // Generate a fresh pairing code (used after unpair)
   const generateCode = useCallback(async () => {
@@ -277,6 +279,24 @@ export function SecondScreen() {
     }, 3000);
 
     return () => clearInterval(interval);
+  }, [pairingState, clientId]);
+
+  // While paired, learn (and refresh) the self-node Ring0 session that the
+  // default view mirrors. Polling also picks up Ring0 restarts (new id).
+  useEffect(() => {
+    if (pairingState !== "paired") return;
+    let cancelled = false;
+    async function refresh() {
+      try {
+        const status = await api.secondScreenStatus(clientId);
+        if (!cancelled) setRing0Target(status.ring0 ?? null);
+      } catch {
+        // ignore — keep last known target
+      }
+    }
+    refresh();
+    const interval = setInterval(refresh, 15000);
+    return () => { cancelled = true; clearInterval(interval); };
   }, [pairingState, clientId]);
 
   const handleUnpair = useCallback(async () => {
@@ -336,7 +356,10 @@ export function SecondScreen() {
   // Determine what to show and the status bar label
   const isHome = !pushedContent && !mirroredSessionId;
   const isMirroring = !pushedContent && !!mirroredSessionId;
-  const displaySessionId = mirroredSessionId || RING0_SESSION_ID;
+  // Home view reads the mirrored Ring0 session; explicit mirror reads its
+  // own session; both are fed by the mirror WS above. Falls back to the
+  // (empty) "ring0" sentinel only when Ring0 is unavailable.
+  const displaySessionId = mirroredSessionId || ring0Target?.sessionId || RING0_SESSION_ID;
   const displayName = isMirroring
     ? sessionNames.get(mirroredSessionId!) || mirroredSessionId!
     : "Ring0";

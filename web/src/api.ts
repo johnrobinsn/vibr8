@@ -525,7 +525,7 @@ export const api = {
   // Second Screen
   secondScreenPairCode: (clientId: string) => post<{ code: string }>("/second-screen/pair-code", { clientId }),
   secondScreenPair: (code: string) => post<{ ok: boolean; secondScreenClientId: string }>("/second-screen/pair", { code }),
-  secondScreenStatus: (clientId: string) => get<{ paired: boolean; role?: string; pairedUser?: string; pairedAt?: number; screens?: Array<{ clientId: string; pairedUser: string; pairedAt: number }> }>(`/second-screen/status?clientId=${encodeURIComponent(clientId)}`),
+  secondScreenStatus: (clientId: string) => get<{ paired: boolean; role?: string; pairedUser?: string; pairedAt?: number; ring0?: { nodeId: string; sessionId: string }; screens?: Array<{ clientId: string; pairedUser: string; pairedAt: number }> }>(`/second-screen/status?clientId=${encodeURIComponent(clientId)}`),
   secondScreenUnpair: (clientId: string) => post<{ ok: boolean }>("/second-screen/unpair", { clientId }),
   secondScreenToggle: (clientId: string, enabled: boolean) => post<{ ok: boolean; enabled: boolean }>("/second-screen/toggle", { clientId, enabled }),
   secondScreenList: () => get<Array<{ clientId: string; pairedUser: string; pairedAt: number; enabled: boolean; online: boolean }>>("/second-screen/list"),

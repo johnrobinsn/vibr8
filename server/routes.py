@@ -2673,6 +2673,15 @@ def create_routes(
                 "pairedUser": pairing["pairedUser"],
                 "pairedAt": pairing["pairedAt"],
             }
+            # Default ambient view: the self-node's Ring0 conversation,
+            # mirrored over the ui/v1 vended path. The screen falls back to
+            # this whenever nothing is explicitly pushed/mirrored.
+            try:
+                r0 = await local_node_ops.ring0_status()
+                if r0.get("enabled") and r0.get("sessionId"):
+                    resp["ring0"] = {"nodeId": "local", "sessionId": r0["sessionId"]}
+            except Exception:
+                pass
             # Deliver device token (single-use: cleared after first delivery)
             pending_token = pairing.pop("pendingToken", None)
             if pending_token:
