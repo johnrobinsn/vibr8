@@ -141,12 +141,10 @@ class NodeAgent:
 
         self._launcher.on_codex_adapter_created(on_adapter_created)
 
-        # Set broadcast hook so CLI output goes to the hub tunnel
-        self._bridge._broadcast_hook = self._forward_to_hub
-        # Native-client pushes (permission_cancelled, status_change, etc.)
-        # need to reach hub-side native clients too — they connect to the
-        # hub, not the node.
-        self._bridge._native_push_hook = self._forward_native_push_to_hub
+        # CLI output broadcasts to node-local browser sockets — browsers
+        # reach this node through the hub's ui/v1 WS channel proxy, so no
+        # hub-side forwarding hook is needed (or wanted: the hook replaces
+        # local broadcasting entirely).
         # Contract events/v1 (docs/hub-node-contract-v1.md §B): Ring0 speech
         # and status leave this node as explicit events; the hub owns audio.
         self._bridge._speak_hook = self._emit_speak
@@ -533,31 +531,6 @@ class NodeAgent:
             await ws.close()
         return {"ok": True}
 
-    # ── Broadcast hook ────────────────────────────────────────────────────
-
-    async def _forward_to_hub(self, session_id: str, msg: dict) -> None:
-        """Forward CLI output to hub via WS tunnel (broadcast hook)."""
-        if self._ws and not self._ws.closed:
-            await self._ws.send_str(json.dumps({
-                "type": "session_message",
-                "sessionId": session_id,
-                "message": msg,
-            }) + "\n")
-
-    async def _forward_native_push_to_hub(
-        self, session_id: str, event: str, payload: dict | None = None,
-    ) -> None:
-        """Forward a native-client push (permission_cancelled etc.) to the
-        hub via the tunnel. The hub's on_node_message dispatches it to its
-        own _push_to_native_clients with the session id qualified."""
-        if self._ws and not self._ws.closed:
-            await self._ws.send_str(json.dumps({
-                "type": "native_push",
-                "sessionId": session_id,
-                "event": event,
-                "payload": payload or {},
-            }) + "\n")
-
     # ── Local server ──────────────────────────────────────────────────────
 
     def _make_hub_proxy_middleware(self):
@@ -571,21 +544,12 @@ class NodeAgent:
         hub_token = self.hub_service_token
         hub_verify_ssl = not (hub_http_url.startswith("https://localhost") or hub_http_url.startswith("https://127.0.0.1"))
 
-        # Routes proxied to the hub. Two categories:
-        # 1. Hub-only state (clients, second-screen pairings, artifacts).
-        # 2. /api/ring0/* routes that need cross-node session resolution
-        #    via the hub's session_registry — the node has no registry of
-        #    its own, so its local fallback can only exact-match against
-        #    its launcher and rejects the 8-char prefixes Ring0 passes
-        #    from list_sessions output. Send-message / interrupt / etc.
-        #    all fall in this bucket.
-        # Routes intentionally left LOCAL:
-        # - /api/ring0/sessions: returns THIS node's session list
-        # - /api/ring0/status, /toggle, /switch-backend, /switch-model,
-        #   /mute-events, /create-session, /node-environment, /tasks*:
-        #   all per-node Ring0 config / scheduler.
-        # - /api/ring0/get-session-mode, /set-session-mode: per-node
-        #   permission-mode state (Ring0 only queries its own node).
+        # Routes proxied to the hub: hub-only state (browser clients,
+        # second-screen pairings, artifacts, node registry, voice/UI
+        # switching). Per-node Ring0 is fully internal — session-resolving
+        # routes (send-message, interrupt, respond-permission, …) run
+        # locally; NodeOperations._expand_session_id handles the 8-char
+        # prefixes Ring0 passes from list_sessions output.
         _HUB_ONLY_PREFIXES = (
             "/api/clients",
             "/api/nodes",
@@ -594,12 +558,6 @@ class NodeAgent:
             "/api/ring0/switch-audio",
             "/api/ring0/clients",
             "/api/ring0/prompt-context",
-            "/api/ring0/send-message",
-            "/api/ring0/interrupt",
-            "/api/ring0/respond-permission",
-            "/api/ring0/rename-session",
-            "/api/ring0/session-output/",
-            "/api/ring0/set-guard",
             "/api/second-screen/",
             "/api/artifacts",
         )

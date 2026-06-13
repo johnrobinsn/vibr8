@@ -34,7 +34,7 @@ The codebase is split into three Python packages:
 ### `vibr8_core/` — shared node code
 
 - **`node_operations.py`** — `NodeOperations`: single canonical implementation of every per-node action (sessions, FS, git, envs, artifacts, Ring0 control, scheduler, ring0_events). Both hub and node import this. Methods are tunnel-callable; the node-side dispatcher routes `_cmd_*` → `NodeOperations.method` via generic `getattr`.
-- **`node_client.py`** — `NodeClient` protocol + `RemoteNodeClient` (tunnel via `__getattr__` generic dispatch) + `SwappableNodeClient` + `QualifyingNodeClient` (rewrites sessionId at the hub boundary so self-node sessions appear as remote-prefixed IDs).
+- **`node_client.py`** — `NodeClient` protocol + `RemoteNodeClient` (tunnel via `__getattr__` generic dispatch) + `SwappableNodeClient`. Session ids are raw end to end — sessions are node-internal (contract ui/v1).
 - **`hub_browser_bridge.py`** — `HubBrowserBridge`: hub-only browser/client tracking + broadcasts. Today delegates to `WsBridge` via `__getattr__`; designed so its backing can be swapped during a future code-purity refactor.
 - **`ws_bridge.py`** — Per-node session router: sessions dict, pen system, message routing CLI↔browser, Ring0 event emission. On the hub it operates in proxy-only mode (browser-tracking + tunneled session forwarding). On the node it owns real session state.
 - **`ring0.py`**, **`ring0_events.py`**, **`ring0_scheduler.py`**, **`ring0_mcp.py`** — Ring0 manager + event router + scheduler + MCP server (all per-node).
@@ -53,7 +53,7 @@ The codebase is split into three Python packages:
 - **`audio_track.py`** — `QueuedAudioTrack` for outgoing TTS frames (48kHz, 20ms/frame).
 - **`node_tunnel.py`** — Hub-side WebSocket tunnel server. NDJSON with request/response correlation.
 - **`node_registry.py`** — Remote node registration, status tracking, persistence (`~/.vibr8/nodes.json`).
-- **`session_registry.py`** — Qualified ↔ raw session ID mapping; `LocalSessionRouter` (wraps `NodeOperations`) + `TunneledSessionRouter` (wraps a remote node's tunnel).
+- **`node_ui_proxy.py`** — ui/v1 vending proxy: maps `/nodes/{id}/{ui,api,ws}/*` onto a node's loopback server through its tunnel (`http_request` / `ws_open` / `ws_data` / `ws_close`).
 - **`computer_use_agent.py`**, **`ui_tars_agent.py`**, **`ui_tars_actions.py`**, **`desktop_target.py`**, **`vlm.py`** — Computer-use VLM and its targets (VLM stays hub-side because the GPU is here).
 
 ### Frontend (`web/src/`)
@@ -101,7 +101,7 @@ React 19, TypeScript, Vite, Tailwind CSS 4, Zustand for state.
 
 Three things to notice:
 
-1. **The hub owns no node-scoped state.** Sessions, Ring0, FS, git, envs, artifacts, scheduler all live on a node. The hub spawns its own `vibr8_node` subprocess at startup (the **self-node**) and reaches it via a loopback tunnel; remote nodes (Hermes, Docker, EC2, …) use the same NDJSON-over-WebSocket protocol over the public internet. Session IDs are qualified at the hub boundary as `{node_id}:{raw_id}` so the browser sees one flat namespace.
+1. **The hub owns no node-scoped state.** Sessions, Ring0, FS, git, envs, artifacts, scheduler all live on a node. The hub spawns its own `vibr8_node` subprocess at startup (the **self-node**) and reaches it via a loopback tunnel; remote nodes (Hermes, Docker, EC2, …) use the same NDJSON-over-WebSocket protocol over the public internet. Session ids are raw and node-internal — there is no cross-node session namespace; the browser reaches a node's sessions through that node's vended UI (`/nodes/{id}/ui/`, see `docs/hub-node-contract-v1.md`).
 
 2. **The active node is per-client, per-tab.** Each browser tab has its own `activeNodeId` (sessionStorage) and POSTs it to `/api/clients/{client_id}/active-node`. Voice routing reads the originating client's active node; Ring0 events route via `event.source_client_id`. There is no hub-wide active node.
 
@@ -117,7 +117,7 @@ Every vibr8 instance is a "node" — including the hub-host. The hub spawns its 
 
 **Communication**: Nodes connect to the hub via WebSocket — outbound from the node to `wss://{hub_url}/ws/node/{node_id}?apiKey=...`. Internet-traversable, no SSH required. The hub never initiates connections to nodes. Protocol is NDJSON over WebSocket with request/response correlation (`server/node_tunnel.py`).
 
-**Session creation**: Every `create_session` (regardless of target) flows through `local_node_ops.launch_with_options()` → tunnel → target node's `NodeOperations.launch_with_options` → that node's `CliLauncher`. The host never spawns CLIs for non-self sessions. Session IDs are qualified at the hub boundary (`{node_id}:{raw_id}`) by `QualifyingNodeClient` so browser/CLI WebSockets can route via the tunnel.
+**Session creation**: Every `create_session` (regardless of target) flows through `local_node_ops.launch_with_options()` → tunnel → target node's `NodeOperations.launch_with_options` → that node's `CliLauncher`. The host never spawns CLIs for non-self sessions. Session ids stay raw; browser WebSockets reach a node's sessions through the hub's ui/v1 channel proxy (`/nodes/{id}/ws/browser/{sid}` → tunnel `ws_open`/`ws_data` → node-local `/ws/browser/{sid}`).
 
 **Computer-use sessions**: VLM inference always runs on the hub (GPU lives there). The `nodeId` determines which remote desktop to target for WebRTC screen capture and input injection. The remote node is a "dumb terminal" — captures screen frames and injects input events.
 
@@ -129,11 +129,11 @@ Every vibr8 instance is a "node" — including the hub-host. The hub spawns its 
 
 **Hub-side events**: `note_mode_ended`, `second_screen_*` etc. are emitted on the hub and forwarded to the source client's active node's Ring0. Callers populate `Ring0Event.source_client_id`; the forwarder in `server/main.py` calls `HubBrowserBridge.get_client_active_node(source_client_id)` and routes via `local_node_ops.emit_ring0_event` (self-node) or the remote tunnel directly. Events without a source client fall back to the self-node. Session-bound events (`user_returned`, `task_completed`, scheduler `task_due`) fire on the *node-side* WsBridge and reach that node's own Ring0 without going through the forwarder.
 
-**Hub-proxy middleware (`vibr8_node/node_agent.py:_make_hub_proxy_middleware`)**: Routes that operate on hub-only state — `/api/clients`, `/api/nodes`, `/api/ring0/query-client`, `/api/ring0/switch-ui`, `/api/ring0/switch-audio`, `/api/ring0/clients`, `/api/ring0/prompt-context`, `/api/second-screen/`, `/api/artifacts` — get forwarded from the node back to the hub. Also forwarded: session-resolving Ring0 routes (`/api/ring0/send-message`, `/interrupt`, `/respond-permission`, `/rename-session`, `/session-output/`, `/set-guard`) because the node has no cross-node `session_registry` and its local fallback can only exact-match, breaking the 8-char prefix lookups Ring0 sends from `list_sessions` output. Routes left local: `/api/ring0/sessions` (this node's list), `/status`, `/toggle`, `/switch-backend`, `/switch-model`, `/mute-events`, `/create-session`, `/node-environment`, `/tasks*`, `/get-session-mode`, `/set-session-mode` — all per-node config or scheduler.
+**Hub-proxy middleware (`vibr8_node/node_agent.py:_make_hub_proxy_middleware`)**: Routes that operate on hub-only state — `/api/clients`, `/api/nodes`, `/api/ring0/query-client`, `/api/ring0/switch-ui`, `/api/ring0/switch-audio`, `/api/ring0/clients`, `/api/ring0/prompt-context`, `/api/second-screen/`, `/api/artifacts` — get forwarded from the node back to the hub. Everything session-scoped runs locally: per-node Ring0 is fully internal, and `NodeOperations._expand_session_id` resolves the 8-char prefixes Ring0 passes from `list_sessions` output.
 
-**Native-push forwarding**: `WsBridge._push_to_native_clients` (session-scoped notifications like `permission_cancelled`, `status_change`, `cli_connected`/`cli_disconnected`, `permission_request`) is short-circuited on the node via `_native_push_hook` (`vibr8_node/node_agent.py:_forward_native_push_to_hub`). Native clients (watch, second-screen) connect to the hub, not the node, so a node-local push would find an empty subscriber map and drop the message. The forwarder sends a `native_push` tunnel message; the hub's `on_node_message` re-dispatches via the hub's own `_push_to_native_clients` with the session id qualified.
+**Native clients (watch, second screen)**: session-scoped native push is dark pending contract v2 `notify`/`present` (docs/hub-node-contract-v1.md, reserved names). The old `native_push` tunnel forwarding was deleted with the cross-node session namespace.
 
-**Key files**: `server/main.py` (self-node spawn + swap, voice warmup), `vibr8_core/node_client.py` (SwappableNodeClient + QualifyingNodeClient + NOT_READY), `vibr8_core/node_operations.py` (canonical per-node ops), `vibr8_node/node_agent.py` (hub-proxy + native-push hooks), `server/node_tunnel.py`, `server/node_registry.py`, `install-node.sh`, `Dockerfile.node*`
+**Key files**: `server/main.py` (self-node spawn + swap, voice warmup), `vibr8_core/node_client.py` (SwappableNodeClient + NOT_READY), `vibr8_core/node_operations.py` (canonical per-node ops), `vibr8_node/node_agent.py` (contract handlers + hub-proxy), `server/node_tunnel.py`, `server/node_ui_proxy.py`, `server/node_registry.py`, `docs/hub-node-contract-v1.md`, `install-node.sh`, `Dockerfile.node*`
 
 ### Computer-Use Pipeline
 
@@ -158,7 +158,7 @@ CLI emits a `control_request` (e.g. `tool=Bash`). The bridge stores it in `sessi
 
 **Approval paths**:
 - **Browser**: dismiss button → `permission_response` over WS → `_handle_permission_response` pops pending, sends `control_response` to CLI, broadcasts `permission_cancelled`. For remote sessions the control_response goes via tunnel as a `cli_input`.
-- **Ring0 MCP**: `mcp__vibr8__respond_to_permission` → `POST /api/ring0/respond-permission` → `TunneledSessionRouter.respond_permission` → tunnel command `respond_permission`. **Wire field is `permissionRequestId`, not `requestId`** — `NodeTunnel.send_command` reserves `requestId` for its own correlation token. Using `requestId` for the permission id causes silent failure: tunnel overwrites it, dispatcher drops it, control_response goes out with `request_id=""` and the CLI ignores it. See commit `f04da6c`.
+- **Ring0 MCP**: `mcp__vibr8__respond_to_permission` → `POST /api/ring0/respond-permission` → node-local `NodeOperations.respond_to_permission` (or tunnel command `respond_permission` for hub-side callers). **Wire field is `permissionRequestId`, not `requestId`** — `NodeTunnel.send_command` reserves `requestId` for its own correlation token. Using `requestId` for the permission id causes silent failure: tunnel overwrites it, dispatcher drops it, control_response goes out with `request_id=""` and the CLI ignores it. See commit `f04da6c`.
 
 **Stuck-loop detection** (`WsBridge._record_perm_retry`): identical `(tool_name, JSON-stringified input)` payloads within a 5-minute window count up; at threshold 3 a WARNING fires (`[ws-bridge] STUCK PERMISSION LOOP …`). Logging only — no auto-deny. Typical cause: the agent retries an Edit whose `old_string` no longer matches because a prior approval already applied the change.
 

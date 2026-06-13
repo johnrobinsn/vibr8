@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 from vibr8_core import backend_models
 from vibr8_core.node_operations import NodeOperations
-from server.session_registry import SessionRegistry
 
 
 def test_codex_model_info_reads_config_cache_and_reasoning_modes(tmp_path, monkeypatch) -> None:
@@ -145,39 +144,3 @@ async def test_node_operations_enriches_regular_session_model_info(tmp_path, mon
     assert listed["modelInfo"]["backend"] == "codex"
     assert listed["modelInfo"]["provider"] == "openai"
     assert listed["modelInfo"]["modes"]["reasoningEffort"] == "high"
-
-
-async def test_session_registry_preserves_model_info_from_node_operations() -> None:
-    model_info = {
-        "backend": "codex",
-        "provider": "openai",
-        "model": "gpt-5.5",
-        "source": "codex-config",
-        "modes": {"reasoningEffort": "medium"},
-    }
-    async def list_sessions() -> dict:
-        return {
-            "sessions": [{
-                "sessionId": "s1",
-                "state": "connected",
-                "backendType": "codex",
-                "cwd": "/tmp/project",
-                "model": "gpt-5.5",
-                "modelInfo": model_info,
-            }]
-        }
-
-    ops = SimpleNamespace(list_sessions=list_sessions)
-    registry = SessionRegistry(
-        ws_bridge=SimpleNamespace(),
-        launcher=SimpleNamespace(),
-        node_registry=None,
-        local_node_ops=ops,
-    )
-
-    await registry.sync_from_launcher()
-    entry = registry.resolve("s1")
-
-    assert entry is not None
-    assert entry.model == "gpt-5.5"
-    assert entry.model_info == model_info

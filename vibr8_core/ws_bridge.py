@@ -103,13 +103,6 @@ class WsBridge:
         # Format: "{node_id}:{raw_session_id}" for remote, raw id for local
         # Hook for vibr8-node: intercepts _broadcast_to_browsers for remote forwarding
         self._broadcast_hook: Callable[..., Awaitable[None]] | None = None
-        # Hook for vibr8-node: intercepts _push_to_native_clients so native
-        # client notifications (e.g. permission_cancelled) reach hub-side
-        # native clients (watch, second screen) when the session lives on
-        # a remote node. Native clients connect to the hub, not the node,
-        # so the node-local push_to_native_clients call would otherwise
-        # find an empty subscriber list and drop the message.
-        self._native_push_hook: Callable[..., Awaitable[None]] | None = None
         # Contract events/v1 hooks (docs/hub-node-contract-v1.md §B), set by
         # NodeAgent. speak(text): this node's Ring0 wants TTS; busy(bool):
         # Ring0 working/idle; attention(reason): node wants the user. All
@@ -142,7 +135,6 @@ class WsBridge:
         # User re-engagement tracking for scheduled tasks
         self._last_user_interaction: float = 0.0  # time.time() of last user-originated message to Ring0
         self._task_scheduler: Any = None  # TaskScheduler (set via setter)
-        self._session_registry: Any = None  # SessionRegistry (set via setter)
         self._prompt_context_by_session: dict[str, dict[str, Any]] = {}
         self._prompt_context_by_client: dict[str, dict[str, Any]] = {}
         self._latest_prompt_context: dict[str, Any] = {}
@@ -407,9 +399,6 @@ class WsBridge:
     def set_task_scheduler(self, scheduler: Any) -> None:
         self._task_scheduler = scheduler
 
-    def set_session_registry(self, registry: Any) -> None:
-        self._session_registry = registry
-
     def get_ring0_prompt_client(self) -> str:
         """Return the client ID from the current Ring0 prompt context."""
         ring0 = self._ring0_manager
@@ -530,79 +519,6 @@ class WsBridge:
     def _raw_session_id(self, qid: str) -> str:
         """Strip node prefix to get the raw ID the node uses internally."""
         return qid.split(":", 1)[-1]
-
-    def update_remote_sessions(
-        self, node_id: str, sessions: list[dict[str, Any]]
-    ) -> None:
-        """Clean up stale proxy sessions when a node reports its session list.
-        Session IDs in the list are already qualified by the caller (main.py)."""
-        prefix = f"{node_id}:"
-        current_ids = {
-            s.get("sessionId", s.get("id", ""))
-            for s in sessions
-        }
-        # Remove proxy sessions that no longer exist on the node
-        stale = [sid for sid in self._sessions if sid.startswith(prefix) and sid not in current_ids]
-        for sid in stale:
-            self._sessions.pop(sid, None)
-
-    async def handle_remote_session_message(
-        self, session_id: str, message: dict[str, Any], *, suppress_tts: bool = False
-    ) -> None:
-        """Forward a message from a remote node's CLI to connected browsers.
-
-        Also triggers TTS for assistant messages from remote Ring0 sessions,
-        since audio is always processed centrally on the hub — unless
-        *suppress_tts* is set because the node speaks via explicit
-        events/v1 `speak` messages (docs/hub-node-contract-v1.md §B).
-        """
-        session = self._sessions.get(session_id)
-        if not session:
-            # Create a lightweight proxy session so messages are buffered
-            session = self.get_or_create_session(session_id)
-
-        # Buffer messages so reconnecting browsers get history
-        msg_type = message.get("type", "")
-        if msg_type in ("cli_connected", "cli_disconnected"):
-            logger.info(f"[ws-bridge] Remote {msg_type} for session {session_id[:8]} → {len(session.browser_sockets)} browser(s)")
-        if msg_type in ("assistant", "result", "user_message"):
-            session.message_history.append(message)
-
-        # Track permission requests so browsers connecting later get them
-        if msg_type == "permission_request":
-            req = message.get("request", {})
-            req_id = req.get("request_id", "")
-            if req_id:
-                session.pending_permissions[req_id] = req
-        elif msg_type in ("permission_response", "permission_cancelled"):
-            req_id = message.get("request_id", "")
-            session.pending_permissions.pop(req_id, None)
-
-        # Track session state updates from remote node
-        if msg_type == "session_update":
-            remote_state = message.get("session", {})
-            if remote_state:
-                session.state.update(remote_state)
-
-        # TTS for remote Ring0 assistant responses (legacy sniffing path —
-        # events/v1 nodes send explicit `speak` messages instead)
-        if msg_type == "assistant" and self._webrtc_manager and not suppress_tts:
-            text = message.get("message")
-            if text:
-                track = self._webrtc_manager.get_any_outgoing_track()
-                if track:
-                    audio_client_id, audio_track = track
-                    if not self._webrtc_manager.is_tts_muted(audio_client_id):
-                        asyncio.ensure_future(self._speak_text(session_id, text, audio_track))
-
-        await self._broadcast_to_browsers(session, message)
-
-    def remove_remote_node_sessions(self, node_id: str) -> None:
-        """Clean up all proxy sessions when a node goes offline."""
-        prefix = f"{node_id}:"
-        to_remove = [sid for sid in self._sessions if sid.startswith(prefix)]
-        for sid in to_remove:
-            self._sessions.pop(sid, None)
 
     def cancel_tts(self, session_id: str) -> None:
         """Cancel any in-progress TTS for *session_id* (called on barge-in)."""
@@ -3059,11 +2975,6 @@ class WsBridge:
 
     async def _push_to_native_clients(self, session_id: str, event: str, payload: dict[str, Any] | None = None) -> None:
         """Push a notification to native clients subscribed to *session_id*."""
-        # On vibr8-node: forward to hub instead of pushing locally (the
-        # node has no native clients of its own — they live on the hub).
-        if self._native_push_hook:
-            await self._native_push_hook(session_id, event, payload)
-            return
         if not self._native_ws_by_client:
             return
         msg: dict[str, Any] = {"type": "push", "event": event, "sessionId": session_id}

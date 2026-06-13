@@ -21,7 +21,6 @@ from server import speaker_fingerprints, voice_profiles, voice_logger
 from server.usage_limits import get_usage_limits
 from server.rate_limit import check_rate_limit, get_client_rate_limit_key
 from vibr8_core.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
-from server.session_registry import LOCAL_NODE_ID
 from vibr8_core.worktree_tracker import WorktreeTracker, WorktreeMapping
 
 if TYPE_CHECKING:
@@ -155,7 +154,6 @@ def create_routes(
     auth_manager: AuthManager | None = None,
     ring0_manager: Ring0Manager | None = None,
     node_registry: Any | None = None,
-    session_registry: Any | None = None,
     self_node_name: str = "",
     local_node_ops: Any | None = None,
     hub_browser_bridge: Any | None = None,
@@ -1495,42 +1493,11 @@ def create_routes(
 
     @routes.get("/api/ring0/sessions")
     async def ring0_sessions(request: web.Request) -> web.Response:
-        """List sessions — proxied for Ring0 MCP server (auth-exempt)."""
-        if session_registry:
-            r0_id = ring0_manager.session_id if ring0_manager else None
-            await session_registry.sync_from_launcher(r0_id or "")
-            sessions = []
-            for se in session_registry.list_all():
-                name = session_names.get_name(se.qualified_id) or se.name or "unnamed"
-                bridge_session = ws_bridge._sessions.get(se.qualified_id)
-                model_info = se.model_info
-                if not model_info and se.node_id == "local":
-                    from vibr8_core import backend_models
-                    model_info = backend_models.get_backend_model_info(
-                        se.backend_type,
-                        explicit_model=se.model or "",
-                        work_dir=se.cwd or None,
-                    )
-                entry = {
-                    "sessionId": se.qualified_id,
-                    "name": name,
-                    "state": se.state,
-                    "cwd": se.cwd,
-                    "backendType": se.backend_type,
-                    "model": model_info.get("model") or se.model,
-                    "modelInfo": model_info,
-                    "archived": se.archived,
-                    "nodeId": se.node_id,
-                    "pendingPermissionCount": ws_bridge.get_pending_permission_count(se.qualified_id),
-                    "pendingPermissions": ws_bridge.get_pending_permissions(se.qualified_id),
-                    "controlledBy": bridge_session.controlled_by if bridge_session else "ring0",
-                }
-                if se.is_ring0:
-                    entry["isRing0"] = True
-                sessions.append(entry)
-            return web.json_response(sessions)
-        # Fallback (no session_registry): pull via NodeClient. Local-only
-        # since this code path predates remote-node support.
+        """List sessions — proxied for Ring0 MCP server (auth-exempt).
+
+        Per-node Ring0: this lists only the local node's sessions. Cross-
+        node session visibility was removed with the qualified-id
+        machinery (docs/node-vended-ui.md, Phase 4)."""
         list_result = await local_node_ops.list_sessions()
         sessions = []
         for s in list_result.get("sessions", []):
@@ -1672,17 +1639,6 @@ def create_routes(
         if not session_id or not message:
             return web.json_response({"error": "sessionId and message required"}, status=400)
         on_behalf_of = body.get("onBehalfOfClient", "")
-        if session_registry:
-            entry = session_registry.resolve(session_id)
-            if not entry:
-                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-            router = session_registry.get_router(entry)
-            err = await router.send_message(message, source_client_id=on_behalf_of)
-            if err:
-                return web.json_response({"error": err, "controlledBy": "user"}, status=409)
-            return web.json_response({"ok": True, "sessionId": entry.qualified_id})
-        # Fallback path through NodeClient (used when session_registry is
-        # unavailable, e.g. minimal test harnesses).
         try:
             client, raw_sid, _ = _resolve_client(session_id)
         except Exception as e:
@@ -1705,33 +1661,15 @@ def create_routes(
         session_id = body.get("sessionId")
         if not session_id:
             return web.json_response({"error": "sessionId required"}, status=400)
-        # Scope resolution to the calling Ring0's node. Node-issued service
-        # tokens are named "node-{nodeId}"; any other caller (local Ring0,
-        # UI, etc.) is treated as the hub itself.
-        auth_user = request.get("auth_user", "") or ""
-        if auth_user.startswith("node-"):
-            source_node_id = auth_user[len("node-"):]
-        else:
-            source_node_id = LOCAL_NODE_ID
-        if session_registry:
-            entry = session_registry.resolve(session_id, node_id=source_node_id)
-            if not entry:
-                return web.json_response(
-                    {"error": f"Session not found on this node: {session_id}"},
-                    status=404,
-                )
-            resolved = entry.qualified_id
-        else:
-            # Fallback when session_registry is unavailable (minimal harness).
-            try:
-                _client, raw_sid, _ = _resolve_client(session_id)
-                # Confirm the session exists on the target node before broadcasting.
-                sess = await _client.get_session(session_id=raw_sid)
-                if "error" in sess:
-                    return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-                resolved = session_id if ":" in session_id else raw_sid
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=503)
+        try:
+            _client, raw_sid, _ = _resolve_client(session_id)
+            # Confirm the session exists on the target node before broadcasting.
+            sess = await _client.get_session(session_id=raw_sid)
+            if "error" in sess:
+                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
+            resolved = raw_sid
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
         client_id = body.get("clientId", "")
         if not client_id:
             client_id = hub_browser_bridge.get_ring0_prompt_client()
@@ -1804,17 +1742,6 @@ def create_routes(
     @routes.get("/api/ring0/session-output/{id}")
     async def ring0_session_output(request: web.Request) -> web.Response:
         session_id = request.match_info["id"]
-        if session_registry:
-            entry = session_registry.resolve(session_id)
-            if not entry:
-                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-            router = session_registry.get_router(entry)
-            messages = router.get_message_history()
-            pending = router.get_pending_permissions()
-            formatted = _format_session_output(messages, pending)
-            return web.json_response({"messages": messages, "pendingPermissions": pending, "formatted": formatted})
-        # Fallback path through NodeClient (used when session_registry is
-        # unavailable).
         try:
             client, raw_sid, _ = _resolve_client(session_id)
         except Exception as e:
@@ -1872,17 +1799,6 @@ def create_routes(
             return web.json_response(
                 {"error": "sessionId, requestId, and behavior (allow/deny) required"}, status=400
             )
-        if session_registry:
-            entry = session_registry.resolve(session_id)
-            if not entry:
-                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-            router = session_registry.get_router(entry)
-            ok = await router.respond_permission(request_id, behavior, message)
-            if not ok:
-                return web.json_response({"error": f"Permission {request_id} not found"}, status=404)
-            return web.json_response({"ok": True})
-        # Fallback path through NodeClient (used when session_registry is
-        # unavailable, e.g. minimal test harnesses).
         try:
             client, raw_sid, _ = _resolve_client(session_id)
         except Exception as e:
@@ -1904,17 +1820,6 @@ def create_routes(
         session_id = body.get("sessionId", "")
         if not session_id:
             return web.json_response({"error": "sessionId required"}, status=400)
-        if session_registry:
-            entry = session_registry.resolve(session_id)
-            if not entry:
-                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-            router = session_registry.get_router(entry)
-            ok = router.interrupt()
-            if not ok:
-                return web.json_response({"error": f"Session {session_id} not interruptible"}, status=404)
-            return web.json_response({"ok": True, "sessionId": entry.qualified_id})
-        # Fallback path through NodeClient (used when session_registry is
-        # unavailable, e.g. minimal test harnesses).
         try:
             client, raw_sid, _ = _resolve_client(session_id)
         except Exception as e:

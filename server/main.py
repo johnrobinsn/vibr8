@@ -41,7 +41,6 @@ from vibr8_core.node_client import SwappableNodeClient, NOT_READY
 from vibr8_core.hub_browser_bridge import HubBrowserBridge
 from server.node_registry import NodeRegistry
 from server.node_tunnel import NodeTunnel
-from server.session_registry import SessionRegistry
 import json as _json
 from server.auth import AuthManager, auth_middleware
 
@@ -179,7 +178,6 @@ async def run_legacy_session_startup_sync(
     use_self_node: bool,
     launcher: object,
     ring0_manager: object | None,
-    session_registry: object,
     spawn_task: Callable[[Awaitable[Any]], Any],
 ) -> None:
     """Run startup work for the legacy in-process session owner."""
@@ -208,10 +206,6 @@ async def run_legacy_session_startup_sync(
                 await launcher.relaunch(info.sessionId)
 
         spawn_task(_watchdog())
-
-    # Populate session registry from launcher's restored sessions.
-    r0_id = ring0_manager.session_id if ring0_manager else ""
-    await session_registry.sync_from_launcher(r0_id)
 
 
 def wire_session_callbacks(
@@ -474,7 +468,6 @@ async def handle_node_ws(request: web.Request) -> web.StreamResponse:
 
     registry: NodeRegistry = request.app["node_registry"]
     bridge = request.app[BRIDGE_KEY]
-    session_registry: SessionRegistry = request.app["session_registry"]
 
     # Authenticate via query param API key
     api_key = request.rel_url.query.get("apiKey", "")
@@ -532,32 +525,11 @@ async def handle_node_ws(request: web.Request) -> web.StreamResponse:
                 ring0_enabled=msg.get("ring0Enabled"),
             )
         elif msg_type == "sessions_update":
+            # Session ids stay raw — sessions are node-internal; browsers
+            # reach them through the node's vended UI (contract ui/v1).
             sessions = msg.get("sessions", [])
-            # Qualify session IDs at the hub boundary
-            for s in sessions:
-                raw_id = s.get("sessionId", s.get("id", ""))
-                if raw_id:
-                    qualified = SessionRegistry.qualify(nid, raw_id)
-                    s["sessionId"] = qualified
-                    if "id" in s:
-                        s["id"] = qualified
             session_ids = [s.get("sessionId", s.get("id", "")) for s in sessions]
             registry.update_sessions(nid, session_ids)
-            bridge.update_remote_sessions(nid, sessions)
-            session_registry.sync_remote_sessions(nid, msg.get("sessions", []))
-        elif msg_type == "session_message":
-            # Forward CLI output from remote session to browser clients
-            raw_session_id = msg.get("sessionId", "")
-            message = msg.get("message", {})
-            if raw_session_id and message:
-                qualified_id = SessionRegistry.qualify(nid, raw_session_id)
-                # events/v1 nodes speak via explicit `speak` messages —
-                # don't also sniff their assistant text for TTS.
-                n = registry.get_node(nid)
-                contract = (n.capabilities.get("contract") or []) if n else []
-                await bridge.handle_remote_session_message(
-                    qualified_id, message, suppress_tts="events/v1" in contract,
-                )
         elif msg_type == "speak":
             # Contract events/v1: the node's Ring0 wants this spoken (§B).
             text = msg.get("text", "")
@@ -587,17 +559,6 @@ async def handle_node_ws(request: web.Request) -> web.StreamResponse:
             # Proxied browser-WS channel traffic (contract ui/v1).
             from server.node_ui_proxy import dispatch_channel_message
             await dispatch_channel_message(request.app, msg)
-        elif msg_type == "native_push":
-            # Native-client notification (permission_cancelled, status_change,
-            # etc.) from a remote node. Native clients connect to the hub,
-            # so the node forwards via tunnel and we dispatch via the hub's
-            # own _push_to_native_clients with the session id qualified.
-            raw_session_id = msg.get("sessionId", "")
-            event = msg.get("event", "")
-            payload = msg.get("payload") or {}
-            if raw_session_id and event and bridge:
-                qualified_id = SessionRegistry.qualify(nid, raw_session_id)
-                await bridge._push_to_native_clients(qualified_id, event, payload)
         else:
             logger.debug("[nodes] Unknown message type %r from node %s", msg_type, node.name)
 
@@ -616,9 +577,6 @@ async def handle_node_ws(request: web.Request) -> web.StreamResponse:
         logger.info("[nodes] WS tunnel closed for node %r (%s)", node.name, node_id[:8])
         tunnel.close()
         registry.set_offline(node_id)
-        # Clean up remote sessions from WsBridge and SessionRegistry
-        bridge.remove_remote_node_sessions(node_id)
-        session_registry.remove_node_sessions(node_id)
 
     return ws
 
@@ -690,19 +648,15 @@ def create_app() -> web.Application:
             task_scheduler=task_scheduler,
             default_backend="claude",
         ))
-    session_registry = SessionRegistry(
-        ws_bridge, launcher, node_registry, local_node_ops=local_node_ops,
-    )
     # HubBrowserBridge wraps the hub-only methods (broadcasts, client
     # metadata). Today it delegates to ws_bridge; Phase 4c-4 will replace
     # the backing with standalone state once the in-process WsBridge goes
     # away in favor of the self-node.
     hub_browser_bridge = HubBrowserBridge(ws_bridge)
 
-    # Phase 4c-6 (Option A): the hub spawns a vibr8_node child process at
-    # startup that connects back via the loopback tunnel. After it
-    # registers, local_node_ops is retargeted at it (RemoteNodeClient
-    # wrapped in QualifyingNodeClient) and all node-scoped operations
+    # The hub spawns a vibr8_node child process at startup that connects
+    # back via the loopback tunnel. After it registers, local_node_ops is
+    # retargeted at it (RemoteNodeClient) and all node-scoped operations
     # flow through the tunnel. Legacy in-process fallback requires both
     # VIBR8_DISABLE_SELF_NODE=1 and VIBR8_ALLOW_LEGACY_IN_PROCESS=1.
     self_node_state: dict[str, object] = {"proc": None, "node_id": "", "api_key": ""}
@@ -744,7 +698,6 @@ def create_app() -> web.Application:
     ws_bridge.set_ring0_event_router(Ring0EventRouter())
     ws_bridge.set_node_registry(node_registry)
     ws_bridge.set_task_scheduler(task_scheduler)
-    ws_bridge.set_session_registry(session_registry)
 
     # Phase 6/8: in Option A self-node mode, hub-side Ring0 event emissions
     # (note_mode_ended, second_screen_*, etc.) need to reach the *event
@@ -1070,7 +1023,7 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/node/{node_id}", handle_node_ws)
 
     # REST API
-    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager, node_registry, session_registry, local_node_ops=local_node_ops, hub_browser_bridge=hub_browser_bridge)
+    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager, node_registry, local_node_ops=local_node_ops, hub_browser_bridge=hub_browser_bridge)
     app.router.add_routes(api_routes)
 
     # Node-vended UI proxy (contract ui/v1): /nodes/{id}/{ui,api,ws}/* over
@@ -1108,7 +1061,6 @@ def create_app() -> web.Application:
     app["ring0_manager"] = ring0_manager
     app["task_scheduler"] = task_scheduler
     app["node_registry"] = node_registry
-    app["session_registry"] = session_registry
     app[LOCAL_NODE_OPS_KEY] = local_node_ops
     app["android_registry"] = android_registry
     app["request_restart"] = request_restart
@@ -1175,7 +1127,6 @@ def create_app() -> web.Application:
             use_self_node=_use_self_node,
             launcher=launcher,
             ring0_manager=ring0_manager,
-            session_registry=session_registry,
             spawn_task=spawn,
         )
 
@@ -1223,9 +1174,7 @@ def create_app() -> web.Application:
             spawn(_spawn_self_node())
             # Refresh the WebRTC Ring0 status cache periodically so voice
             # broadcasts (mode change, audio off, etc.) target the
-            # self-node's Ring0 session with the correct qualified id.
-            # QualifyingNodeClient already qualifies sessionId in the
-            # response, so the cache holds {self_id}:ring0 directly.
+            # self-node's Ring0 session.
             if webrtc_manager:
                 async def _refresh_ring0_status_cache() -> None:
                     backoff = 1.0
@@ -1358,14 +1307,13 @@ def create_app() -> web.Application:
                         if n.tunnel and getattr(n.tunnel, "connected", False):
                             break
                     if n.tunnel and getattr(n.tunnel, "connected", False):
-                        from vibr8_core.node_client import (
-                            RemoteNodeClient, QualifyingNodeClient,
-                        )
-                        remote = RemoteNodeClient(n.id, n.tunnel)
-                        qualified = QualifyingNodeClient(remote, n.id)
-                        local_node_ops.swap(qualified)
+                        from vibr8_core.node_client import RemoteNodeClient
+                        # Session ids stay raw — sessions are node-internal
+                        # under the ui/v1 contract; the hub no longer
+                        # qualifies them at the boundary.
+                        local_node_ops.swap(RemoteNodeClient(n.id, n.tunnel))
                         logger.info(
-                            "[server] local_node_ops swapped → QualifyingNodeClient(RemoteNodeClient(self_id=%s))",
+                            "[server] local_node_ops swapped → RemoteNodeClient(self_id=%s)",
                             n.id[:8],
                         )
                     else:

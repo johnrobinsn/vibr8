@@ -110,7 +110,29 @@ class NodeOperations:
             sessions.append(s_dict)
         return {"sessions": sessions}
 
+    def _expand_session_id(self, session_id: str) -> str:
+        """Resolve an exact session id, or a unique prefix of one, to the
+        full id. Ring0 references sessions by the 8-char prefixes it sees
+        in list_sessions output; with per-node session resolution (no hub
+        session_registry) the node expands them itself."""
+        if not session_id or len(session_id) < 6:
+            return session_id
+        if self._launcher.get_session(session_id) or session_id in self._bridge._sessions:
+            return session_id
+        matches: set[str] = set()
+        for s in self._launcher.list_sessions():
+            sid = getattr(s, "sessionId", "") or ""
+            if sid.startswith(session_id):
+                matches.add(sid)
+        for sid in self._bridge._sessions:
+            if sid.startswith(session_id):
+                matches.add(sid)
+        if len(matches) == 1:
+            return next(iter(matches))
+        return session_id
+
     async def set_pen(self, session_id: str = "", controlled_by: str = "ring0") -> dict:
+        session_id = self._expand_session_id(session_id)
         if controlled_by not in ("ring0", "user"):
             return {"error": "controlledBy must be 'ring0' or 'user'"}
         session = self._bridge._sessions.get(session_id)
@@ -188,6 +210,7 @@ class NodeOperations:
         return result
 
     async def kill_session(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         killed = await self._launcher.kill(session_id)
         await self._notify_sessions_changed()
         return {"ok": killed}
@@ -259,6 +282,7 @@ class NodeOperations:
         return {"ok": True}
 
     async def rename_session(self, session_id: str = "", name: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         name = (name or "").strip()
         if not name:
             return {"error": "name is required"}
@@ -274,6 +298,7 @@ class NodeOperations:
         content: str = "",
         source_client_id: str = "",
     ) -> dict:
+        session_id = self._expand_session_id(session_id)
         err = await self._bridge.submit_user_message(
             session_id, content, source_client_id=source_client_id,
         )
@@ -291,6 +316,7 @@ class NodeOperations:
         return {"ok": True}
 
     async def interrupt(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         ok = self._bridge.interrupt_session(session_id)
         return {"ok": ok}
 
@@ -309,12 +335,14 @@ class NodeOperations:
         return {"ok": True}
 
     async def get_session_output(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         session = self._bridge._sessions.get(session_id)
         if not session:
             return {"error": f"Session {session_id} not found"}
         return {"messages": session.message_history[-500:]}
 
     async def get_session(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         info = self._launcher.get_session(session_id)
         if not info:
             return {"error": "Session not found"}
@@ -332,15 +360,18 @@ class NodeOperations:
         return d
 
     async def get_message_history(self, session_id: str = "", limit: int = 500) -> dict:
+        session_id = self._expand_session_id(session_id)
         session = self._bridge._sessions.get(session_id)
         if not session:
             return {"error": "Session not found"}
         return {"messages": session.message_history[-limit:]}
 
     async def get_pending_permissions(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         return {"permissions": self._bridge.get_pending_permissions(session_id)}
 
     async def get_pending_permission_count(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         return {"count": self._bridge.get_pending_permission_count(session_id)}
 
     async def respond_to_permission(
@@ -350,6 +381,7 @@ class NodeOperations:
         behavior: str = "",
         message: str = "",
     ) -> dict:
+        session_id = self._expand_session_id(session_id)
         ok = await self._bridge.respond_to_permission(
             session_id, request_id, behavior, message,
         )
@@ -379,6 +411,7 @@ class NodeOperations:
         return {"ok": True}
 
     async def set_permission_mode(self, session_id: str = "", mode: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         session = self._bridge._sessions.get(session_id)
         if not session:
             return {"error": f"Session {session_id} not found"}

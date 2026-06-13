@@ -576,50 +576,6 @@ class TestWsBridgeQualifiedIds:
         assert bridge._raw_session_id("local-session") == "local-session"
 
 
-class TestWsBridgeRemoteSessions:
-    """Remote session proxy management."""
-
-    def test_get_or_create_session_creates_proxy(self, bridge):
-        """get_or_create_session creates proxy sessions for remote IDs."""
-        session = bridge.get_or_create_session("node-abc:s1")
-        assert session.id == "node-abc:s1"
-        assert "node-abc:s1" in bridge._sessions
-
-    def test_update_remote_sessions_removes_stale(self, bridge):
-        """Stale proxy sessions are cleaned up when node reports new list."""
-        # Create proxy sessions first
-        bridge.get_or_create_session("node-abc:s1")
-        bridge.get_or_create_session("node-abc:s2")
-        assert "node-abc:s2" in bridge._sessions
-
-        # Node reports only s1 remaining
-        bridge.update_remote_sessions("node-abc", [
-            {"sessionId": "node-abc:s1"},
-        ])
-        assert "node-abc:s1" in bridge._sessions
-        assert "node-abc:s2" not in bridge._sessions
-
-    def test_remove_remote_node_sessions(self, bridge):
-        """All sessions for a node are removed when it disconnects."""
-        bridge.get_or_create_session("node-abc:s1")
-        bridge.get_or_create_session("node-abc:s2")
-        bridge.get_or_create_session("local-session")
-
-        bridge.remove_remote_node_sessions("node-abc")
-        assert "node-abc:s1" not in bridge._sessions
-        assert "node-abc:s2" not in bridge._sessions
-        assert "local-session" in bridge._sessions
-
-    def test_remove_doesnt_affect_other_nodes(self, bridge):
-        """Removing node-abc sessions doesn't touch node-xyz sessions."""
-        bridge.get_or_create_session("node-abc:s1")
-        bridge.get_or_create_session("node-xyz:s1")
-
-        bridge.remove_remote_node_sessions("node-abc")
-        assert "node-abc:s1" not in bridge._sessions
-        assert "node-xyz:s1" in bridge._sessions
-
-
 class TestRing0EventIsolation:
     """Hub Ring0 should only receive events for local sessions."""
 
@@ -666,82 +622,6 @@ class TestRing0EventIsolation:
         bridge.emit_ring0_event.assert_not_called()
 
 # ── Remote Session Message Handling ──────────────────────────────────────────
-
-
-class TestRemoteSessionMessages:
-    """Messages from remote nodes routed to browser clients."""
-
-    async def test_handle_remote_creates_proxy(self, bridge):
-        bridge._broadcast_to_browsers = AsyncMock()
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "assistant",
-            "message": "Hello from remote",
-        })
-
-        assert "node-abc:s1" in bridge._sessions
-        proxy = bridge._sessions["node-abc:s1"]
-        assert len(proxy.message_history) == 1
-        assert proxy.message_history[0]["message"] == "Hello from remote"
-
-    async def test_handle_remote_tracks_permissions(self, bridge):
-        bridge._broadcast_to_browsers = AsyncMock()
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "permission_request",
-            "request": {"request_id": "perm-1", "tool_name": "Write"},
-        })
-
-        proxy = bridge._sessions["node-abc:s1"]
-        assert "perm-1" in proxy.pending_permissions
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "permission_response",
-            "request_id": "perm-1",
-        })
-        assert "perm-1" not in proxy.pending_permissions
-
-    async def test_handle_remote_clears_permissions_on_cancelled(self, bridge):
-        bridge._broadcast_to_browsers = AsyncMock()
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "permission_request",
-            "request": {"request_id": "perm-1", "tool_name": "Write"},
-        })
-
-        proxy = bridge._sessions["node-abc:s1"]
-        assert "perm-1" in proxy.pending_permissions
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "permission_cancelled",
-            "request_id": "perm-1",
-        })
-        assert "perm-1" not in proxy.pending_permissions
-
-    async def test_handle_remote_broadcasts(self, bridge):
-        bridge._broadcast_to_browsers = AsyncMock()
-
-        msg = {"type": "assistant", "message": "test"}
-        await bridge.handle_remote_session_message("node-abc:s1", msg)
-
-        bridge._broadcast_to_browsers.assert_called_once()
-        call_args = bridge._broadcast_to_browsers.call_args
-        assert call_args[0][1] == msg
-
-    async def test_handle_remote_updates_session_state(self, bridge):
-        bridge._broadcast_to_browsers = AsyncMock()
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "session_update",
-            "session": {"model": "claude-sonnet-4-6", "cwd": "/remote/code"},
-        })
-
-        proxy = bridge._sessions["node-abc:s1"]
-        assert proxy.state.get("model") == "claude-sonnet-4-6"
-        assert proxy.state.get("cwd") == "/remote/code"
-
-
-# ── API Endpoint Tests ───────────────────────────────────────────────────────
 
 
 class TestSessionListEndpoints:

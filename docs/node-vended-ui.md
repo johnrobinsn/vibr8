@@ -167,30 +167,32 @@ round-trip on a remote node touches only contract messages.
 hub and all nodes cut over together. Desktop viewer and computer-use keep
 working unchanged throughout (they ride `desktop/v1`).
 
-Phase 4 status: **staged, not executed.** The local experience can already
-run fully vended via `localStorage["vibr8-vended-local"] = "1"` (shell
-iframes the self-node at `/nodes/local/ui/`). Preconditions before the
-deletions are safe:
+Phase 4 status: **executed.** What changed:
 
-1. **Shell voice controls.** Mic/TTS/guard controls currently live in the
-   TopBar *inside* the framed app, where node mode hides them. The shell
-   (or the `NodeShellFrame` strip) must own them before the legacy local
-   UI can go.
-2. **Computer-use controls re-homed.** AgentControls/DesktopView ride the
-   legacy session UI today; they move to the shell (they consume frozen
-   `desktop/v1`, so this is a relocation, not a rewrite).
-3. **Default flip + soak.** `vibr8-vended-local` becomes the default;
-   run real workloads (voice, permissions, terminals, remote nodes) on
-   the vended path.
-
-Then delete, in one cutover: `QualifyingNodeClient` + qualified
-`{node_id}:{raw_id}` ids, `server/session_registry.py` (both routers),
-hub-side `WsBridge` proxy mode (`handle_remote_session_message`,
-`update_remote_sessions`, proxy sessions), the hub-proxy middleware's
-session-resolving routes (`vibr8_node/node_agent.py`), native-push
-forwarding, per-session REST routes on the hub, and the legacy in-shell
-session UI (Sidebar session list, ChatView mounting, ws.ts session
-sockets at the hub root).
+- **Shell owns voice and desktop.** `VoiceControls` (extracted from
+  TopBar) and a `desktop/v1` viewer toggle live in the `NodeShellFrame`
+  strip; audio never enters a node iframe.
+- **Vended local is the production default.** The shell iframes the
+  self-node at `/nodes/local/ui/`; `localStorage["vibr8-legacy-ui"]="1"`
+  is the escape hatch. The Vite dev server keeps the legacy in-shell UI
+  by default (the node vends the last *built* bundle, not the live dev
+  bundle) and opts in via `vibr8-vended-local=1`.
+- **Deleted:** `QualifyingNodeClient` and qualified `{node_id}:{raw_id}`
+  ids (session ids are raw end to end), `server/session_registry.py`
+  (both routers), hub-side `WsBridge` proxy mode
+  (`handle_remote_session_message`, `update_remote_sessions`,
+  `remove_remote_node_sessions`), the node→hub `session_message`
+  broadcast hook (node-local browser sockets — i.e. the vended UI over
+  the tunnel channels — receive broadcasts directly), native-push
+  forwarding (native clients are dark until v2 `notify`/`present`), and
+  the hub-proxy middleware's session-resolving Ring0 routes
+  (`NodeOperations._expand_session_id` resolves Ring0's 8-char prefixes
+  node-locally).
+- **Known limitation of the escape hatch:** the hub-root legacy UI can
+  list but not chat with self-node sessions (the hub-root session WS
+  path only functions in legacy in-process mode,
+  `VIBR8_DISABLE_SELF_NODE=1` + `VIBR8_ALLOW_LEGACY_IN_PROCESS=1`).
+  The vended path is the supported experience.
 
 **v2 parking lot:** `notify`/`present` for watch + second screen (second
 screen becomes "render a node-vended URL", unifying with the iframe model),

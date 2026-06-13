@@ -81,24 +81,6 @@ def test_flatten_message_text_variants():
     assert f(None) == ""
 
 
-async def test_remote_session_message_suppress_tts():
-    bridge = WsBridge()
-    wm = MagicMock()
-    wm.get_any_outgoing_track.return_value = ("c1", MagicMock())
-    wm.is_tts_muted.return_value = False
-    bridge._webrtc_manager = wm
-    bridge._speak_text = AsyncMock()
-
-    msg = {"type": "assistant", "message": "hello"}
-    await bridge.handle_remote_session_message("n1:s1", dict(msg), suppress_tts=True)
-    await asyncio.sleep(0)
-    bridge._speak_text.assert_not_called()
-
-    await bridge.handle_remote_session_message("n1:s2", dict(msg))
-    await asyncio.sleep(0)
-    bridge._speak_text.assert_called_once()
-
-
 async def test_node_agent_transcript_dispatch():
     from vibr8_node.node_agent import NodeAgent
 
