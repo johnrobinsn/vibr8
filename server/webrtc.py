@@ -332,6 +332,30 @@ class WebRTCManager:
                 pass
         return "local"
 
+    async def _send_voice_preview(self, client_id: str, transcript: str) -> None:
+        """Route a live STT preview to the speaking client's active node,
+        which broadcasts it to its Ring0 session UI (hub→node, same shape
+        as the `transcript` contract message). Only meaningful when Ring0
+        is the voice target; the node owns its own session resolution.
+
+        Audio stays hub-side — this carries only the resulting text."""
+        if not self.is_ring0_enabled():
+            return
+        active_nid = self._client_active_node(client_id)
+        if active_nid and active_nid != "local" and self._node_registry:
+            node = self._node_registry.get_node(active_nid)
+            if node and node.tunnel and node.status == "online":
+                await node.tunnel.send_fire_and_forget({
+                    "type": "broadcast_voice_preview",
+                    "transcript": transcript,
+                })
+                return
+        if self._local_node_ops:
+            try:
+                await self._local_node_ops.broadcast_voice_preview(transcript=transcript)
+            except Exception:
+                logger.debug("[stt] voice preview routing failed", exc_info=True)
+
     def set_ring0_manager(self, manager) -> None:
         """Set a reference to Ring0Manager for voice routing."""
         self._ring0_manager = manager
@@ -830,23 +854,7 @@ class WebRTCManager:
 
             async def _clear_voice_preview() -> None:
                 """Send empty preview to clear stale interim text from the UI."""
-                if not self._ws_bridge:
-                    return
-                target_sid = None
-                if self.is_ring0_enabled():
-                    active_nid = self._client_active_node(client_id)
-                    if active_nid and active_nid != "local":
-                        from vibr8_core.ws_bridge import WsBridge
-                        target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
-                    if not target_sid:
-                        target_sid = self.ring0_session_id()
-                if not target_sid:
-                    target_sid = _resolve_session()
-                if target_sid:
-                    await self._ws_bridge.send_to_browsers(target_sid, {
-                        "type": "voice_transcript_preview",
-                        "transcript": "",
-                    })
+                await self._send_voice_preview(client_id, "")
 
             if event_type == "segment_confirmed":
                 # Log individual segment audio (moved from final_transcript)
@@ -1105,24 +1113,7 @@ class WebRTCManager:
                     text = data.get("transcript", "")
                     if not self._find_guard_word(text):
                         return
-                if not self._ws_bridge:
-                    return
-                target_sid = None
-                if self.is_ring0_enabled():
-                    # Route preview to this client's active node's Ring0
-                    active_nid = self._client_active_node(client_id)
-                    if active_nid and active_nid != "local":
-                        from vibr8_core.ws_bridge import WsBridge
-                        target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
-                    if not target_sid:
-                        target_sid = self.ring0_session_id()
-                if not target_sid:
-                    target_sid = _resolve_session()
-                if target_sid:
-                    await self._ws_bridge.send_to_browsers(target_sid, {
-                        "type": "voice_transcript_preview",
-                        "transcript": data["transcript"],
-                    })
+                await self._send_voice_preview(client_id, data["transcript"])
 
         return _on_stt_event
 

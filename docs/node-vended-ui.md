@@ -199,6 +199,36 @@ screen becomes "render a node-vended URL", unifying with the iframe model),
 `vlm.infer` service, per-node origins, custom non-vibr8 node UIs, read-only
 fleet status feed.
 
+## Demolition aftercare (hub→browser broadcasts to node sessions)
+
+The Phase 4 demolition emptied the hub's session bridge, breaking any
+hub-originated broadcast that targeted a node session by id. Audit + status:
+
+- **Voice transcript preview** — *fixed.* The hub no longer broadcasts to a
+  (dead) hub session id; it routes the interim/cleared preview to the
+  speaking client's active node via `broadcast_voice_preview`
+  (`WebRTCManager._send_voice_preview` → `local_node_ops`/tunnel →
+  `NodeOperations.broadcast_voice_preview`), and the node fans it out to its
+  own Ring0 session over the vended session WS. The node owns session
+  resolution; audio stays hub-side; the frontend handler is unchanged. Same
+  treatment in `voice_service_client.py`. Verified piecewise (tunnel
+  dispatch + node broadcast by unit test; node→vended-browser delivery by
+  the mirror smoke test); the live STT→preview hop needs audio + models to
+  confirm end to end.
+- **Computer-use status broadcasts** (`main.py`) — *not broken.* CU sessions
+  are hub-native (the agent registers on the hub bridge, VLM is hub-side),
+  so `send_to_browsers` still resolves.
+- **Non-Ring0 voice-to-active-session** — *known gap, deferred.* When Ring0
+  is disabled, voice used to submit to the client's current hub session via
+  `_resolve_session()`; the hub no longer tracks a vended client's current
+  session, so this path is dark. Ring0 is the supported voice target in the
+  vended model; reviving arbitrary-session voice needs the hub to learn the
+  iframe's active session (its own small piece of work).
+- **Vestigial remote-session qualify paths** (`routes.py` `/api/sessions`
+  with `?nodeId=`) — *harmless leftover.* The shell reaches remote nodes via
+  their iframe, not these endpoints; they still emit `{node}:{raw}` ids but
+  are unreached in normal use.
+
 ## Risks / things to validate early
 
 - **WS + asset transfer through the NDJSON tunnel**: chunking and

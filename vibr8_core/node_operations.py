@@ -306,11 +306,24 @@ class NodeOperations:
             return {"error": err}
         return {"ok": True}
 
+    async def broadcast_voice_preview(self, transcript: str = "") -> dict:
+        """Broadcast a live voice-transcript preview to this node's Ring0
+        session UI. The hub owns STT (audio is hub-side); it sends the
+        interim text here and the node fans it out over the session WS to
+        its vended UI. The node never touches audio — it only displays
+        hub-provided text (contract: docs/hub-node-contract-v1.md §B)."""
+        if not self._ring0 or not self._ring0.session_id:
+            return {"ok": False}
+        await self._bridge.send_to_browsers(
+            self._ring0.session_id,
+            {"type": "voice_transcript_preview", "transcript": transcript},
+        )
+        return {"ok": True}
+
     async def cli_input(self, session_id: str = "", message: dict | None = None) -> dict:
         """Forward raw CLI input (NDJSON message) to local session."""
         session = self._bridge._sessions.get(session_id)
-        if not session:
-            return {"error": f"Session {session_id} not found"}
+        if not session:            return {"error": f"Session {session_id} not found"}
         ndjson = json.dumps(message or {})
         await self._bridge._send_to_cli(session, ndjson)
         return {"ok": True}

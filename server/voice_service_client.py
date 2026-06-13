@@ -286,21 +286,15 @@ class VoiceServiceClient:
                 await ws.send_str(json.dumps({"type": event_type, **data}))
             return
         if event_type == "voice_transcript_preview":
-            session_id = self._current_vibr8_session(remote)
-            if session_id:
-                await self._ws_bridge.send_to_browsers(
-                    session_id,
-                    {"type": "voice_transcript_preview", "transcript": data.get("transcript", "")},
-                )
+            # Preview display routes to the active node's Ring0 UI (the node
+            # broadcasts it over the vended session WS); audio stays here.
+            await self._send_voice_preview(remote.client_id, data.get("transcript", ""))
             return
         if event_type == "final_transcript":
             text = str(data.get("transcript", "")).strip()
             session_id = self._current_vibr8_session(remote)
             if text and session_id:
-                await self._ws_bridge.send_to_browsers(
-                    session_id,
-                    {"type": "voice_transcript_preview", "transcript": ""},
-                )
+                await self._send_voice_preview(remote.client_id, "")
                 await self._ws_bridge.submit_user_message(session_id, text, source_client_id=remote.client_id)
 
     def _current_vibr8_session(self, remote: _RemoteSession) -> str:

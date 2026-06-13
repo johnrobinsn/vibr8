@@ -115,3 +115,51 @@ async def test_node_agent_emits_contract_events():
         {"type": "busy", "busy": True},
         {"type": "attention", "reason": "needs input"},
     ]
+
+
+async def test_broadcast_voice_preview_targets_ring0_session():
+    from vibr8_core.node_operations import NodeOperations
+
+    bridge = MagicMock()
+    bridge.send_to_browsers = AsyncMock()
+    ring0 = MagicMock()
+    ring0.session_id = "r0-sess"
+    ops = NodeOperations(
+        launcher=MagicMock(), bridge=bridge, store=MagicMock(), ring0=ring0,
+    )
+    result = await ops.broadcast_voice_preview(transcript="hel")
+    assert result == {"ok": True}
+    bridge.send_to_browsers.assert_awaited_once_with(
+        "r0-sess", {"type": "voice_transcript_preview", "transcript": "hel"},
+    )
+
+
+async def test_broadcast_voice_preview_noop_without_ring0_session():
+    from vibr8_core.node_operations import NodeOperations
+
+    bridge = MagicMock()
+    bridge.send_to_browsers = AsyncMock()
+    ring0 = MagicMock()
+    ring0.session_id = ""  # Ring0 enabled but no live session
+    ops = NodeOperations(
+        launcher=MagicMock(), bridge=bridge, store=MagicMock(), ring0=ring0,
+    )
+    assert await ops.broadcast_voice_preview(transcript="x") == {"ok": False}
+    bridge.send_to_browsers.assert_not_awaited()
+
+
+async def test_node_agent_dispatches_broadcast_voice_preview():
+    """The generic tunnel dispatcher routes the hub's broadcast_voice_preview
+    command to the node op (camelCase-free payload → kwargs)."""
+    from vibr8_node.node_agent import NodeAgent
+
+    agent = NodeAgent("ws://example.invalid", "key", "t")
+    agent._ops = MagicMock()
+    agent._ops.broadcast_voice_preview = AsyncMock(return_value={"ok": True})
+
+    result = await agent._dispatch_command(
+        "broadcast_voice_preview",
+        {"type": "broadcast_voice_preview", "transcript": "live text"},
+    )
+    assert result == {"ok": True}
+    agent._ops.broadcast_voice_preview.assert_awaited_once_with(transcript="live text")
