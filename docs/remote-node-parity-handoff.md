@@ -1,5 +1,13 @@
 # Remote Node Parity — Handoff / Recovery Guide
 
+> **⚠️ SUPERSEDED (historical).** The remote-node-parity refactor this guide
+> bootstraps was completed and then replaced by the node-vended-UI work.
+> Machinery referenced below (`SessionRegistry`, `QualifyingNodeClient`,
+> `LocalSessionRouter`/`TunneledSessionRouter`, hub-side
+> `handle_remote_session_message`, `{node_id}:{raw_id}` qualified ids) has
+> been **deleted**. Current design: `docs/hub-node-contract-v1.md` +
+> `docs/node-vended-ui.md`. Do not follow the steps here; kept for history.
+
 **Purpose**: bootstrap a new Claude (or human) session that needs to pick up the remote-node-parity refactor without access to the prior conversation. Read this *and* `docs/remote-node-parity.md` before doing anything.
 
 **Audience assumption**: you have the repo at `/mntc/code/vibr8` (or equivalent), but the running vibr8 hub may be down or stale. Don't trust prior memory; verify everything against `git log` and the repo on disk.

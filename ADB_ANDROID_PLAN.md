@@ -138,7 +138,7 @@ When Ring0 creates a Claude session targeting an Android node (which can't run C
 
 ### Design: `associatedNodeId` Field
 
-Add an `associatedNodeId` field to sessions. This is distinct from the qualified session ID (`node_id:raw_id`) which means "this session runs on that node."
+Add an `associatedNodeId` field to sessions. (Note: an earlier draft contrasted this with a `node_id:raw_id` *qualified* session id; that qualified-id namespace was removed in the node-vended-UI cutover — session ids are now raw and node-internal. `associatedNodeId` remains a distinct concept: which Android device a host-run session targets.)
 
 ```
 Session runs on    | Session ID format     | associatedNodeId

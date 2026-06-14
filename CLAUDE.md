@@ -36,7 +36,7 @@ The codebase is split into three Python packages:
 - **`node_operations.py`** — `NodeOperations`: single canonical implementation of every per-node action (sessions, FS, git, envs, artifacts, Ring0 control, scheduler, ring0_events). Both hub and node import this. Methods are tunnel-callable; the node-side dispatcher routes `_cmd_*` → `NodeOperations.method` via generic `getattr`.
 - **`node_client.py`** — `NodeClient` protocol + `RemoteNodeClient` (tunnel via `__getattr__` generic dispatch) + `SwappableNodeClient`. Session ids are raw end to end — sessions are node-internal (contract ui/v1).
 - **`hub_browser_bridge.py`** — `HubBrowserBridge`: hub-only browser/client tracking + broadcasts. Today delegates to `WsBridge` via `__getattr__`; designed so its backing can be swapped during a future code-purity refactor.
-- **`ws_bridge.py`** — Per-node session router: sessions dict, pen system, message routing CLI↔browser, Ring0 event emission. On the hub it operates in proxy-only mode (browser-tracking + tunneled session forwarding). On the node it owns real session state.
+- **`ws_bridge.py`** — Per-node session router: sessions dict, pen system, message routing CLI↔browser, Ring0 event emission. On the hub it runs in proxy-only mode — browser/native-client tracking, RPC, and hub-native computer-use sessions only; tunneled session *forwarding* (the old `handle_remote_session_message`/proxy-session path) was removed in the ui/v1 vending cutover, so browsers reach a node's real sessions through that node's vended UI. On the node it owns real session state.
 - **`ring0.py`**, **`ring0_events.py`**, **`ring0_scheduler.py`**, **`ring0_mcp.py`** — Ring0 manager + event router + scheduler + MCP server (all per-node).
 - **`cli_launcher.py`** — Spawns/manages Claude/Codex/OpenCode/Hermes CLI subprocesses.
 - **`session_store.py`**, **`session_types.py`**, **`session_names.py`** — Session persistence and shared TypedDicts.
@@ -99,7 +99,13 @@ React 19, TypeScript, Vite, Tailwind CSS 4, Zustand for state.
                                     └───────────────────────────────────────────────────────┘
 ```
 
-Three things to notice:
+(The ASCII above is a pre-vending schematic. Since the ui/v1 cutover, a
+browser's **session** traffic for the active node no longer terminates at the
+hub WsBridge — it flows through the hub's vended proxy
+`/nodes/{id}/{ui,api,ws}/*` to that node's own server. The hub WsBridge box
+now handles only browser/native tracking, RPC, and hub-native computer-use.)
+
+Four things to notice:
 
 1. **The hub owns no node-scoped state.** Sessions, Ring0, FS, git, envs, artifacts, scheduler all live on a node. The hub spawns its own `vibr8_node` subprocess at startup (the **self-node**) and reaches it via a loopback tunnel; remote nodes (Hermes, Docker, EC2, …) use the same NDJSON-over-WebSocket protocol over the public internet. Session ids are raw and node-internal — there is no cross-node session namespace; the browser reaches a node's sessions through that node's vended UI (`/nodes/{id}/ui/`, see `docs/hub-node-contract-v1.md`).
 
@@ -107,9 +113,11 @@ Three things to notice:
 
 3. **WebRTC peers are per-tab.** Per-peer state (PC, STT, outgoing track, video, screen capture, input injector) is keyed by `peer_key = "{client_id}#{tab_id}"`. User-level state (guard, tts_muted, voice modes, speaker gates, usernames) stays keyed by `client_id`. Two tabs of the same browser can run independent voice connections.
 
+4. **Each node vends its own UI (contract ui/v1).** A node serves its built `web/dist` at `/ws/browser/*` + `/api/*` + `/ui/*` on its loopback server; the hub proxies these to the browser through the tunnel under `/nodes/{id}/{ui,api,ws}/*` (`server/node_ui_proxy.py`). The hub shell iframes the node's UI (`web/src/components/NodeShellFrame.tsx`); voice lives in the shell and reaches the node's Ring0 via the events/v1 `transcript` message. The full contract is `docs/hub-node-contract-v1.md`; the plan + phase status is `docs/node-vended-ui.md`.
+
 Set both `VIBR8_DISABLE_SELF_NODE=1` and `VIBR8_ALLOW_LEGACY_IN_PROCESS=1` to fall back to the legacy in-process path for isolated development/tests only.
 
-The WebSocket protocol is reverse-engineered and documented in `WEBSOCKET_PROTOCOL_REVERSED.md`. The node parity refactor is in `docs/remote-node-parity.md` (plan) and `docs/remote-node-parity-handoff.md` (recovery guide).
+The WebSocket protocol is reverse-engineered and documented in `WEBSOCKET_PROTOCOL_REVERSED.md`. The current node architecture is `docs/hub-node-contract-v1.md` (the frozen hub↔node contract) and `docs/node-vended-ui.md` (the plan + phase status). The earlier `docs/remote-node-parity.md` (plan) and `docs/remote-node-parity-handoff.md` (recovery guide) are **superseded** — they describe the qualified-id / `SessionRegistry` / `QualifyingNodeClient` machinery that the vending cutover deleted; keep them for history only.
 
 ### Nodes (hub-host's self-node + remote nodes)
 
