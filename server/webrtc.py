@@ -203,6 +203,11 @@ class WebRTCManager:
         self._stt_instances: Dict[str, AsyncSTT] = {}
         self._voice_loggers: Dict[str, VoiceLogger] = {}
         self._input_injectors: Dict[str, InputInjector] = {}
+        # D1 (polite-assistant TTS gating): per-peer monotonic timestamp of
+        # the last `voice_was_detected` event. Used by `last_voice_at_for_client`
+        # which max()s across a client's peers — voice on ANY tab counts as
+        # the user actively speaking. Updated in the STT event listener.
+        self._last_voice_at: Dict[str, float] = {}  # peer_key → time.time()
         # Per-client (user-level) — voice mode, playground/enrollment WS
         # endpoints, etc. Keyed by client_id because the relevant WS
         # endpoints (`/ws/playground/{client_id}`, etc.) and voice-mode
@@ -410,6 +415,34 @@ class WebRTCManager:
         for peer_key in self._connections:
             self.barge_in(self._client_from_peer_key(peer_key))
             return
+
+    def mark_voice_active(self, peer_key: str) -> None:
+        """D1: record that voice was detected on *peer_key* just now.
+
+        Called from the STT event listener on every `voice_was_detected`.
+        Used by :meth:`last_voice_at_for_client` to gate TTS at enqueue
+        time and during the deferred-TTS drain loop.
+        """
+        import time as _time
+        self._last_voice_at[peer_key] = _time.time()
+
+    def last_voice_at_for_client(self, client_id: str) -> float:
+        """Return the most recent voice-detected timestamp across all
+        peers of *client_id*, or 0.0 if none.
+
+        Multi-tab handling: a user with two tabs open speaking on one
+        tab should still gate TTS scheduled for either tab — voice on
+        ANY peer of the client counts. The bridge calls this to decide
+        whether to defer a TTS request that's about to start.
+        """
+        peers = self._peers_for_client(client_id)
+        if not peers:
+            # Fallback: client may have a single peer keyed by client_id only.
+            return self._last_voice_at.get(client_id, 0.0)
+        return max(
+            (self._last_voice_at.get(pk, 0.0) for pk in peers),
+            default=0.0,
+        )
 
     def set_thinking(self, client_id: str, thinking: bool) -> None:
         """Enable or disable the thinking-tone for every peer of *client_id*."""
@@ -1085,6 +1118,10 @@ class WebRTCManager:
                 await _submit_text(transcript)
             elif event_type == "voice_was_detected":
                 logger.info("[stt] client %s: voice detected — barge-in", client_id)
+                # D1: record voice activity for the queue-before-start gate.
+                # Per-peer so multi-tab users still gate TTS even if voice
+                # arrives on a different tab than where TTS was scheduled.
+                self.mark_voice_active(peer_key or client_id)
                 self.barge_in(client_id)
             elif event_type == "voice_not_detected":
                 logger.debug("[stt] client %s: voice ended", client_id)
