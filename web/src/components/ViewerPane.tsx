@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useStore } from "../store.js";
 import { PushedContentView } from "./ContentRenderer.js";
 import { ArtifactList } from "./ArtifactList.js";
+import { getDownloadTarget } from "../utils/artifact-download.js";
 import type { Artifact } from "../types.js";
 
 type View = "list" | "pushed" | "artifact";
@@ -19,6 +20,31 @@ export function ViewerPane() {
         ? viewingArtifact!.title
         : "Artifacts";
 
+  // Build a download target for whichever payload is currently on display.
+  // Works for both `artifact` (user-clicked artifact list entry) and
+  // `pushed` (Ring0 push via show_on_second_screen) since both eventually
+  // funnel through `PushedContentView`. Returns null for non-downloadable
+  // types (session mirror, home, live desktop), in which case we hide the
+  // button rather than render a broken link.
+  const downloadable =
+    view === "artifact" && viewingArtifact
+      ? getDownloadTarget({
+          type: viewingArtifact.type,
+          content: viewingArtifact.content,
+          contentUrl: viewingArtifact.contentUrl ?? undefined,
+          filename: viewingArtifact.filename ?? undefined,
+          title: viewingArtifact.title,
+        })
+      : view === "pushed" && viewerPaneContent
+        ? getDownloadTarget({
+            type: viewerPaneContent.type,
+            content: viewerPaneContent.content,
+            contentUrl: viewerPaneContent.contentUrl,
+            filename: viewerPaneContent.filename,
+            title: viewerPaneContent.filename,
+          })
+        : null;
+
   function handleBack() {
     if (view === "pushed") {
       useStore.getState().setViewerPaneContent(null);
@@ -29,6 +55,25 @@ export function ViewerPane() {
 
   function handleClose() {
     useStore.getState().setViewerPaneOpen(false);
+  }
+
+  function handleDownload() {
+    if (!downloadable) return;
+    const a = document.createElement("a");
+    a.href = downloadable.url;
+    a.download = downloadable.filename;
+    // rel="noopener" is harmless here but matches the broader app pattern
+    // of treating user-clicked content links defensively.
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Blob URLs are revocable; let the browser hold onto it long enough to
+    // start the save dialog (10s is generous and prevents the dialog
+    // racing with revoke on very large downloads).
+    if (downloadable.needsRevoke) {
+      setTimeout(() => URL.revokeObjectURL(downloadable.url), 10_000);
+    }
   }
 
   return (
@@ -47,6 +92,18 @@ export function ViewerPane() {
           </button>
         )}
         <span className="flex-1 text-xs font-medium text-cc-fg truncate">{title}</span>
+        {downloadable && (
+          <button
+            onClick={handleDownload}
+            className="p-1 rounded hover:bg-cc-bg-hover text-cc-fg-muted hover:text-cc-fg transition-colors"
+            title={`Download ${downloadable.filename}`}
+            aria-label="Download"
+          >
+            <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-4 h-4">
+              <path d="M10 3v10m0 0l-4-4m4 4l4-4M4 17h12" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        )}
         <button
           onClick={handleClose}
           className="p-1 rounded hover:bg-cc-bg-hover text-cc-fg-muted hover:text-cc-fg transition-colors"
