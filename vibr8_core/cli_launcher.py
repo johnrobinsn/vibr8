@@ -239,8 +239,11 @@ class CliLauncher:
         safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", session_id).strip("._")
         if not safe_id:
             safe_id = "session"
-        from vibr8_core.data_paths import NODE_DATA_DIR
-        return NODE_DATA_DIR / "mcp-configs" / f"{safe_id}.json"
+        # Resolve at call time (not import time) so tests that patch
+        # Path.home() see the redirected location.
+        override = os.environ.get("VIBR8_NODE_DATA_DIR", "").strip()
+        base = Path(override).expanduser() if override else (Path.home() / ".vibr8")
+        return base / "mcp-configs" / f"{safe_id}.json"
 
     def _write_session_mcp_config(
         self,
