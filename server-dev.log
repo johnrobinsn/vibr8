@@ -1,0 +1,80 @@
+2026-06-27 12:45:54,847 INFO __main__: ============================================================
+2026-06-27 12:45:54,847 INFO __main__: [server] Process starting (PID 747179)
+2026-06-27 12:45:54,849 INFO server.auth: [auth] Loaded 1 user(s) from /home/jr/.vibr8-dev/users.json
+2026-06-27 12:45:54,854 INFO __main__: [server] Loaded 3 ICE server(s)
+2026-06-27 12:45:54,909 INFO vibr8_core.ring0_events: [ring0-events] Loaded 6 rule(s) from /home/jr/.vibr8/ring0-events.json5
+2026-06-27 12:45:54,909 INFO __main__: [server] Self-node owns /home/jr/.vibr8/sessions — skipping hub restore_from_disk
+2026-06-27 12:45:54,982 INFO __main__: [server] Self-node mode — skipping legacy callback wiring except node-backed relaunch
+2026-06-27 12:45:55,013 INFO __main__: [server] SSL enabled (cert: /mntc/code/vibr8/certs/cert.pem)
+2026-06-27 12:45:55,013 INFO __main__: Server running on https://0.0.0.0:4456
+2026-06-27 12:45:55,013 INFO __main__:   CLI WebSocket:     wss://0.0.0.0:4456/ws/cli/:sessionId
+2026-06-27 12:45:55,013 INFO __main__:   Browser WebSocket: wss://0.0.0.0:4456/ws/browser/:sessionId
+2026-06-27 12:45:55,013 INFO __main__: Dev mode: frontend at http://localhost:5174
+2026-06-27 12:45:55,014 INFO __main__: [server] Self-node mode — skipping legacy launcher session sync
+2026-06-27 12:45:55,016 INFO server.mdns_discovery: [mdns] zeroconf not installed — mDNS discovery disabled
+2026-06-27 12:45:55,016 INFO vibr8_core.ring0_scheduler: [scheduler] Started
+2026-06-27 12:45:55,016 INFO __main__: [server] Preloading STT models (background thread)...
+2026-06-27 12:45:55,017 INFO server.stt: [stt] Loading Silero VAD...
+2026-06-27 12:45:55,017 INFO server.stt: [voice-warmup] starting (background, non-blocking)
+2026-06-27 12:45:55,018 INFO __main__: [server] Preloading Kokoro TTS model (background thread)...
+2026-06-27 12:45:55,021 INFO vibr8_core.ring0_scheduler: [scheduler] Waiting 30s before checking missed runs
+2026-06-27 12:45:55,448 INFO server.node_registry: [nodes] Generated API key 'self-node bootstrap' (id=e9819ae5dbd55687)
+2026-06-27 12:45:55,454 INFO __main__: [server] SSL enabled (cert: /mntc/code/vibr8/certs/cert.pem)
+2026-06-27 12:45:55,455 INFO __main__: [server] Spawning self-node: port=4459 hub=wss://127.0.0.1:4456
+2026-06-27 12:45:55,609 INFO __main__: [self-node] 2026-06-27 12:45:55,597 INFO vibr8-node: Resolved VIBR8_NODE_DATA_DIR=/home/jr/.vibr8-dev-self (self_mode=True)
+2026-06-27 12:45:56,098 INFO server.stt: [stt] Silero VAD loaded
+2026-06-27 12:45:56,600 INFO server.node_registry: [nodes] Registered node 'self' (id=3127061e)
+2026-06-27 12:45:56,600 INFO server.routes: [audit] node registered path=/api/nodes/register ip=127.0.0.1 node=self node_id=3127061e
+2026-06-27 12:45:56,600 INFO server.routes: [audit] node token bound path=/api/nodes/register ip=127.0.0.1 node=self node_id=3127061e api_key_id=e9819ae5dbd55687
+2026-06-27 12:45:56,601 INFO aiohttp.access: 127.0.0.1 [27/Jun/2026:11:45:56 -0500] "POST /api/nodes/register HTTP/1.1" 200 355 "-" "Python/3.12 aiohttp/3.13.3"
+2026-06-27 12:45:56,601 INFO __main__: [server] Self-node registered: id=3127061e
+2026-06-27 12:45:56,603 INFO __main__: [self-node] 2026-06-27 12:45:56,601 INFO vibr8-node: Registered as node self (id=3127061e)
+2026-06-27 12:45:56,630 INFO server.stt: [stt] Loading whisper-large-v3...
+2026-06-27 12:45:56,730 INFO __main__: [self-node] 2026-06-27 12:45:56,730 INFO vibr8-node: Local server running on http://127.0.0.1:4459
+2026-06-27 12:45:56,731 INFO __main__: [self-node] 2026-06-27 12:45:56,730 INFO vibr8_core.ring0_scheduler: [scheduler] Started
+2026-06-27 12:45:56,731 INFO __main__: [self-node] 2026-06-27 12:45:56,730 INFO vibr8-node: Connecting tunnel to wss://127.0.0.1:4456
+2026-06-27 12:45:56,733 INFO __main__: [self-node] 2026-06-27 12:45:56,730 INFO vibr8_core.ring0_scheduler: [scheduler] Waiting 30s before checking missed runs
+2026-06-27 12:45:56,964 INFO server.node_registry: [nodes] Node 'self' is online
+2026-06-27 12:45:56,964 INFO __main__: [nodes] WS tunnel opened for node 'self' (3127061e)
+2026-06-27 12:45:56,964 INFO __main__: [self-node] 2026-06-27 12:45:56,735 INFO vibr8-node: Tunnel connected
+2026-06-27 12:45:56,964 INFO __main__: [server] local_node_ops swapped → RemoteNodeClient(self_id=3127061e)
+2026-06-27 12:46:34,499 INFO aiohttp.access: 127.0.0.1 [27/Jun/2026:11:46:34 -0500] "GET / HTTP/1.1" 404 174 "-" "curl/8.12.1"
+2026-06-27 12:46:34,552 INFO aiohttp.access: 127.0.0.1 [27/Jun/2026:11:46:34 -0500] "GET /api/health HTTP/1.1" 401 194 "-" "curl/8.12.1"
+2026-06-27 12:46:45,431 INFO server.stt: [stt] whisper-large-v3 loaded (fp16, cuda)
+2026-06-27 12:46:45,431 INFO server.stt: [stt] Loading distil-large-v3 (assistant)...
+2026-06-27 12:46:47,448 INFO server.stt: [stt] distil-large-v3 loaded (fp16, cuda)
+2026-06-27 12:46:47,448 INFO server.stt: [stt] Speculative decoding ready (whisper-large-v3 + distil-large-v3, fp16)
+2026-06-27 12:46:47,449 INFO server.stt: [stt] Loading EOU model...
+2026-06-27 12:46:51,770 INFO server.stt: [stt] EOU model loaded
+2026-06-27 12:46:51,770 INFO server.tts_kokoro: [tts-kokoro] Loading Kokoro pipeline...
+2026-06-27 12:46:51,771 INFO __main__: [server] STT models ready
+2026-06-27 12:47:04,082 INFO server.tts_kokoro: [tts-kokoro] Kokoro pipeline ready
+2026-06-27 12:47:04,082 INFO __main__: [server] Kokoro TTS model ready
+2026-06-27 12:47:05,043 INFO server.stt: [voice-warmup] whisper+vad+eou ready in 70.0s
+2026-06-27 12:47:05,195 INFO speechbrain.utils.quirks: Applied quirks (see `speechbrain.utils.quirks`): [allow_tf32, disable_jit_profiling]
+2026-06-27 12:47:05,195 INFO speechbrain.utils.quirks: Excluded quirks specified by the `SB_DISABLE_QUIRKS` environment (comma-separated list): []
+2026-06-27 12:47:05,221 INFO server.speaker_model: [speaker] Loading ECAPA model (device=cuda)...
+2026-06-27 12:47:05,228 INFO speechbrain.utils.fetching: Fetch hyperparams.yaml: Using symlink found at '/home/jr/.vibr8/models/ecapa-voxceleb/hyperparams.yaml'
+2026-06-27 12:47:05,496 INFO speechbrain.utils.fetching: Fetch embedding_model.ckpt: Using symlink found at '/home/jr/.vibr8/models/ecapa-voxceleb/embedding_model.ckpt'
+2026-06-27 12:47:05,496 INFO speechbrain.utils.fetching: Fetch mean_var_norm_emb.ckpt: Using symlink found at '/home/jr/.vibr8/models/ecapa-voxceleb/mean_var_norm_emb.ckpt'
+2026-06-27 12:47:05,500 INFO speechbrain.utils.fetching: Fetch classifier.ckpt: Using symlink found at '/home/jr/.vibr8/models/ecapa-voxceleb/classifier.ckpt'
+2026-06-27 12:47:05,500 INFO speechbrain.utils.fetching: Fetch label_encoder.txt: Using symlink found at '/home/jr/.vibr8/models/ecapa-voxceleb/label_encoder.ckpt'
+2026-06-27 12:47:05,500 INFO speechbrain.utils.parameter_transfer: Loading pretrained files for: embedding_model, mean_var_norm_emb, classifier, label_encoder
+2026-06-27 12:47:07,095 WARNING speechbrain.inference.interfaces: Could not parse CUDA device string 'cuda': not enough values to unpack (expected 2, got 1). Falling back to device 0.
+2026-06-27 12:47:07,119 INFO server.speaker_model: [speaker] ECAPA model loaded
+2026-06-27 12:47:10,022 INFO server.stt: [voice-warmup] speechbrain-ecapa ready in 5.0s
+2026-06-27 12:47:10,044 INFO server.wespeaker_model: [wespeaker] Loading ECAPA from /home/jr/.wesep/english/avg_model.pt (device=cuda)...
+2026-06-27 12:47:10,998 INFO server.wespeaker_model: [wespeaker] ECAPA loaded (192-dim embeddings)
+2026-06-27 12:47:11,389 INFO server.stt: [voice-warmup] wespeaker-ecapa ready in 1.4s
+2026-06-27 12:47:11,414 INFO server.tse_processor: [tse] Loading WeSep BSRNN from /home/jr/.wesep/english/avg_model.pt ...
+2026-06-27 12:47:12,197 INFO server.tse_processor: [tse] WeSep BSRNN loaded (sr=16000, ~105MB on GPU)
+2026-06-27 12:47:12,548 INFO server.stt: [voice-warmup] bsrnn-tse ready in 1.2s
+2026-06-27 12:47:12,549 INFO server.stt: [voice-warmup] complete
+2026-06-27 12:47:13,773 INFO aiohttp.access: 127.0.0.1 [27/Jun/2026:11:47:13 -0500] "GET /api/nodes HTTP/1.1" 401 213 "-" "curl/8.12.1"
+2026-06-27 12:47:59,487 INFO aiohttp.access: 127.0.0.1 [27/Jun/2026:11:47:59 -0500] "POST /api/auth/login HTTP/1.1" 401 201 "-" "curl/8.12.1"
+2026-06-27 12:48:05,043 INFO aiohttp.access: 127.0.0.1 [27/Jun/2026:11:48:05 -0500] "GET /nodes/3127061e/ui/ HTTP/1.1" 401 194 "-" "curl/8.12.1"
+2026-06-27 12:48:05,065 INFO aiohttp.access: 127.0.0.1 [27/Jun/2026:11:48:05 -0500] "GET /nodes/local/ui/ HTTP/1.1" 401 194 "-" "curl/8.12.1"
+2026-06-27 12:48:13,668 INFO __main__: [self-node] 2026-06-27 12:48:13,667 INFO aiohttp.access: 127.0.0.1 [27/Jun/2026:11:48:13 -0500] "GET /ui/ HTTP/1.1" 200 237 "-" "curl/8.12.1"
+2026-06-27 12:48:42,506 INFO __main__: [self-node] 2026-06-27 12:48:42,506 INFO aiohttp.access: 127.0.0.1 [27/Jun/2026:11:48:42 -0500] "GET /ui/ HTTP/1.1" 200 237 "-" "curl/8.12.1"
+2026-06-27 12:48:42,563 INFO aiohttp.access: 127.0.0.1 [27/Jun/2026:11:48:42 -0500] "GET /api/nodes HTTP/1.1" 401 213 "-" "curl/8.12.1"
+2026-06-27 12:48:42,599 INFO aiohttp.access: 127.0.0.1 [27/Jun/2026:11:48:42 -0500] "GET /api/auth/whoami HTTP/1.1" 401 194 "-" "curl/8.12.1"
