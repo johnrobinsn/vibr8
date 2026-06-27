@@ -14,7 +14,7 @@ interface VarRow {
 
 export function EnvManager({ onClose }: Props) {
   const activeNodeId = useStore((s) => s.activeNodeId);
-  const envs_api = nodeApi(activeNodeId === "local" ? "" : activeNodeId).envs;
+  const envs_api = nodeApi(activeNodeId).envs;
   const [envs, setEnvs] = useState<Vibr8Env[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingSlug, setEditingSlug] = useState<string | null>(null);

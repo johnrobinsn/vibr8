@@ -42,9 +42,7 @@ export function NodeShellFrame({ nodeId }: { nodeId: string }) {
     );
   }, [theme]);
 
-  const supportsDesktop =
-    nodeId === "local" ||
-    nodes.find((n) => n.id === nodeId)?.contract?.includes("desktop/v1");
+  const supportsDesktop = !!nodes.find((n) => n.id === nodeId)?.contract?.includes("desktop/v1");
 
   return (
     <div className="h-[100dvh] flex flex-col bg-cc-bg text-cc-fg">

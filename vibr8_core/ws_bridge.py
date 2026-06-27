@@ -511,9 +511,9 @@ class WsBridge:
         return ":" in session_id
 
     def get_session_node_id(self, session_id: str) -> str:
-        """Return the node_id for a session ('local' for hub sessions)."""
+        """Return the node_id for a session ('' for hub-owned sessions)."""
         node_id, _ = self.parse_qualified_id(session_id)
-        return node_id or "local"
+        return node_id or ""
 
     def _raw_session_id(self, qid: str) -> str:
         """Strip node prefix to get the raw ID the node uses internally."""

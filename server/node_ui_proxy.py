@@ -9,7 +9,7 @@ existing outbound tunnel:
 
 The hub never dials the node — requests are wrapped as tunnel messages down
 the node-initiated WebSocket and answered by the node's 127.0.0.1-bound
-local server. `node_id` may be the literal "local" to target the self-node.
+local server.
 """
 
 from __future__ import annotations
@@ -42,14 +42,11 @@ _PASS_REQUEST_HEADERS = {
 
 
 def _resolve_node(request: web.Request, node_id: str):
-    """Resolve a node with a connected tunnel, or None. "local" → self-node."""
+    """Resolve a node with a connected tunnel, or None."""
     registry = request.app.get("node_registry")
     if registry is None:
         return None
-    if node_id == "local":
-        node = registry.get_node_by_name("self")
-    else:
-        node = registry.get_node(node_id)
+    node = registry.get_node(node_id)
     if not node or not node.tunnel or not getattr(node.tunnel, "connected", False):
         return None
     return node

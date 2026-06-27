@@ -103,7 +103,7 @@ export function HomePage() {
   // Load home/cwd, envs, backends. All target the active node so the
   // new-session form reflects the node's filesystem + installed CLIs.
   useEffect(() => {
-    const nid = activeNodeId === "local" ? "" : activeNodeId;
+    const nid = activeNodeId;
     nodeApi(nid).fs.getHome().then(({ home, cwd: serverCwd }) => {
       if (!cwd) {
         setCwd(serverCwd || home);
@@ -128,7 +128,7 @@ export function HomePage() {
       setDynamicModels(null);
       return;
     }
-    const nid = activeNodeId === "local" ? "" : activeNodeId;
+    const nid = activeNodeId;
     nodeApi(nid).backends.models(backend).then((models) => {
       if (models.length > 0) {
         const options = toModelOptions(models);
@@ -185,7 +185,7 @@ export function HomePage() {
       setGitRepoInfo(null);
       return;
     }
-    const nid = activeNodeId === "local" ? "" : activeNodeId;
+    const nid = activeNodeId;
     const git = nodeApi(nid).git;
     git.repoInfo(cwd).then((info) => {
       setGitRepoInfo(info);
@@ -201,7 +201,7 @@ export function HomePage() {
   // Fetch branches when git repo changes
   useEffect(() => {
     if (gitRepoInfo) {
-      const nid = activeNodeId === "local" ? "" : activeNodeId;
+      const nid = activeNodeId;
       nodeApi(nid).git.branches(gitRepoInfo.repoRoot).then(setBranches).catch(() => setBranches([]));
     }
   }, [gitRepoInfo, activeNodeId]);
@@ -580,7 +580,7 @@ export function HomePage() {
               <button
                 onClick={() => {
                   if (!showBranchDropdown && gitRepoInfo) {
-                    const git = nodeApi(activeNodeId === "local" ? "" : activeNodeId).git;
+                    const git = nodeApi(activeNodeId).git;
                     git.fetch(gitRepoInfo.repoRoot)
                       .catch(() => {})
                       .finally(() => {
@@ -736,7 +736,7 @@ export function HomePage() {
             <button
               onClick={() => {
                 if (!showEnvDropdown) {
-                  const nid = activeNodeId === "local" ? "" : activeNodeId;
+                  const nid = activeNodeId;
                   nodeApi(nid).envs.list().then(setEnvs).catch(() => {});
                 }
                 setShowEnvDropdown(!showEnvDropdown);
@@ -902,7 +902,7 @@ export function HomePage() {
         <EnvManager
           onClose={() => {
             setShowEnvManager(false);
-            const nid = activeNodeId === "local" ? "" : activeNodeId;
+            const nid = activeNodeId;
             nodeApi(nid).envs.list().then(setEnvs).catch(() => {});
           }}
         />

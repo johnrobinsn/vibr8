@@ -36,13 +36,13 @@ function timeAgo(ts: number): string {
 
 export function ArtifactList({ onSelect }: { onSelect: (artifact: Artifact) => void }) {
   const activeNodeId = useStore((s) => s.activeNodeId);
-  const artifacts_api = nodeApi(activeNodeId === "local" ? "" : activeNodeId).artifacts;
+  const artifacts_api = nodeApi(activeNodeId).artifacts;
   const artifacts = useStore((s) => s.artifacts);
   const [filterSessionId, setFilterSessionId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; artifact: Artifact } | null>(null);
 
   useEffect(() => {
-    const nid = activeNodeId === "local" ? "" : activeNodeId;
+    const nid = activeNodeId;
     nodeApi(nid).artifacts.list()
       .then((a) => useStore.getState().setArtifacts(a as Artifact[]))
       .catch(() => {});

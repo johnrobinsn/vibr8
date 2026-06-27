@@ -62,11 +62,11 @@ def bridge():
 class TestNodeRegistry:
     """Node registration, heartbeat, and API key management."""
 
-    def test_local_node_always_exists(self, registry):
-        """The hub itself is always present as the 'local' node."""
-        local = registry.local_node
-        assert local.id == "local"
-        assert local.status == "online"
+    def test_fresh_registry_has_no_nodes(self, registry):
+        """The stateless hub registers no nodes implicitly — the placeholder
+        'local' entry that earlier hubs seeded at startup is gone."""
+        assert registry.get_all_nodes() == []
+        assert registry.get_node("local") is None
 
     def test_generate_and_validate_api_key(self, registry):
         raw_key, entry = registry.generate_api_key("test-node", username="alice")
@@ -86,7 +86,6 @@ class TestNodeRegistry:
             capabilities={"platform": "linux"},
         )
         assert node.name == "cloud-dev"
-        assert node.id != "local"
         assert node.capabilities["platform"] == "linux"
         assert node.api_key_id == entry.id
         assert entry.node_id == node.id
@@ -126,10 +125,7 @@ class TestNodeRegistry:
         assert [status for status, _ in results].count("error") == 1
         assert any("already bound" in value for status, value in results if status == "error")
 
-        registered = [
-            node for node in registry.get_all_nodes()
-            if node.id != registry.LOCAL_NODE_ID
-        ]
+        registered = list(registry.get_all_nodes())
         assert len(registered) == 1
         assert entry.node_id == registered[0].id
         assert registry.validate_api_key(registered[0].id, raw_key) is True
@@ -202,12 +198,6 @@ class TestNodeRegistry:
         assert node.id in newly_offline
         assert node.status == "offline"
 
-    def test_local_node_never_times_out(self, registry):
-        local = registry.local_node
-        local.last_heartbeat = time.time() - 1000
-        newly_offline = registry.check_heartbeats(timeout=90.0)
-        assert "local" not in newly_offline
-        assert local.status == "online"
 
     def test_unregister_node(self, registry):
         raw_key, _ = registry.generate_api_key("temp-node")
@@ -565,7 +555,7 @@ class TestWsBridgeQualifiedIds:
 
     def test_get_session_node_id(self, bridge):
         assert bridge.get_session_node_id("node-abc:session-1") == "node-abc"
-        assert bridge.get_session_node_id("local-session-1") == "local"
+        assert bridge.get_session_node_id("local-session-1") == ""
 
     def test_raw_session_id(self, bridge):
         assert bridge._raw_session_id("node-abc:session-1") == "session-1"

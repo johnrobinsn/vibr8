@@ -711,7 +711,7 @@ def create_app() -> web.Application:
 
         # Desktop target — existing WebRTC path
         # Build signaling function — same path as browser WebRTC offers
-        if node_id and node_id != "local" and node_registry:
+        if node_id and node_registry:
             node = node_registry.get_node(node_id)
             if not node or not node.tunnel or not node.tunnel.connected:
                 logger.error("[server] Cannot create computer-use agent: node %s not connected", node_id)
@@ -754,7 +754,7 @@ def create_app() -> web.Application:
 
         async def _init_agent() -> None:
             try:
-                logger.info("[server] Initializing %s agent for %s (node=%s)...", agent_type_id, session_id[:8], node_id or "local")
+                logger.info("[server] Initializing %s agent for %s (node=%s)...", agent_type_id, session_id[:8], node_id or "hub")
                 status_cb = lambda msg: ws_bridge.send_to_browsers(session_id, msg)
                 agent = await _factory(session_id, target, agent_config, status_cb)
                 await agent.start()

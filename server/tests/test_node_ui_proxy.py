@@ -88,16 +88,13 @@ async def test_http_proxy_tunnel_timeout_is_504():
         assert resp.status == 504
 
 
-async def test_local_alias_resolves_self_node():
-    body = b"self"
-    self_node = _make_node({
-        "status": 200, "headers": {}, "bodyB64": base64.b64encode(body).decode(),
-    })
-    app = _make_app(node=None, self_node=self_node)
+async def test_unknown_node_id_returns_502():
+    """With the implicit 'local' alias removed, any id that isn't a
+    registered node returns 502 like any other unreachable node."""
+    app = _make_app(node=None)
     async with TestClient(TestServer(app)) as client:
         resp = await client.get("/nodes/local/ui/")
-        assert resp.status == 200
-        assert await resp.read() == body
+        assert resp.status == 502
 
 
 async def test_ws_proxy_opens_channel_and_forwards():

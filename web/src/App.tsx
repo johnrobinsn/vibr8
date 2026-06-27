@@ -148,9 +148,9 @@ export default function App() {
   const clientId = useStore((s) => s.clientId);
   const nodes = useStore((s) => s.nodes);
   useEffect(() => {
-    const name = activeNodeId === "local"
-      ? null
-      : nodes.find((n) => n.id === activeNodeId)?.name ?? null;
+    const name = activeNodeId
+      ? nodes.find((n) => n.id === activeNodeId)?.name ?? null
+      : null;
     document.title = name ? `vibr8 · ${name}` : "vibr8";
   }, [activeNodeId, nodes]);
 

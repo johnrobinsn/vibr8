@@ -467,15 +467,13 @@ def create_routes(
             node = node_registry.get_node(target_node) or node_registry.get_node_by_name(target_node)
             if not node:
                 return web.json_response({"error": f"Node '{target_node}' not found"}, status=404)
-            if node.tunnel is not None:
-                # Real remote node: sessions are created through its own
-                # vended UI (/nodes/{id}/api/sessions/create), not the hub.
-                return web.json_response(
-                    {"error": f"Create sessions on node '{node.name}' via its own UI"},
-                    status=400,
-                )
-            # else: the seeded "local" node (no tunnel) — fall through to
-            # local session creation.
+            # Sessions are owned by the node that runs the CLI — they are
+            # created through that node's vended UI
+            # (/nodes/{id}/api/sessions/create), not the hub.
+            return web.json_response(
+                {"error": f"Create sessions on node '{node.name}' via its own UI"},
+                status=400,
+            )
 
         try:
             if backend not in ("claude", "codex", "opencode", "hermes", "terminal", "computer-use"):
@@ -628,25 +626,20 @@ def create_routes(
             associated.sort(key=lambda s: (0 if s.get("isRing0") else 1, -(s.get("lastPromptedAt") or s.get("createdAt") or 0)))
             return web.json_response(associated)
 
-        # Remote nodes are reached through their own vended UI
-        # (/nodes/{id}/api/sessions), not the hub API. Only the seeded
-        # "local" node (no tunnel) is served here, by falling through to
-        # local handling; any real or unknown node returns empty.
-        if requested_node and node_registry:
-            node = node_registry.get_node(requested_node)
-            if not (node and node.tunnel is None):
-                return web.json_response([])
+        # Per-node sessions are reached through that node's vended UI
+        # (/nodes/{id}/api/sessions), not the hub API.
+        if requested_node:
+            return web.json_response([])
 
-        # Local node — pull sessions through NodeClient. NodeOperations
-        # already does name/lastPromptedAt/isRing0/controlledBy/agentState
-        # enrichment, so we only filter out CU sessions targeting other
-        # nodes and graft terminal sessions on top here on the hub.
+        # Hub-owned sessions: just computer-use (the agent + VLM live
+        # hub-side). NodeOperations enrichment runs through NodeClient.
         r0_id = ring0_manager.session_id if ring0_manager else None
         list_result = await local_node_ops.list_sessions()
         enriched = []
         for s_dict in list_result.get("sessions", []):
             cu_node = s_dict.get("nodeId")
-            if s_dict.get("backendType") == "computer-use" and cu_node and cu_node != "local":
+            if s_dict.get("backendType") == "computer-use" and cu_node:
+                # CU session targeting a node belongs to that node's UI.
                 continue
             enriched.append(s_dict)
         # Include terminal sessions (hub-only concept; TerminalManager isn't
@@ -2839,18 +2832,9 @@ def create_routes(
 
     @routes.get("/api/nodes")
     async def list_nodes(request: web.Request) -> web.Response:
-        """List all registered nodes (including the local node)."""
-        # Pull the hub-local session list through NodeClient so we don't
-        # depend on the in-process launcher directly.
-        local_sessions = (await local_node_ops.list_sessions()).get("sessions", []) if local_node_ops else []
-        local_session_ids = [s.get("sessionId", "") for s in local_sessions if s.get("sessionId")]
+        """List all registered nodes."""
         if node_registry is None:
-            import platform as _platform
-            hub_name = _platform.node() or "Local"
-            return web.json_response([{"id": "local", "name": hub_name, "status": "online", "platform": "", "hostname": "", "sessionCount": len(local_session_ids), "ring0Enabled": ring0_manager.is_enabled if ring0_manager else False}])
-        local = node_registry.local_node
-        local.session_ids = local_session_ids
-        local.ring0_enabled = ring0_manager.is_enabled if ring0_manager else False
+            return web.json_response([])
         nodes = [n.to_api_dict() for n in node_registry.get_all_nodes()]
         return web.json_response(nodes)
 
@@ -2909,9 +2893,9 @@ def create_routes(
         """
         client_id = request.match_info["client_id"]
         body = await request.json() if request.content_length else {}
-        node_id = (body.get("nodeId") if isinstance(body, dict) else "") or "local"
+        node_id = (body.get("nodeId") if isinstance(body, dict) else "") or ""
         hub_browser_bridge.set_client_active_node(client_id, node_id)
-        logger.info("[nodes] client %s active node → %s", client_id[:8], node_id[:8] if node_id != "local" else "local")
+        logger.info("[nodes] client %s active node → %s", client_id[:8], node_id[:8] or "(none)")
         return web.json_response({"ok": True, "clientId": client_id, "nodeId": node_id})
 
     @routes.post("/api/nodes/hub-name")
@@ -3306,19 +3290,9 @@ def create_routes(
         """List all nodes (desktop + Android) with their capabilities."""
         result: list[dict[str, Any]] = []
 
-        # Local node
+        # Desktop-class nodes from the registry
         if node_registry:
-            local = node_registry.local_node
-            local_dict = local.to_api_dict()
-            local_dict["nodeType"] = "desktop"
-            local_dict["canRunSessions"] = True
-            local_dict["hasDisplay"] = True
-            result.append(local_dict)
-
-            # Remote desktop nodes
             for node in node_registry.get_all_nodes():
-                if node.id == "local":
-                    continue
                 d = node.to_api_dict()
                 d["nodeType"] = "desktop"
                 d["canRunSessions"] = True

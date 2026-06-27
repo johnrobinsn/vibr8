@@ -32,11 +32,11 @@ function getTabId(): string {
 // at a different node simultaneously (Hermes in one tab, neo in another)
 // and survives refresh within the tab.
 function getInitialActiveNodeId(): string {
-  if (typeof window === "undefined") return "local";
+  if (typeof window === "undefined") return "";
   // In node mode this UI *is* a single node — node switching belongs to
-  // the hub shell hosting the iframe.
-  if (NODE_MODE) return "local";
-  return sessionStorage.getItem("vibr8_active_node_id") || "local";
+  // the hub shell hosting the iframe, so the iframe itself reports "".
+  if (NODE_MODE) return "";
+  return sessionStorage.getItem("vibr8_active_node_id") || "";
 }
 
 function persistActiveNodeId(nodeId: string): void {
@@ -141,8 +141,8 @@ interface AppState {
   // Second screen pushed content (_pushId auto-increments to force remount on each push)
   secondScreenContent: { type: string; content: string; filename?: string; nodeId?: string; _pushId?: number } | null;
   mirroredSessionId: string | null;
-  // Node owning the mirrored session (contract ui/v1 vended path). "local"
-  // or absent → the self-node.
+  // Node owning the mirrored session (contract ui/v1 vended path).
+  // Empty/absent → no mirror target.
   mirroredNodeId: string | null;
   secondScreenScale: number;
   secondScreenTvSafe: number; // 0 = off, >0 = padding percent

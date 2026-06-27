@@ -84,9 +84,9 @@ class HubBrowserBridge:
     def set_client_active_node(self, client_id: str, node_id: str) -> None:
         if not client_id:
             return
-        self._client_active_nodes[client_id] = node_id or "local"
+        self._client_active_nodes[client_id] = node_id or ""
 
-    def get_client_active_node(self, client_id: str, default: str = "local") -> str:
+    def get_client_active_node(self, client_id: str, default: str = "") -> str:
         if not client_id:
             return default
         return self._client_active_nodes.get(client_id, default)

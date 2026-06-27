@@ -323,14 +323,15 @@ class WebRTCManager:
 
         Reads from HubBrowserBridge's per-client map (set by the
         `/api/clients/{id}/active-node` endpoint when the user changes
-        the node selector in the UI). Falls back to "local".
+        the node selector in the UI). Returns "" when no node is
+        selected — there is no implicit default on the stateless hub.
         """
         if self._hub_browser_bridge is not None:
             try:
-                return self._hub_browser_bridge.get_client_active_node(client_id, "local")
+                return self._hub_browser_bridge.get_client_active_node(client_id, "")
             except Exception:
                 pass
-        return "local"
+        return ""
 
     async def _send_voice_preview(self, client_id: str, transcript: str) -> None:
         """Route a live STT preview to the speaking client's active node,
@@ -342,7 +343,7 @@ class WebRTCManager:
         if not self.is_ring0_enabled():
             return
         active_nid = self._client_active_node(client_id)
-        if active_nid and active_nid != "local" and self._node_registry:
+        if active_nid and self._node_registry:
             node = self._node_registry.get_node(active_nid)
             if node and node.tunnel and node.status == "online":
                 await node.tunnel.send_fire_and_forget({
@@ -881,11 +882,11 @@ class WebRTCManager:
                     logger.info("[stt] SUBMIT to model: client=%s text=%r eou=%.4f",
                                 client_id, text, data.get("eouProb", -1))
 
-                    # Check if a remote node is active for this client — route to its Ring0 via its tunnel.
+                    # Route to the active node's Ring0 via its tunnel.
                     if self._node_registry:
                         active_nid = self._client_active_node(client_id)
                         node = self._node_registry.get_node(active_nid) if active_nid else None
-                        if node and node.id != "local":
+                        if node:
                             if node.tunnel and node.status == "online":
                                 logger.info("[stt] Routing to remote node %r (id=%s)", node.name, node.id[:8])
                                 # Contract events/v1 nodes take `transcript`
@@ -1326,25 +1327,7 @@ class WebRTCManager:
             asyncio.ensure_future(self._speak_short(client_id, "Which node?"))
             return
 
-        # "local", "hub", or the hub's configured name switches back to hub
-        name_lower = node_name.lower()
-        local_node = self._node_registry.local_node
-        hub_name = local_node.name
-        is_hub = name_lower in ("local", "hub") or name_lower in hub_name.lower()
         current_nid = self._client_active_node(client_id)
-        if is_hub:
-            if current_nid == local_node.id or current_nid == "local":
-                asyncio.ensure_future(self._speak_short(client_id, f"Already on {hub_name}"))
-                return
-            self._hub_browser_bridge.set_client_active_node(client_id, local_node.id)
-            logger.info("[voice] client %s switched to local node (%s) via voice command", client_id[:8], hub_name)
-            asyncio.ensure_future(self._speak_short(client_id, f"Switched to {hub_name}"))
-            if self._ws_bridge:
-                asyncio.ensure_future(
-                    self._hub_browser_bridge.broadcast_ring0_switch_node(local_node.id, client_id=client_id)
-                )
-            return
-
         matches = self._node_registry.find_by_name(node_name)
         if not matches:
             asyncio.ensure_future(self._speak_short(client_id, f"No node named {node_name} found"))

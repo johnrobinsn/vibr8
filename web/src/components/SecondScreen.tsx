@@ -193,8 +193,8 @@ export function SecondScreen() {
   // owns the session.
   const activeMirrorSession = mirroredSessionId || ring0Target?.sessionId || null;
   const activeMirrorNode = mirroredSessionId
-    ? (mirroredNodeId || "local")
-    : (ring0Target?.nodeId || "local");
+    ? (mirroredNodeId || "")
+    : (ring0Target?.nodeId || "");
 
   // Mirror WebSocket — opens a second WS to the displayed session for live data
   const mirrorWsRef = useRef<WebSocket | null>(null);
@@ -215,7 +215,7 @@ export function SecondScreen() {
       const tokenParam = token ? `&token=${encodeURIComponent(token)}` : "";
       // The displayed session lives on a node; reach it over the ui/v1
       // vended path (/nodes/{id}/ws/browser/{sid}) so the node's own bridge
-      // streams its live broadcasts. Default to the self-node ("local").
+      // streams its live broadcasts.
       const url = `${proto}//${location.host}/nodes/${encodeURIComponent(activeMirrorNode)}/ws/browser/${activeMirrorSession}?clientId=${encodeURIComponent(clientId)}&role=secondscreen&mirror=true${tokenParam}`;
       const ws = new WebSocket(url);
       mirrorWsRef.current = ws;

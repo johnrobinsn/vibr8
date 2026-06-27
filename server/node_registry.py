@@ -140,33 +140,12 @@ class NodeRegistry:
     instance per process so node/token mutations serialize around one state.
     """
 
-    LOCAL_NODE_ID = "local"
-
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._nodes: dict[str, RegisteredNode] = {}  # node_id → node
         self._api_keys: dict[str, ApiKeyEntry] = {}  # key_id → entry
         self._hub_name: str = platform.node() or "Local"
         self._load()
-        # Ensure the local node always has an entry
-        self._ensure_local_node()
-
-    def _ensure_local_node(self) -> None:
-        """Create the local node entry if it doesn't exist."""
-        if self.LOCAL_NODE_ID not in self._nodes:
-            self._nodes[self.LOCAL_NODE_ID] = RegisteredNode(
-                id=self.LOCAL_NODE_ID,
-                name=self._hub_name,
-                api_key_hash="",  # local node doesn't authenticate
-                capabilities={"platform": platform.system(), "hostname": platform.node()},
-                status="online",
-                last_heartbeat=time.time(),
-            )
-
-    @property
-    def local_node(self) -> RegisteredNode:
-        """The always-present local hub node."""
-        return self._nodes[self.LOCAL_NODE_ID]
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -178,7 +157,6 @@ class NodeRegistry:
     def hub_name(self, name: str) -> None:
         with self._lock:
             self._hub_name = name.strip() or platform.node() or "Local"
-            self.local_node.name = self._hub_name
             self._save()
 
     def register(
@@ -433,8 +411,6 @@ class NodeRegistry:
             now = time.time()
             newly_offline: list[str] = []
             for node in self._nodes.values():
-                if node.id == self.LOCAL_NODE_ID:
-                    continue  # local node is always online
                 if node.status == "online" and (now - node.last_heartbeat) > timeout:
                     self.set_offline(node.id)
                     newly_offline.append(node.id)
@@ -465,7 +441,7 @@ class NodeRegistry:
         with self._lock:
             VIBR8_DIR.mkdir(parents=True, exist_ok=True)
             data = {
-                "nodes": {nid: n.to_dict() for nid, n in self._nodes.items() if nid != self.LOCAL_NODE_ID},
+                "nodes": {nid: n.to_dict() for nid, n in self._nodes.items()},
                 "apiKeys": {kid: k.to_dict() for kid, k in self._api_keys.items()},
                 "hubName": self._hub_name,
             }
