@@ -27,9 +27,9 @@ Frontend typecheck: `cd web && bun run typecheck`
 
 The codebase is split into three Python packages:
 
-- **`vibr8_core/`** — Shared node-scoped modules. Both the hub's self-node subprocess and every remote node import from here. The single canonical implementation of every node operation lives here.
-- **`server/`** — Hub-only modules. Browser WebSockets, WebRTC, STT/TTS, node registry, tunnel server, auth.
-- **`vibr8_node/`** — Node agent process. Connects to the hub via tunnel; on startup, the hub spawns its own as the "self-node" (via `--self-mode`).
+- **`vibr8_core/`** — Shared node-scoped modules. Every `vibr8_node` process (whether running on the hub host or a remote machine) imports from here. The single canonical implementation of every node operation lives here.
+- **`server/`** — Hub-only modules. Browser WebSockets, WebRTC, STT/TTS, node registry, tunnel server, auth, ui/v1 vending proxy. The hub is **stateless wrt sessions** — it owns no sessions, no Ring0, no FS/git/env/scheduler state.
+- **`vibr8_node/`** — Node agent process. The operator runs one per host (including the hub host) and registers it with the hub via API key. Each node serves its own UI from `web/dist`, embedded in the hub shell behind an iframe at `/nodes/{id}/ui/`.
 
 ### `vibr8_core/` — shared node code
 
@@ -45,7 +45,7 @@ The codebase is split into three Python packages:
 
 ### `server/` — hub-only modules
 
-- **`main.py`** — App factory, startup/shutdown hooks, **spawns the self-node subprocess** at boot, swaps `local_node_ops` to point at the loopback tunnel once registered, restart-on-crash for the self-node.
+- **`main.py`** — App factory, startup/shutdown hooks, ui/v1 proxy registration. The hub does not spawn any node subprocess — `local_node_ops` stays NOT_READY for the life of the process; per-client Ring0/voice routes resolve a target node from the registry.
 - **`routes.py`** — REST API. Handlers are manager-free: they resolve a `NodeClient` via `_resolve_client(session_id)` or `_resolve_node_client(node_id)` and call the same `NodeClient` methods regardless of whether the target is hub-self or remote.
 - **`webrtc.py`** — WebRTC peer connections, audio I/O. Voice routing forwards transcripts to the active node via `local_node_ops.ring0_input`. Ring0 status cached from periodic `local_node_ops.ring0_status()` calls.
 - **`stt.py`** — Speech-to-text via Whisper + Silero VAD, with prompt accumulation.
@@ -71,43 +71,39 @@ React 19, TypeScript, Vite, Tailwind CSS 4, Zustand for state.
 ```
                                     ┌──────── Hub host (Python/aiohttp, port 3456) ────────┐
                                     │                                                       │
- Browser tab A ─ WS NDJSON ─────────▶  ┌──────────────────────┐                            │
-   (clientId, tabId, activeNode=Hermes)│ Hub WsBridge (proxy) │                            │
-                                    │  │ HubBrowserBridge     │   ┌─ Self-node subprocess ─┐
- Browser tab B ─ WS NDJSON ─────────▶  │ (per-client active   │   │ vibr8_node --self-mode │
-   (same clientId, different tabId,    │  node map; per-tab   │   │ NodeOperations         │
-   activeNode=local)                   │  active node lookup  │   │ WsBridge (real state)  │
-                                    │  └────────┬─────────────┘   │ CliLauncher → CLIs     │
-                                    │           │ tunnel NDJSON   │ Ring0Manager           │
-                                    │           │ (loopback) ────▶│ env/artifacts/git/fs   │
-                                    │           │                 │ scheduler              │
-                                    │           │                 └────────────────────────┘
-                                    │           │ tunnel NDJSON       (owns ~/.vibr8/)
-                                    │           │ (wss://) ────────▶ ┌─ Remote node (Hermes,
-                                    │           │                    │  Docker, EC2, …)
-                                    │           │                    │ vibr8_node
-                                    │  ┌────────▼─────────────┐      │ NodeOperations
-                                    │  │ WebRTC peers keyed   │      │ CliLauncher → CLIs
- Browser tab A ─ WebRTC ─◀──────────▶─│ by peer_key =        │      │ Ring0Manager
- Browser tab B ─ WebRTC ─◀──────────▶─│ clientId#tabId       │      │ ...
-                                    │  │ STT/TTS per peer     │      └─────────────────────┘
-                                    │  │ Ring0EventForwarder  │
-                                    │  │  → event.source_     │
-                                    │  │    client_id →       │
-                                    │  │    active node       │
-                                    │  └──────────────────────┘
-                                    └───────────────────────────────────────────────────────┘
+                                    │   stateless: no sessions, no Ring0, no CLIs           │
+                                    │                                                       │
+                                    │   ┌────────────────────────────────┐                  │
+ Browser shell (hub UI) ─ HTTPS ───▶│   │ Auth · NodeRegistry · ui/v1    │                  │
+                                    │   │ vending proxy · WebRTC peer ·  │                  │
+                                    │   │ STT/TTS · computer-use VLM     │                  │
+                                    │   └──────────────┬─────────────────┘                  │
+                                    │                  │ tunnel NDJSON                       │
+                                    │                  │ (wss:// — node-initiated)          │
+                                    └──────────────────┼──────────────────────────────────────┘
+                                                       │
+              ┌────────────────────────────────────────┼──────────────────────────────────┐
+              │                                        │                                  │
+       ┌──────▼────────────────────────┐      ┌────────▼───────────────────────┐
+       │ Host node (vibr8_node)        │      │ Remote node (Hermes, Docker,   │
+       │   name=host, port=4459        │      │   EC2, …)                      │
+       │   ~/.vibr8-node/host/         │      │   ~/.vibr8-node/{name}/        │
+       │   sessions / ring0 / artifacts │      │   sessions / ring0 / artifacts │
+       │   serves vended UI on /ui/    │      │   serves vended UI on /ui/     │
+       └───────────────────────────────┘      └────────────────────────────────┘
+
+ Browser iframe at /nodes/{id}/ui/ ─────▶ hub vending proxy ─────▶ node's loopback UI
 ```
 
-(The ASCII above is a pre-vending schematic. Since the ui/v1 cutover, a
-browser's **session** traffic for the active node no longer terminates at the
-hub WsBridge — it flows through the hub's vended proxy
+(The session UI lives in the iframe served by the active node. The hub
+shell keeps only voice, the desktop viewer, the node picker, and
+authentication.)
 `/nodes/{id}/{ui,api,ws}/*` to that node's own server. The hub WsBridge box
 now handles only browser/native tracking, RPC, and hub-native computer-use.)
 
 Four things to notice:
 
-1. **The hub owns no node-scoped state.** Sessions, Ring0, FS, git, envs, artifacts, scheduler all live on a node. The hub spawns its own `vibr8_node` subprocess at startup (the **self-node**) and reaches it via a loopback tunnel; remote nodes (Hermes, Docker, EC2, …) use the same NDJSON-over-WebSocket protocol over the public internet. Session ids are raw and node-internal — there is no cross-node session namespace; the browser reaches a node's sessions through that node's vended UI (`/nodes/{id}/ui/`, see `docs/hub-node-contract-v1.md`).
+1. **The hub owns no node-scoped state.** Sessions, Ring0, FS, git, envs, artifacts, scheduler all live on a node. Every node — including the one running on the hub host — is a separate `vibr8_node` process that the operator starts and registers via API key; the hub never auto-spawns one. The tunnel uses NDJSON over a WebSocket the node opens to the hub. Session ids are raw and node-internal — there is no cross-node session namespace; the browser reaches a node's sessions through that node's vended UI (`/nodes/{id}/ui/`, see `docs/hub-node-contract-v1.md`).
 
 2. **The active node is per-client, per-tab.** Each browser tab has its own `activeNodeId` (sessionStorage) and POSTs it to `/api/clients/{client_id}/active-node`. Voice routing reads the originating client's active node; Ring0 events route via `event.source_client_id`. There is no hub-wide active node.
 
@@ -115,13 +111,11 @@ Four things to notice:
 
 4. **Each node vends its own UI (contract ui/v1).** A node serves its built `web/dist` at `/ws/browser/*` + `/api/*` + `/ui/*` on its loopback server; the hub proxies these to the browser through the tunnel under `/nodes/{id}/{ui,api,ws}/*` (`server/node_ui_proxy.py`). The hub shell iframes the node's UI (`web/src/components/NodeShellFrame.tsx`); voice lives in the shell and reaches the node's Ring0 via the events/v1 `transcript` message. The full contract is `docs/hub-node-contract-v1.md`; the plan + phase status is `docs/node-vended-ui.md`.
 
-Set both `VIBR8_DISABLE_SELF_NODE=1` and `VIBR8_ALLOW_LEGACY_IN_PROCESS=1` to fall back to the legacy in-process path for isolated development/tests only.
-
 The WebSocket protocol is reverse-engineered and documented in `WEBSOCKET_PROTOCOL_REVERSED.md`. The current node architecture is `docs/hub-node-contract-v1.md` (the frozen hub↔node contract) and `docs/node-vended-ui.md` (the plan + phase status). The earlier `docs/remote-node-parity.md` (plan) and `docs/remote-node-parity-handoff.md` (recovery guide) are **superseded** — they describe the qualified-id / `SessionRegistry` / `QualifyingNodeClient` machinery that the vending cutover deleted; keep them for history only.
 
-### Nodes (hub-host's self-node + remote nodes)
+### Nodes (host node + remote nodes)
 
-Every vibr8 instance is a "node" — including the hub-host. The hub spawns its own `vibr8_node` subprocess (the **self-node**) and treats it like any other remote node from the routing perspective. Hermes-style remote nodes (Docker containers, EC2 instances, etc.) connect the same way.
+There is no "self-node" baked into the hub. The hub host runs a regular `vibr8_node` process the operator starts and registers, just like any other remote node. Remote nodes (Hermes, Docker containers, EC2 instances, etc.) connect the same way.
 
 **Communication**: Nodes connect to the hub via WebSocket — outbound from the node to `wss://{hub_url}/ws/node/{node_id}?apiKey=...`. Internet-traversable, no SSH required. The hub never initiates connections to nodes. Protocol is NDJSON over WebSocket with request/response correlation (`server/node_tunnel.py`).
 
@@ -129,19 +123,19 @@ Every vibr8 instance is a "node" — including the hub-host. The hub spawns its 
 
 **Computer-use sessions**: VLM inference always runs on the hub (GPU lives there). The `nodeId` determines which remote desktop to target for WebRTC screen capture and input injection. The remote node is a "dumb terminal" — captures screen frames and injects input events.
 
-**Ring0 on nodes**: Each node runs its own Ring0 instance locally, auto-launched on startup if enabled. The hub-host's self-node runs Ring0 just like any other node.
+**Ring0 on nodes**: Each node runs its own Ring0 instance locally, auto-launched on startup if enabled. The hub host's node is no different from any other.
 
 **Active node (per-client)**: Each browser client (and each browser tab — `tabId` in sessionStorage) picks its own active node. The frontend persists it in `sessionStorage["vibr8_active_node_id"]` and POSTs to `/api/clients/{client_id}/active-node` whenever it changes. The hub holds the map in `HubBrowserBridge._client_active_nodes`. There is no hub-wide active node.
 
-**Voice routing**: Voice transcripts route to the originating WebRTC client's per-client active node. `server/webrtc.py` resolves the target via `HubBrowserBridge.get_client_active_node(client_id)` (falls back to the self-node). Remote-node targets go via that node's tunnel; the self-node goes through `local_node_ops.ring0_input`.
+**Voice routing**: Voice transcripts route to the originating WebRTC client's per-client active node, resolved via `HubBrowserBridge.get_client_active_node(client_id)` and dispatched through that node's tunnel. Clients without an active node have no voice target — the transcript is dropped with a warning.
 
-**Hub-side events**: `note_mode_ended`, `second_screen_*` etc. are emitted on the hub and forwarded to the source client's active node's Ring0. Callers populate `Ring0Event.source_client_id`; the forwarder in `server/main.py` calls `HubBrowserBridge.get_client_active_node(source_client_id)` and routes via `local_node_ops.emit_ring0_event` (self-node) or the remote tunnel directly. Events without a source client fall back to the self-node. Session-bound events (`user_returned`, `task_completed`, scheduler `task_due`) fire on the *node-side* WsBridge and reach that node's own Ring0 without going through the forwarder.
+**Hub-side events**: `note_mode_ended`, `second_screen_*` etc. are emitted on the hub and forwarded to the source client's active node's Ring0. Callers populate `Ring0Event.source_client_id`; the forwarder in `server/main.py` calls `HubBrowserBridge.get_client_active_node(source_client_id)` and routes via that node's tunnel. Events without a routable active node drop with a warning. Session-bound events (`user_returned`, `task_completed`, scheduler `task_due`) fire on the *node-side* WsBridge and reach that node's own Ring0 without going through the forwarder.
 
 **Hub-proxy middleware (`vibr8_node/node_agent.py:_make_hub_proxy_middleware`)**: Routes that operate on hub-only state — `/api/clients`, `/api/nodes`, `/api/ring0/query-client`, `/api/ring0/switch-ui`, `/api/ring0/switch-audio`, `/api/ring0/clients`, `/api/ring0/prompt-context`, `/api/second-screen/`, `/api/artifacts` — get forwarded from the node back to the hub. Everything session-scoped runs locally: per-node Ring0 is fully internal, and `NodeOperations._expand_session_id` resolves the 8-char prefixes Ring0 passes from `list_sessions` output.
 
 **Native clients (watch, second screen)**: session-scoped native push is dark pending contract v2 `notify`/`present` (docs/hub-node-contract-v1.md, reserved names). The old `native_push` tunnel forwarding was deleted with the cross-node session namespace.
 
-**Key files**: `server/main.py` (self-node spawn + swap, voice warmup), `vibr8_core/node_client.py` (SwappableNodeClient + NOT_READY), `vibr8_core/node_operations.py` (canonical per-node ops), `vibr8_node/node_agent.py` (contract handlers + hub-proxy), `server/node_tunnel.py`, `server/node_ui_proxy.py`, `server/node_registry.py`, `docs/hub-node-contract-v1.md`, `install-node.sh`, `Dockerfile.node*`
+**Key files**: `server/main.py` (stateless hub app factory, voice warmup), `vibr8_core/node_client.py` (SwappableNodeClient + NOT_READY), `vibr8_core/node_operations.py` (canonical per-node ops), `vibr8_node/node_agent.py` (contract handlers + hub-proxy), `vibr8_node/__main__.py` (entry point; resolves `VIBR8_NODE_DATA_DIR` from `--name` before importing vibr8_core), `server/node_tunnel.py`, `server/node_ui_proxy.py`, `server/node_registry.py`, `docs/hub-node-contract-v1.md`, `install-node.sh`, `Dockerfile.node*`, `dev-launch.sh` (parallel dev hub + host node).
 
 ### Computer-Use Pipeline
 
@@ -201,7 +195,7 @@ Guard word **"vibr8"** (or **"vibrate"**) triggers commands only when followed b
 
 **Node switching** (`vibr8 node {name}`): Switches **this voice client's** active node for Ring0 routing. Updates `HubBrowserBridge._client_active_nodes[client_id]` and broadcasts `ring0_switch_node` to that client so its UI flips. Other browser clients/tabs are unaffected. Matches node name from the registry.
 
-**Ring0 routing:** When Ring0 is enabled, all voice input routes to Ring0 instead of the active session. The target node is the originating client's per-client active node. If that's a remote node, voice transcripts are forwarded via its `ring0_input` tunnel command; if it's the self-node, they go via `local_node_ops.ring0_input`. Falls back to the self-node if the per-client choice is unset or the chosen remote is offline.
+**Ring0 routing:** When Ring0 is enabled, all voice input routes to Ring0 instead of the active session. The target node is the originating client's per-client active node, and the transcript is forwarded via that node's `ring0_input` tunnel command. If the client has no active node (or it's offline), the transcript is dropped with a warning — there is no hub-side fallback.
 
 **Voice pipeline warmup**: `server/stt.warmup_voice_models()` is spawned as a background task at server startup (see `server/main.py`). It runs one inference each against a 1s silence buffer through Whisper-large-v3 (+ Silero VAD + EOU), SpeechBrain ECAPA (speaker gate), WeSpeaker ECAPA (TSE conditioning), and the BSRNN TSE — all via `asyncio.to_thread` so the event loop stays responsive. Without warmup, the first utterance after voice-enable takes 9–13s end-to-end; with it, ~0.5–1s. Each stage is independently try/excepted so missing checkpoints don't kill the rest.
 
@@ -237,16 +231,15 @@ The Claude CLI sometimes emits multiple `assistant` events for the same `msg_id`
 - `device-tokens.json`, `users.json`, `secret.key`, `ice-servers.json` — auth + WebRTC config.
 - `data/voice/logs/{username}/` — voice recordings (one WAV per segment, index.jsonl). CLI replay tool: `uv run python -m server.voice_replay --user X --list`.
 
-**Remote node data lives under `~/.vibr8-node/{node-name}/`** with the same shape (`sessions/`, `ring0/`, `ring0.json`). The hub's self-node uses `~/.vibr8/` directly via the `VIBR8_SELF_NODE_DATA_DIR` env var.
+**Per-node data lives under `~/.vibr8-node/{node-name}/`** (`sessions/`, `ring0/`, `ring0.json`, etc.). Override with `VIBR8_NODE_DATA_DIR` for a custom location (used by `dev-launch.sh` to isolate the dev host node from prod).
 
 ## Environment
 
 - `PORT` (default 3456) — Backend server port
 - `NODE_ENV=production` — Enables serving built frontend from `web/dist/`
 - `OPENAI_API_KEY` — Required for TTS
-- `VIBR8_DISABLE_SELF_NODE=1` — Fall back to legacy in-process path (no self-node subprocess; hub directly owns session state)
-- `VIBR8_SELF_NODE_DATA_DIR` — Override the self-node's data dir (defaults to `~/.vibr8/`). Parallel test hubs use this to avoid colliding with a live install.
-- `VIBR8_SELF_NODE_PORT` (default 3459) — Self-node's local HTTP port (loopback only)
+- `VIBR8_HUB_DATA_DIR` — Override the hub's data dir (auth users, node registry, ICE servers, etc.). Defaults to `~/.vibr8/`. `dev-launch.sh` uses this for the parallel dev hub.
+- `VIBR8_NODE_DATA_DIR` — Override a `vibr8_node` process's data dir (sessions, ring0, artifacts, envs, scheduler). Defaults to `~/.vibr8-node/{name}/`. Read at process startup; `vibr8_core` module-level path constants snapshot it on import.
 - `VIBR8_LOG_FILE` — Log file path (default `server.log` at repo root)
 - `VIBR8_ICE_SERVERS` — JSON-encoded ICE server list; otherwise read from `~/.vibr8/ice-servers.json`
 - Optional TLS: place `key.pem` and `cert.pem` in `certs/` for HTTPS

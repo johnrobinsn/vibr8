@@ -243,3 +243,46 @@ hub-originated broadcast that targeted a node session by id. Audit + status:
 - **Contract creep**: every future feature request must answer "node-land or
   contract?" — default node-land. The spec doc is the gate.
 - **Going dark on native push** between Phases 3–4 (accepted; v2 restores).
+
+## Phase 5 — Self-node spawn deletion
+
+Status: **executed** on branch `host-as-node-dev`. With Phase 4 the hub
+already routed every session-bearing call through a node, but it still
+spawned its own `vibr8_node --self-mode` subprocess at boot and held a
+swappable `local_node_ops` pointer at it. Phase 5 finishes the original
+design paragraph's promise — *"It deletes: self-node spawn..."* — and
+makes the hub truly stateless.
+
+What changed:
+
+- `server/main.py`: deleted `_spawn_self_node()`, `resolve_self_node_enabled()`,
+  `run_legacy_session_startup_sync()`, the `_use_self_node` branching, the
+  Ring0 status cache refresher, the legacy in-process restore_from_disk
+  path, and the shutdown-time subprocess termination. `local_node_ops`
+  stays `NOT_READY` for the life of the process; the Ring0 event forwarder
+  drops events that have no routable active node instead of falling back
+  to a hub-owned default.
+- `vibr8_node/__main__.py` + `node_agent.py`: dropped `--self-mode` (and
+  the well-known `VIBR8_SELF_NODE_DATA_DIR` plumbing). Every node — host
+  included — resolves its data dir from `VIBR8_NODE_DATA_DIR`.
+- `dev-launch.sh`: the dev hub starts with no implicit node; the script
+  mints a bootstrap API key against the dev hub's `NodeRegistry`, then
+  starts a separate `vibr8_node` (name `host`, port 4459) with its own
+  isolated data dir under `~/.vibr8-dev-host-node/`.
+
+Verified end-to-end on the dev hub: hub on 4456 with no self-node
+subprocess, host node registered as `host` (id from registry), Ring0
+auto-launched on the host node with mcp-config under the dev-isolated
+data dir, vended UI rendered through `/nodes/{id}/ui/`.
+
+Known follow-ups (not blockers for the Phase-5 demolition):
+
+- `routes.py` still has a couple of `node_registry.get_node_by_name("self")`
+  fallbacks for paths that historically defaulted to the self-node. They
+  now resolve to nothing on a stateless hub. Either route them through the
+  per-client active node or 410-Gone them.
+- `NodeRegistry._ensure_local_node()` still creates an always-present
+  placeholder entry named "local" with empty `api_key_hash`. Harmless
+  because nothing tunnels into it, but it shows up in the node picker.
+  Either delete the placeholder or rename it as a "no node connected"
+  empty-state sentinel.
