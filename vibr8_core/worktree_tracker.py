@@ -23,7 +23,9 @@ class WorktreeMapping:
 
 # -- Paths -------------------------------------------------------------------
 
-TRACKER_PATH = Path.home() / ".vibr8" / "worktrees.json"
+from vibr8_core.data_paths import NODE_DATA_DIR
+
+TRACKER_PATH = NODE_DATA_DIR / "worktrees.json"
 
 
 # -- Tracker -----------------------------------------------------------------

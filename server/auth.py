@@ -26,7 +26,8 @@ from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
-VIBR8_DIR = Path.home() / ".vibr8"
+from server.paths import VIBR8_DIR
+
 USERS_FILE = VIBR8_DIR / "users.json"
 SECRET_FILE = VIBR8_DIR / "secret.key"
 DEVICE_TOKENS_FILE = VIBR8_DIR / "device-tokens.json"

@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -65,6 +67,19 @@ def main() -> None:
         import socket
         name = socket.gethostname()
         logger.info("No --name specified, using hostname: %s", name)
+
+    # Resolve this node's data dir BEFORE importing vibr8_node.node_agent,
+    # which transitively imports vibr8_core modules whose path constants
+    # snapshot the dir at import time via VIBR8_NODE_DATA_DIR.
+    if not os.environ.get("VIBR8_NODE_DATA_DIR", "").strip():
+        if args.self_mode:
+            self_override = os.environ.get("VIBR8_SELF_NODE_DATA_DIR", "").strip()
+            node_dir = Path(self_override).expanduser() if self_override else (Path.home() / ".vibr8-self")
+        else:
+            safe_name = re.sub(r"[^\w-]", "_", name.lower())
+            node_dir = Path.home() / ".vibr8-node" / safe_name
+        os.environ["VIBR8_NODE_DATA_DIR"] = str(node_dir)
+        logger.info("Resolved VIBR8_NODE_DATA_DIR=%s (self_mode=%s)", node_dir, args.self_mode)
 
     from vibr8_node.node_agent import NodeAgent
 

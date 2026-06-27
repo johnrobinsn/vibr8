@@ -25,7 +25,9 @@ import json5
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path.home() / ".vibr8" / "ring0-events.json5"
+from vibr8_core.data_paths import NODE_DATA_DIR
+
+CONFIG_PATH = NODE_DATA_DIR / "ring0-events.json5"
 
 
 @dataclass

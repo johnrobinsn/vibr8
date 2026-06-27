@@ -18,6 +18,7 @@ from aiohttp import web
 from vibr8_core import artifacts, env_manager, session_names
 from vibr8_core import git_utils
 from server import speaker_fingerprints, voice_profiles, voice_logger
+from server.paths import VIBR8_DIR
 from server.usage_limits import get_usage_limits
 from server.rate_limit import check_rate_limit, get_client_rate_limit_key
 from vibr8_core.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
@@ -2499,11 +2500,11 @@ def create_routes(
     _pairing_codes: dict[str, dict[str, Any]] = {}
     # Durable pairings: {secondScreenClientId → {pairedUser, pairedAt, enabled}}
     _second_screen_pairings: dict[str, dict[str, Any]] = {}
-    _PAIRINGS_PATH = Path.home() / ".vibr8" / "second-screens.json"
+    _PAIRINGS_PATH = VIBR8_DIR / "second-screens.json"
 
     def _default_username() -> str:
         """Get the single configured username for migration, or 'default'."""
-        users_path = Path.home() / ".vibr8" / "users.json"
+        users_path = VIBR8_DIR / "users.json"
         if users_path.exists():
             try:
                 data = json.loads(users_path.read_text())

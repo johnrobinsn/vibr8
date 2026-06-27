@@ -78,8 +78,10 @@ class PersistedSession:
 
 # ─── Store ──────────────────────────────────────────────────────────────────
 
-DEFAULT_DIR = Path.home() / ".vibr8" / "sessions"
-ARCHIVE_DIR = Path.home() / ".vibr8" / "archives"
+from vibr8_core.data_paths import NODE_DATA_DIR
+
+DEFAULT_DIR = NODE_DATA_DIR / "sessions"
+ARCHIVE_DIR = NODE_DATA_DIR / "archives"
 
 
 class SessionStore:

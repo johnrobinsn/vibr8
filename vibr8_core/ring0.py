@@ -22,8 +22,10 @@ from vibr8_core import session_names
 
 logger = logging.getLogger(__name__)
 
-RING0_CONFIG_PATH = Path.home() / ".vibr8" / "ring0.json"
-RING0_WORK_DIR = Path.home() / ".vibr8" / "ring0"
+from vibr8_core.data_paths import NODE_DATA_DIR
+
+RING0_CONFIG_PATH = NODE_DATA_DIR / "ring0.json"
+RING0_WORK_DIR = NODE_DATA_DIR / "ring0"
 RING0_SESSION_ID = "ring0"
 
 _RING0_PROMPT_HEADER = """\

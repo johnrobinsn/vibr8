@@ -26,9 +26,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-VIBR8_DIR = Path.home() / ".vibr8"
-TASKS_DIR = VIBR8_DIR / "ring0" / "tasks"
-QUEUE_DIR = VIBR8_DIR / "ring0" / "queue"
+from vibr8_core.data_paths import NODE_DATA_DIR
+
+TASKS_DIR = NODE_DATA_DIR / "ring0" / "tasks"
+QUEUE_DIR = NODE_DATA_DIR / "ring0" / "queue"
 
 EXECUTION_TIMEOUT = 600  # 10 minutes max per task execution
 MISSED_RUN_TIMEOUT = 120  # 2 minutes for catch-up tasks on startup

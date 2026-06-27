@@ -16,7 +16,9 @@ from pathlib import Path
 
 import bcrypt
 
-USERS_FILE = Path.home() / ".vibr8" / "users.json"
+from server.paths import VIBR8_DIR
+
+USERS_FILE = VIBR8_DIR / "users.json"
 
 
 def load() -> dict:

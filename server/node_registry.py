@@ -21,7 +21,8 @@ from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
-VIBR8_DIR = Path.home() / ".vibr8"
+from server.paths import VIBR8_DIR
+
 NODES_FILE = VIBR8_DIR / "nodes.json"
 
 

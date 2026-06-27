@@ -239,7 +239,8 @@ class CliLauncher:
         safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", session_id).strip("._")
         if not safe_id:
             safe_id = "session"
-        return Path.home() / ".vibr8" / "mcp-configs" / f"{safe_id}.json"
+        from vibr8_core.data_paths import NODE_DATA_DIR
+        return NODE_DATA_DIR / "mcp-configs" / f"{safe_id}.json"
 
     def _write_session_mcp_config(
         self,

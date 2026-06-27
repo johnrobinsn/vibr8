@@ -22,8 +22,10 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-_ARTIFACTS_PATH = Path.home() / ".vibr8" / "artifacts.json"
-_CONTENT_DIR = Path.home() / ".vibr8" / "artifacts"
+from vibr8_core.data_paths import NODE_DATA_DIR
+
+_ARTIFACTS_PATH = NODE_DATA_DIR / "artifacts.json"
+_CONTENT_DIR = NODE_DATA_DIR / "artifacts"
 
 # Types whose `content` field is base64-encoded bytes (rather than text).
 # `download` is binary too, but it's served with Content-Disposition: attachment

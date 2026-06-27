@@ -128,9 +128,13 @@ class WsBridge:
         self._native_rpc_pending: dict[str, asyncio.Future] = {}  # id → Future for native responses
         self._native_subscriptions: dict[str, set[str]] = {}  # clientId → set of sessionIds
         self._native_subscribe_all: set[str] = set()  # clientIds subscribed to all sessions
-        # Client metadata (persisted to ~/.vibr8/clients.json)
+        # Client metadata (persisted to ~/.vibr8/clients.json on the hub;
+        # override via VIBR8_HUB_DATA_DIR for a parallel dev hub).
         self._client_metadata: dict[str, dict[str, Any]] = {}
-        self._CLIENTS_PATH = Path.home() / ".vibr8" / "clients.json"
+        import os as _os
+        _hub_dir_override = _os.environ.get("VIBR8_HUB_DATA_DIR", "").strip()
+        _hub_dir = Path(_hub_dir_override).expanduser() if _hub_dir_override else (Path.home() / ".vibr8")
+        self._CLIENTS_PATH = _hub_dir / "clients.json"
         self._load_client_metadata()
         # User re-engagement tracking for scheduled tasks
         self._last_user_interaction: float = 0.0  # time.time() of last user-originated message to Ring0

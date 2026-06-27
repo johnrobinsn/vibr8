@@ -22,6 +22,7 @@ from vibr8_core.session_store import SessionStore
 from vibr8_core.worktree_tracker import WorktreeTracker
 from vibr8_core.ws_bridge import WsBridge
 from server.auto_namer import generate_session_title, AutoNamerOptions
+from server.paths import VIBR8_DIR
 from vibr8_core import session_names
 from server.routes import create_routes
 from server.rate_limit import check_rate_limit, get_client_rate_limit_key
@@ -601,7 +602,7 @@ def create_app() -> web.Application:
     if ice_env:
         ice_servers = _json.loads(ice_env)
     else:
-        ice_config = Path.home() / ".vibr8" / "ice-servers.json"
+        ice_config = VIBR8_DIR / "ice-servers.json"
         if ice_config.exists():
             ice_servers = _json.loads(ice_config.read_text())
     if ice_servers:
@@ -1244,7 +1245,7 @@ def create_app() -> web.Application:
         # setdefault (not assignment) so a parallel test hub can override
         # to an isolated dir like ~/.vibr8-test-self/ without colliding
         # with a live hub's ~/.vibr8/.
-        env.setdefault("VIBR8_SELF_NODE_DATA_DIR", str(Path.home() / ".vibr8"))
+        env.setdefault("VIBR8_SELF_NODE_DATA_DIR", str(VIBR8_DIR))
         cmd = [
             sys.executable, "-m", "vibr8_node",
             "--hub", hub_ws_url,
