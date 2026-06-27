@@ -92,8 +92,6 @@ NODE_WS_RATE_WINDOW = 60.0
 ALLOW_NO_AUTH_ENV = "VIBR8_ALLOW_NO_AUTH"
 ALLOW_PUBLIC_NO_AUTH_ENV = "VIBR8_ALLOW_PUBLIC_NO_AUTH"
 HOST_ENV = "VIBR8_HOST"
-DISABLE_SELF_NODE_ENV = "VIBR8_DISABLE_SELF_NODE"
-ALLOW_LEGACY_IN_PROCESS_ENV = "VIBR8_ALLOW_LEGACY_IN_PROCESS"
 
 # Typed key for the WsBridge instance in app state. Mirrors the same
 # idiom used in server/tests/test_smoke_ws_path.py so the smoke gate
@@ -147,91 +145,19 @@ def resolve_bind_host(auth_enabled: bool, environ: Mapping[str, str] = os.enviro
     return "127.0.0.1"
 
 
-def resolve_self_node_enabled(environ: Mapping[str, str] = os.environ) -> bool:
-    """Return whether the hub should use the self-node path.
-
-    Self-node mode is the only normal runtime path. The legacy in-process
-    fallback remains available only for explicit development/test isolation.
-    """
-    if not _env_flag(environ, DISABLE_SELF_NODE_ENV):
-        return True
-    if not _env_flag(environ, ALLOW_LEGACY_IN_PROCESS_ENV):
-        raise RuntimeError(
-            f"{DISABLE_SELF_NODE_ENV}=1 is a legacy in-process fallback. "
-            f"Set {ALLOW_LEGACY_IN_PROCESS_ENV}=1 as well if you need it for "
-            "explicit local development or isolated tests."
-        )
-    logger.warning(
-        "[server] %s=1 and %s=1; using legacy in-process node path",
-        DISABLE_SELF_NODE_ENV,
-        ALLOW_LEGACY_IN_PROCESS_ENV,
-        extra={
-            "audit_event": "legacy_in_process_mode_enabled",
-            "env": DISABLE_SELF_NODE_ENV,
-            "allow_env": ALLOW_LEGACY_IN_PROCESS_ENV,
-        },
-    )
-    return False
-
-
-async def run_legacy_session_startup_sync(
-    *,
-    use_self_node: bool,
-    launcher: object,
-    ring0_manager: object | None,
-    spawn_task: Callable[[Awaitable[Any]], Any],
-) -> None:
-    """Run startup work for the legacy in-process session owner."""
-    if use_self_node:
-        logger.info("[server] Self-node mode — skipping legacy launcher session sync")
-        return
-
-    # Reconnection watchdog: give restored CLI processes time to reconnect.
-    starting = launcher.get_starting_sessions()
-    if starting:
-        logger.info(
-            f"[server] Waiting {RECONNECT_GRACE_S}s for "
-            f"{len(starting)} CLI process(es) to reconnect..."
-        )
-
-        async def _watchdog() -> None:
-            await asyncio.sleep(RECONNECT_GRACE_S)
-            stale = launcher.get_starting_sessions()
-            for info in stale:
-                if info.archived:
-                    continue
-                logger.info(
-                    f"[server] CLI for session {info.sessionId} "
-                    "did not reconnect, relaunching..."
-                )
-                await launcher.relaunch(info.sessionId)
-
-        spawn_task(_watchdog())
-
-
 def wire_session_callbacks(
     *,
-    use_self_node: bool,
-    launcher: object,
     ws_bridge: object,
-    has_computer_use: bool,
-    on_computer_use_created: Callable[[str, object], None],
     on_cli_relaunch_needed: Callable[[str], None],
-    on_first_turn_completed: Callable[[str, str], None],
 ) -> None:
-    """Wire session callbacks for the active execution mode."""
+    """Wire the hub-side WsBridge proxy callbacks.
+
+    The hub no longer owns sessions — all CLI lifecycle, computer-use
+    creation, and first-turn auto-naming happens on the node that owns
+    the session. The hub keeps only the cross-node relaunch hint so a
+    browser reconnect can ask the node to bring its CLI back up.
+    """
     ws_bridge.on_cli_relaunch_needed_callback(on_cli_relaunch_needed)
-
-    if use_self_node:
-        logger.info(
-            "[server] Self-node mode — skipping legacy callback wiring except "
-            "node-backed relaunch"
-        )
-        return
-
-    if has_computer_use:
-        launcher.on_computer_use_created(on_computer_use_created)
-    ws_bridge.on_first_turn_completed_callback(on_first_turn_completed)
 
 
 # ── WebSocket route handlers ─────────────────────────────────────────────────
@@ -625,42 +551,14 @@ def create_app() -> web.Application:
     task_scheduler = TaskScheduler()
     node_registry = NodeRegistry()
 
-    _use_self_node = resolve_self_node_enabled()
-
-    # SwappableNodeClient's initial target:
-    #
-    # - Self-node mode (default): use the NOT_READY sentinel. Any call
-    #   before the self-node registers returns {"error": "Self-node not
-    #   ready"} — preferable to silently executing dormant in-process
-    #   code paths that don't reflect the node's actual state.
-    # - Legacy mode (VIBR8_DISABLE_SELF_NODE=1 plus
-    #   VIBR8_ALLOW_LEGACY_IN_PROCESS=1): build NodeOperations against
-    #   the hub's in-process managers, which then own session state for
-    #   the lifetime of the process.
-    if _use_self_node:
-        local_node_ops = SwappableNodeClient(NOT_READY)
-    else:
-        local_node_ops = SwappableNodeClient(NodeOperations(
-            launcher=launcher,
-            bridge=ws_bridge,
-            store=session_store,
-            ring0=ring0_manager,
-            worktree_tracker=worktree_tracker,
-            task_scheduler=task_scheduler,
-            default_backend="claude",
-        ))
-    # HubBrowserBridge wraps the hub-only methods (broadcasts, client
-    # metadata). Today it delegates to ws_bridge; Phase 4c-4 will replace
-    # the backing with standalone state once the in-process WsBridge goes
-    # away in favor of the self-node.
+    # The hub is a stateless router: it never owns sessions. There is no
+    # "self/local" node baked in — every node, including the host, is a
+    # separate vibr8_node process the operator runs and registers via API
+    # key. local_node_ops stays NOT_READY (nothing to swap to); the very
+    # few hub-side voice/event paths that still reach for a "default node"
+    # resolve one per-client from the registry instead.
+    local_node_ops = SwappableNodeClient(NOT_READY)
     hub_browser_bridge = HubBrowserBridge(ws_bridge)
-
-    # The hub spawns a vibr8_node child process at startup that connects
-    # back via the loopback tunnel. After it registers, local_node_ops is
-    # retargeted at it (RemoteNodeClient) and all node-scoped operations
-    # flow through the tunnel. Legacy in-process fallback requires both
-    # VIBR8_DISABLE_SELF_NODE=1 and VIBR8_ALLOW_LEGACY_IN_PROCESS=1.
-    self_node_state: dict[str, object] = {"proc": None, "node_id": "", "api_key": ""}
 
     try:
         from server.android_registry import AndroidRegistry
@@ -700,46 +598,31 @@ def create_app() -> web.Application:
     ws_bridge.set_node_registry(node_registry)
     ws_bridge.set_task_scheduler(task_scheduler)
 
-    # Phase 6/8: in Option A self-node mode, hub-side Ring0 event emissions
-    # (note_mode_ended, second_screen_*, etc.) need to reach the *event
-    # source's active node* Ring0 — the hub's own is dormant. Source is
-    # resolved per-event via `event.source_client_id` →
+    # Hub-side Ring0 event emissions (note_mode_ended, second_screen_*,
+    # etc.) need to reach the *event source's active node* Ring0 — the
+    # hub itself owns no Ring0. Source is resolved per-event via
+    # `event.source_client_id` →
     # `hub_browser_bridge.get_client_active_node(client_id)`. Events
-    # without a source client fall back to the self-node (Phase 8 replaces
-    # the hub-wide `node_registry.active_node_id` with this per-client map).
-    if _use_self_node:
-        async def _forward_event_to_active_node(event) -> None:
-            try:
-                source_cid = getattr(event, "source_client_id", None) or ""
-                active_nid = hub_browser_bridge.get_client_active_node(
-                    source_cid, default="local",
+    # without a routable active node are dropped with a warning.
+    async def _forward_event_to_active_node(event) -> None:
+        try:
+            source_cid = getattr(event, "source_client_id", None) or ""
+            active_nid = hub_browser_bridge.get_client_active_node(source_cid)
+            node = node_registry.get_node(active_nid) if (node_registry and active_nid) else None
+            if node and node.tunnel and getattr(node.tunnel, "connected", False):
+                await node.tunnel.send_fire_and_forget({
+                    "type": "emit_ring0_event",
+                    "eventFields": dict(event.fields),
+                })
+            else:
+                logger.warning(
+                    "[server] No routable active node for Ring0 event %s (client=%s) — dropped",
+                    event.fields.get("type", "?"),
+                    source_cid[:8] if source_cid else "?",
                 )
-                if not active_nid or active_nid == "local":
-                    # Self-node — go through local_node_ops (which targets
-                    # the loopback tunnel after the swap fires).
-                    await local_node_ops.emit_ring0_event(
-                        event_fields=dict(event.fields),
-                    )
-                    return
-                # Remote node — forward via its tunnel directly.
-                node = node_registry.get_node(active_nid) if node_registry else None
-                if node and node.tunnel and getattr(node.tunnel, "connected", False):
-                    await node.tunnel.send_fire_and_forget({
-                        "type": "emit_ring0_event",
-                        "eventFields": dict(event.fields),
-                    })
-                else:
-                    logger.warning(
-                        "[server] Active node %s not routable for Ring0 event %s — falling back to self-node",
-                        active_nid[:8] if active_nid else "?",
-                        event.fields.get("type", "?"),
-                    )
-                    await local_node_ops.emit_ring0_event(
-                        event_fields=dict(event.fields),
-                    )
-            except Exception:
-                logger.exception("[server] failed to forward Ring0 event")
-        ws_bridge.set_event_forwarder(_forward_event_to_active_node)
+        except Exception:
+            logger.exception("[server] failed to forward Ring0 event")
+    ws_bridge.set_event_forwarder(_forward_event_to_active_node)
 
     if webrtc_manager:
         webrtc_manager.set_ws_bridge(ws_bridge)
@@ -747,53 +630,9 @@ def create_app() -> web.Application:
         webrtc_manager.set_local_node_ops(local_node_ops)
         webrtc_manager.set_node_registry(node_registry)
 
-    # Legacy in-process wiring — only meaningful when the hub itself owns
-    # session state. In self-node mode (default) these managers are
-    # dormant: their callbacks never fire and webrtc.py reads Ring0 state
-    # from the status cache populated by polling local_node_ops.
-    if not _use_self_node:
-        task_scheduler.set_dependencies(launcher, ws_bridge)
-        launcher.set_store(session_store)
-        if webrtc_manager:
-            webrtc_manager.set_ring0_manager(ring0_manager)
-            webrtc_manager.set_launcher(launcher)
-
-    # Restore persisted state — UNLESS the self-node will own ~/.vibr8/
-    # (default for Option A keystone). In that mode the self-node
-    # subprocess is the sole owner of the on-disk session/ring0 state;
-    # the hub's in-process managers stay empty and route through the
-    # loopback. Legacy in-process fallback requires both
-    # VIBR8_DISABLE_SELF_NODE=1 and VIBR8_ALLOW_LEGACY_IN_PROCESS=1.
-    if not _use_self_node:
-        launcher.restore_from_disk()
-        ws_bridge.restore_from_disk()
-        logger.info(f"[server] Session persistence: {session_store.directory}")
-    else:
-        logger.info(
-            "[server] Self-node owns %s — skipping hub restore_from_disk",
-            session_store.directory,
-        )
-
-    # ── Callbacks (legacy in-process mode only) ──────────────────────────
-    # In self-node mode the local launcher never spawns CLIs, so these
-    # callbacks would never fire. The self-node has its own callbacks
-    # wired up inside its subprocess.
-
-    if not _use_self_node:
-        # When the CLI reports its internal session_id, store it for --resume
-        def on_cli_session_id(session_id: str, cli_session_id: str) -> None:
-            launcher.set_cli_session_id(session_id, cli_session_id)
-            # Persist Ring0's CLI session ID for --resume across restarts
-            if ring0_manager and session_id == ring0_manager.session_id:
-                ring0_manager.on_cli_session_id(cli_session_id)
-
-        ws_bridge.on_cli_session_id_received(on_cli_session_id)
-
-        # When an adapter (Codex/OpenCode) is created, attach it to the WsBridge
-        def on_adapter_created(session_id: str, adapter: object, backend_type: str = "codex") -> None:
-            ws_bridge.attach_adapter(session_id, adapter, backend_type)
-
-        launcher.on_codex_adapter_created(on_adapter_created)
+    # The hub no longer owns sessions — no restore_from_disk, no
+    # launcher/ws_bridge session callbacks, no Ring0 auto-launch. Each
+    # node owns its sessions and persists them under its own data dir.
 
     # When a computer-use session is created, spin up the agent and register it
     try:
@@ -930,30 +769,15 @@ def create_app() -> web.Application:
     relaunching: set[str] = set()
 
     def on_cli_relaunch_needed(session_id: str) -> None:
+        # Only computer-use sessions are owned by the hub. Per-node CLI
+        # sessions live entirely on their node (the browser reaches them
+        # through that node's vended path, not the hub's /ws/browser/);
+        # an own-session relaunch hint here would have no node to call.
         if session_id in relaunching:
             return
-        if _use_self_node:
-            relaunching.add(session_id)
-            logger.info(
-                "[server] Requesting self-node relaunch for session %s",
-                session_id[:8],
-            )
-
-            async def _do_node_relaunch() -> None:
-                try:
-                    await local_node_ops.relaunch_session(session_id=session_id)
-                finally:
-                    await asyncio.sleep(5)
-                    relaunching.discard(session_id)
-
-            spawn(_do_node_relaunch())
-            return
-        info = launcher.get_session(session_id)
-        if info and info.archived:
-            return
-        # CU sessions don't have a CLI subprocess — re-create the agent instead
-        if HAS_COMPUTER_USE and info and info.backendType == "computer-use":
-            if session_id not in relaunching:
+        if HAS_COMPUTER_USE:
+            info = launcher.get_session(session_id)
+            if info and not info.archived and info.backendType == "computer-use":
                 relaunching.add(session_id)
                 logger.info("[server] Re-creating CU agent for session %s", session_id[:8])
                 on_computer_use_created(session_id, info)
@@ -963,20 +787,6 @@ def create_app() -> web.Application:
                     relaunching.discard(session_id)
 
                 spawn(_cu_cooldown())
-            return
-        if info and info.state != "starting":
-            relaunching.add(session_id)
-            logger.info(f"[server] Auto-relaunching CLI for session {session_id}")
-
-            async def _do_relaunch() -> None:
-                try:
-                    await launcher.relaunch(session_id)
-                finally:
-                    # Remove from set after a cooldown
-                    await asyncio.sleep(5)
-                    relaunching.discard(session_id)
-
-            spawn(_do_relaunch())
 
     # Auto-generate session title after first turn completes
     def on_first_turn_completed(session_id: str, first_user_message: str) -> None:
@@ -1002,13 +812,8 @@ def create_app() -> web.Application:
         spawn(_do_auto_name())
 
     wire_session_callbacks(
-        use_self_node=_use_self_node,
-        launcher=launcher,
         ws_bridge=ws_bridge,
-        has_computer_use=HAS_COMPUTER_USE,
-        on_computer_use_created=on_computer_use_created,
         on_cli_relaunch_needed=on_cli_relaunch_needed,
-        on_first_turn_completed=on_first_turn_completed,
     )
 
     # ── Routes ────────────────────────────────────────────────────────────
@@ -1124,13 +929,6 @@ def create_app() -> web.Application:
 
         loop.set_exception_handler(_ice_exception_handler)
 
-        await run_legacy_session_startup_sync(
-            use_self_node=_use_self_node,
-            launcher=launcher,
-            ring0_manager=ring0_manager,
-            spawn_task=spawn,
-        )
-
         # Periodic heartbeat checker for remote nodes
         async def _heartbeat_checker() -> None:
             while True:
@@ -1155,219 +953,13 @@ def create_app() -> web.Application:
         if mdns.available:
             await mdns.start()
 
-        # Auto-launch ring0 session if it was previously enabled — but
-        # only when the hub is the session owner. In Option A self-node
-        # mode (default) the self-node handles Ring0 auto-launch itself.
-        if ring0_manager and ring0_manager.is_enabled and not _use_self_node:
-            logger.info("[server] Ring0 was enabled — auto-launching session")
-            spawn(ring0_manager.ensure_session(launcher, ws_bridge))
-
         # Start scheduled task runner
         await task_scheduler.start()
-
-        # Phase 4c-6 (Option A): self-node spawning is the default. The
-        # in-process WsBridge/Ring0Manager/CliLauncher/SessionStore exist
-        # but are dormant (no restore_from_disk, no auto-launch); the
-        # self-node owns ~/.vibr8/ and routes go through the loopback.
-        # Legacy in-process fallback requires both VIBR8_DISABLE_SELF_NODE=1
-        # and VIBR8_ALLOW_LEGACY_IN_PROCESS=1.
-        if _use_self_node:
-            spawn(_spawn_self_node())
-            # Refresh the WebRTC Ring0 status cache periodically so voice
-            # broadcasts (mode change, audio off, etc.) target the
-            # self-node's Ring0 session.
-            if webrtc_manager:
-                async def _refresh_ring0_status_cache() -> None:
-                    backoff = 1.0
-                    while not _restart["requested"]:
-                        try:
-                            status = await local_node_ops.ring0_status()
-                            webrtc_manager.update_ring0_status_cache(status)
-                            backoff = 1.0
-                        except Exception:
-                            backoff = min(backoff * 2, 30.0)
-                        await asyncio.sleep(3.0 if backoff == 1.0 else backoff)
-                spawn(_refresh_ring0_status_cache())
-
-    async def _spawn_self_node() -> None:
-        """Self-node lifecycle loop: spawn → wait for crash → respawn.
-
-        The first attempt waits for the hub listener to bind, generates
-        an ephemeral API key, spawns the subprocess, waits for it to
-        register, and swaps local_node_ops to point at the loopback
-        tunnel. Subsequent attempts reuse the same API key and respawn
-        with exponential backoff (capped at 30s). Exits cleanly on hub
-        shutdown via _restart["requested"].
-
-        The subprocess owns ~/.vibr8/ exclusively (the hub's in-process
-        managers skip restore_from_disk in default mode). Parallel test
-        hubs can override the data dir via VIBR8_SELF_NODE_DATA_DIR.
-        """
-        import socket
-        import subprocess
-
-        # Wait briefly for the hub's HTTP listener to bind. on_startup fires
-        # before run_app starts accepting connections; without this poll, the
-        # subprocess immediately gets ConnectionRefusedError.
-        for _ in range(50):
-            await asyncio.sleep(0.1)
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                try:
-                    s.settimeout(0.2)
-                    s.connect(("127.0.0.1", PORT))
-                    break
-                except OSError:
-                    continue
-        else:
-            logger.warning("[server] Hub listener never came up; skipping self-node spawn")
-            return
-
-        # Backoff state for the respawn loop.
-        backoff = 2.0
-        max_backoff = 30.0
-        attempt = 0
-
-        # Issue an ephemeral API key the subprocess can use to register.
-        # On respawn we reuse this key — the node_registry already has
-        # the bcrypt hash from the first attempt.
-        raw_key, _entry = node_registry.generate_api_key(name="self-node bootstrap")
-        self_node_state["api_key"] = raw_key
-
-        self_port = int(os.environ.get("VIBR8_SELF_NODE_PORT", "3459"))
-        # Match the hub's scheme — vibr8_node already disables cert
-        # verification for 127.0.0.1, so self-signed certs are fine.
-        ws_scheme_local = "wss" if _get_ssl_context() else "ws"
-        hub_ws_url = f"{ws_scheme_local}://127.0.0.1:{PORT}"
-
-        env = dict(os.environ)
-        # Option A keystone: the self-node owns ~/.vibr8/ exclusively;
-        # the hub-side managers skip restore_from_disk above.
-        # setdefault (not assignment) so a parallel test hub can override
-        # to an isolated dir like ~/.vibr8-test-self/ without colliding
-        # with a live hub's ~/.vibr8/.
-        env.setdefault("VIBR8_SELF_NODE_DATA_DIR", str(VIBR8_DIR))
-        cmd = [
-            sys.executable, "-m", "vibr8_node",
-            "--hub", hub_ws_url,
-            "--api-key", raw_key,
-            "--name", "self",
-            "--port", str(self_port),
-            "--self-mode",
-        ]
-
-        # Respawn loop with exponential backoff. Each iteration spawns a
-        # fresh subprocess, waits for registration, performs the swap (if
-        # configured), then blocks on proc.wait() — when the child exits
-        # for any reason, we loop and respawn.
-        while not _restart["requested"]:
-            attempt += 1
-            if attempt == 1:
-                logger.info("[server] Spawning self-node: port=%d hub=%s", self_port, hub_ws_url)
-            else:
-                logger.info(
-                    "[server] Respawning self-node (attempt #%d, backoff was %.1fs)",
-                    attempt, backoff,
-                )
-            proc = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            self_node_state["proc"] = proc
-
-            # Stream the child's stdout to our logs in the background.
-            async def _drain_child(p: subprocess.Popen) -> None:
-                loop = asyncio.get_event_loop()
-                while True:
-                    line = await loop.run_in_executor(None, p.stdout.readline)
-                    if not line:
-                        break
-                    logger.info("[self-node] %s", line.decode(errors="replace").rstrip())
-
-            spawn(_drain_child(proc))
-
-            # Poll the registry for the new "self" node id (up to 10s).
-            registered = False
-            for _ in range(50):
-                await asyncio.sleep(0.2)
-                n = node_registry.get_node_by_name("self")
-                if n:
-                    self_node_state["node_id"] = n.id
-                    ws_bridge.set_self_node_id(n.id)
-                    if attempt == 1:
-                        logger.info("[server] Self-node registered: id=%s", n.id[:8])
-                    else:
-                        logger.info("[server] Self-node re-registered: id=%s (attempt #%d)", n.id[:8], attempt)
-                    # Phase 4c-6 (Option A): swap local_node_ops to route
-                    # all node operations through the loopback tunnel.
-                    # Wait briefly for the node's tunnel handshake to
-                    # settle so node.tunnel is populated.
-                    for _w in range(25):
-                        await asyncio.sleep(0.2)
-                        if n.tunnel and getattr(n.tunnel, "connected", False):
-                            break
-                    if n.tunnel and getattr(n.tunnel, "connected", False):
-                        from vibr8_core.node_client import RemoteNodeClient
-                        # Session ids stay raw — sessions are node-internal
-                        # under the ui/v1 contract; the hub no longer
-                        # qualifies them at the boundary.
-                        local_node_ops.swap(RemoteNodeClient(n.id, n.tunnel))
-                        logger.info(
-                            "[server] local_node_ops swapped → RemoteNodeClient(self_id=%s)",
-                            n.id[:8],
-                        )
-                    else:
-                        logger.warning(
-                            "[server] Self-node registered but tunnel never connected; "
-                            "skipping local_node_ops swap"
-                        )
-                    registered = True
-                    break
-
-            if not registered:
-                logger.warning(
-                    "[server] Self-node did not register within 10s (attempt #%d)",
-                    attempt,
-                )
-                # Tear down the proc so we don't leak it before backoff.
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-
-            # Reset backoff after a successful registration so a single
-            # crash doesn't accumulate prior failures' backoff.
-            if registered:
-                backoff = 2.0
-
-            # Block until the subprocess exits, then respawn after backoff.
-            loop = asyncio.get_event_loop()
-            rc = await loop.run_in_executor(None, proc.wait)
-            if _restart["requested"]:
-                logger.info("[server] Hub shutting down; not respawning self-node")
-                return
-            logger.warning(
-                "[server] Self-node subprocess exited rc=%s; respawning in %.1fs",
-                rc, backoff,
-            )
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, max_backoff)
 
     app.on_startup.append(on_startup)
 
     async def on_shutdown(app: web.Application) -> None:
         logger.info("[server] Shutting down (restart=%s)...", _restart["requested"])
-
-        # Phase 4b: terminate the self-node subprocess if one was spawned.
-        proc = self_node_state.get("proc")
-        if proc is not None and proc.poll() is None:
-            logger.info("[server] Terminating self-node subprocess (pid=%d)", proc.pid)
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                proc.kill()
 
         # Flush any pending debounced session saves to disk before anything else.
         ws_bridge.flush_to_disk()

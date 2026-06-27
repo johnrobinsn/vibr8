@@ -41,7 +41,6 @@ class NodeAgent:
         work_dir: str = "",
         ring0_config: dict | None = None,
         default_backend: str = "claude",
-        self_mode: bool = False,
     ) -> None:
         self.hub_url = hub_url.rstrip("/")
         self.api_key = api_key
@@ -50,7 +49,6 @@ class NodeAgent:
         self.work_dir = work_dir
         self.ring0_config = ring0_config or {}
         self.default_backend = default_backend
-        self.self_mode = self_mode
         self.node_id: str = ""
         # Service token issued by the hub at registration. Used by Ring0 MCP
         # to authenticate against hub-side client / second-screen / artifact
@@ -80,26 +78,14 @@ class NodeAgent:
 
     async def run(self) -> None:
         """Main entry point — register, start local server, connect tunnel."""
-        if self.self_mode:
-            # Self-mode: in Option A this is the hub's loopback child.
-            # The hub passes VIBR8_SELF_NODE_DATA_DIR=~/.vibr8 by default
-            # (so we own the hub-host's existing data dir exclusively;
-            # hub skips its own restore_from_disk). Falls back to
-            # ~/.vibr8-self/ if the env var is unset — used by parallel
-            # test hubs to avoid colliding with a live production dir.
-            import os as _os
-            override = _os.environ.get("VIBR8_SELF_NODE_DATA_DIR", "").strip()
-            node_dir = Path(override).expanduser() if override else (Path.home() / ".vibr8-self")
-            session_dir = str(node_dir / "sessions")
-            ring0_config_path = node_dir / "ring0.json"
-            ring0_work_dir = node_dir / "ring0"
-        else:
-            # Use an isolated session directory per node to avoid sharing state with the hub
-            safe_name = re.sub(r"[^\w-]", "_", self.name.lower())
-            node_dir = Path.home() / ".vibr8-node" / safe_name
-            session_dir = str(node_dir / "sessions")
-            ring0_config_path = node_dir / "ring0.json"
-            ring0_work_dir = node_dir / "ring0"
+        # Per-node data dir. VIBR8_NODE_DATA_DIR is the source of truth
+        # (set by __main__.py before vibr8_core import so the module-
+        # level path constants in vibr8_core/* see the right value).
+        from vibr8_core.data_paths import NODE_DATA_DIR
+        node_dir = NODE_DATA_DIR
+        session_dir = str(node_dir / "sessions")
+        ring0_config_path = node_dir / "ring0.json"
+        ring0_work_dir = node_dir / "ring0"
         self._store = SessionStore(directory=session_dir)
         self._bridge = WsBridge()
         # Node's local server is plain HTTP, so the CLI must use ws:// (not wss://).
