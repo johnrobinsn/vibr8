@@ -155,7 +155,6 @@ def create_routes(
     auth_manager: AuthManager | None = None,
     ring0_manager: Ring0Manager | None = None,
     node_registry: Any | None = None,
-    self_node_name: str = "",
     local_node_ops: Any | None = None,
     hub_browser_bridge: Any | None = None,
 ) -> web.RouteTableDef:
@@ -1495,15 +1494,15 @@ def create_routes(
 
     @routes.get("/api/ring0/node-environment")
     async def ring0_node_environment(request: web.Request) -> web.Response:
-        """Return environment metadata for the node this Ring0 runs on."""
-        if self_node_name:
-            node_name = self_node_name
-        elif node_registry:
-            node_name = node_registry.hub_name
-        else:
-            node_name = "local"
+        """Return environment metadata for the calling Ring0's node.
+
+        On the stateless hub this path describes the hub host itself —
+        useful when Ring0 MCP probes it through the hub-proxy middleware.
+        For per-node identity the node-vended counterpart at
+        ``/nodes/{id}/api/ring0/node-environment`` is the source of truth.
+        """
         info = {
-            "nodeName": node_name,
+            "nodeName": node_registry.hub_name if node_registry else plat.node(),
             "platform": plat.system().lower(),
             "arch": plat.machine(),
             "hostname": plat.node(),
@@ -1743,18 +1742,20 @@ def create_routes(
         if not client_id or not method:
             return web.json_response({"error": "clientId and method required"}, status=400)
         # Mirroring a session means displaying a node's live session over the
-        # ui/v1 vended path (/nodes/{id}/ws/browser/{sid}). Tell the second
-        # screen which node owns the session: the calling Ring0's node.
-        # Node service tokens are named "node-{nodeId}"; any other caller
-        # (local Ring0, UI) maps to the self-node.
+        # ui/v1 vended path (/nodes/{id}/ws/browser/{sid}). When the caller
+        # is Ring0 MCP its node service token (auth_user = "node-{nodeId}")
+        # identifies the owning node automatically; any non-node caller
+        # must pass nodeId explicitly because the stateless hub has no
+        # default node to fall back to.
         if method == "mirror_session" and isinstance(params, dict) and not params.get("nodeId"):
             auth_user = request.get("auth_user", "") or ""
             if auth_user.startswith("node-"):
                 params["nodeId"] = auth_user[len("node-"):]
-            elif node_registry:
-                self_node = node_registry.get_node_by_name("self")
-                if self_node:
-                    params["nodeId"] = self_node.id
+            else:
+                return web.json_response(
+                    {"error": "mirror_session requires params.nodeId from non-node callers"},
+                    status=400,
+                )
         # Longer timeout for methods that may trigger browser permission prompts
         interactive_methods = {"get_location", "send_notification", "read_clipboard", "write_clipboard", "capture_screenshot"}
         timeout = 30.0 if method in interactive_methods else 5.0
@@ -2644,15 +2645,9 @@ def create_routes(
                 "pairedUser": pairing["pairedUser"],
                 "pairedAt": pairing["pairedAt"],
             }
-            # Default ambient view: the self-node's Ring0 conversation,
-            # mirrored over the ui/v1 vended path. The screen falls back to
-            # this whenever nothing is explicitly pushed/mirrored.
-            try:
-                r0 = await local_node_ops.ring0_status()
-                if r0.get("enabled") and r0.get("sessionId"):
-                    resp["ring0"] = {"nodeId": "local", "sessionId": r0["sessionId"]}
-            except Exception:
-                pass
+            # Second screens no longer have an automatic ambient Ring0 view —
+            # there is no default node on the stateless hub. A primary client
+            # mirroring a session is what populates the second screen's view.
             # Deliver device token (single-use: cleared after first delivery)
             pending_token = pairing.pop("pendingToken", None)
             if pending_token:
