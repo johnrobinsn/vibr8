@@ -17,6 +17,7 @@ import { SettingsPage } from "./components/SettingsPage.js";
 import { AgentControls } from "./components/AgentControls.js";
 import { ViewerPane } from "./components/ViewerPane.js";
 import { NodeShellFrame } from "./components/NodeShellFrame.js";
+import { EmptyHubState } from "./components/EmptyHubState.js";
 import { connectSession, disconnectSession } from "./ws.js";
 import { startWebRTC, setAudioInOnly } from "./webrtc.js";
 import { NODE_MODE } from "./nodeMode.js";
@@ -329,33 +330,24 @@ export default function App() {
     return <SettingsPage />;
   }
 
-  // Node-vended UI (contract ui/v1): a remote node that announces ui/v1
-  // serves its own frontend — built at the node's commit — through the
-  // hub's tunnel proxy. The shell just frames it. (Never nest: in node
-  // mode this app IS the framed UI.)
-  if (!NODE_MODE && activeNodeId !== "local") {
-    const activeNode = nodes.find((n) => n.id === activeNodeId);
-    if (activeNode?.status === "online" && activeNode.contract?.includes("ui/v1")) {
-      return <NodeShellFrame nodeId={activeNodeId} />;
+  // Hub shell at the root: iframe whichever ui/v1 node is currently
+  // active for this tab. Falls back to the first online ui/v1 node if
+  // the persisted activeNodeId doesn't match a usable one; falls back
+  // to the empty-state bootstrap when no usable node exists.
+  if (!NODE_MODE) {
+    const usable = nodes.filter(
+      (n) => n.status === "online" && n.contract?.includes("ui/v1"),
+    );
+    const frameTarget =
+      usable.find((n) => n.id === activeNodeId) || usable[0];
+    if (frameTarget) {
+      return <NodeShellFrame nodeId={frameTarget.id} />;
     }
+    return <EmptyHubState />;
   }
 
-  // Post-Phase-4: the local (self-node) experience always runs on the
-  // vended path. No legacy hub-root session UI; the same SPA bundle is
-  // reused as the node-mode UI when loaded under /nodes/{id}/ui/.
-  if (
-    !NODE_MODE &&
-    activeNodeId === "local" &&
-    nodes.find((n) => n.name === "self")?.contract?.includes("ui/v1")
-  ) {
-    return <NodeShellFrame nodeId="local" />;
-  }
-
-  // NODE_MODE renders the full session UI (chat, sessions, permissions,
-  // terminals, etc.) — this same bundle runs inside the iframe served at
-  // /nodes/{id}/ui/. On the hub root we fall through to this view as a
-  // loading shell while the node registry resolves; once a vending node
-  // is online the NodeShellFrame branch above takes over.
+  // NODE_MODE: this bundle is loaded by the hub at /nodes/{id}/ui/ —
+  // render the full session UI (chat, sessions, permissions, terminals).
   return (
     <div className="h-[100dvh] flex font-sans-ui bg-cc-bg text-cc-fg antialiased">
       {/* Mobile overlay backdrop */}
