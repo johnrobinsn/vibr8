@@ -57,6 +57,24 @@ export default defineConfig({
           });
         },
       },
+      // Node-vended UI proxy: shell iframes /nodes/{id}/ui/ — keep the UI
+      // bytes served from Vite (so HMR reaches the iframe) but route the
+      // node's /api and /ws through the hub backend's tunnel proxy.
+      "^/nodes/[^/]+/api/": {
+        target: `${httpScheme}://${backendHost}:${backendPort}`,
+        secure: false,
+      },
+      "^/nodes/[^/]+/ws/": {
+        target: `${wsScheme}://${backendHost}:${backendPort}`,
+        ws: true,
+        secure: false,
+        configure: (proxy) => {
+          proxy.on("error", () => {});
+          proxy.on("proxyReqWs", (_proxyReq, _req, socket) => {
+            socket.on("error", () => {});
+          });
+        },
+      },
     },
   },
 });

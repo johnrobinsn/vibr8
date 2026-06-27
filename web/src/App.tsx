@@ -340,22 +340,22 @@ export default function App() {
     }
   }
 
-  // Phase 4 cutover: the local (self-node) experience runs on the vended
-  // path by default in production — vibr8-legacy-ui=1 is the escape hatch.
-  // The Vite dev server opts in with vibr8-vended-local=1 instead, since
-  // the node vends the last *built* UI, not the live dev bundle.
-  const vendedLocal = import.meta.env.DEV
-    ? localStorage.getItem("vibr8-vended-local") === "1"
-    : localStorage.getItem("vibr8-legacy-ui") !== "1";
+  // Post-Phase-4: the local (self-node) experience always runs on the
+  // vended path. No legacy hub-root session UI; the same SPA bundle is
+  // reused as the node-mode UI when loaded under /nodes/{id}/ui/.
   if (
     !NODE_MODE &&
     activeNodeId === "local" &&
-    vendedLocal &&
     nodes.find((n) => n.name === "self")?.contract?.includes("ui/v1")
   ) {
     return <NodeShellFrame nodeId="local" />;
   }
 
+  // NODE_MODE renders the full session UI (chat, sessions, permissions,
+  // terminals, etc.) — this same bundle runs inside the iframe served at
+  // /nodes/{id}/ui/. On the hub root we fall through to this view as a
+  // loading shell while the node registry resolves; once a vending node
+  // is online the NodeShellFrame branch above takes over.
   return (
     <div className="h-[100dvh] flex font-sans-ui bg-cc-bg text-cc-fg antialiased">
       {/* Mobile overlay backdrop */}
