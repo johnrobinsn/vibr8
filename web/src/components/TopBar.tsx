@@ -1,7 +1,6 @@
 import { useStore } from "../store.js";
 import { api } from "../api.js";
 import { cancelReconnect, manualReconnect } from "../ws.js";
-import { VoiceControls } from "./VoiceControls.js";
 
 
 export function TopBar() {
@@ -18,11 +17,9 @@ export function TopBar() {
   const connectionStatus = useStore((s) => s.connectionStatus);
   const reconnecting = useStore((s) => s.reconnecting);
   const reconnectGaveUp = useStore((s) => s.reconnectGaveUp);
-  const audioMode = useStore((s) => s.audioMode);
   const webrtcStatus = useStore((s) => s.webrtcStatus);
   const sdkSessions = useStore((s) => s.sdkSessions);
   const sessionNames = useStore((s) => s.sessionNames);
-  const activeAudioInputLabel = useStore((s) => s.activeAudioInputLabel);
   const viewerPaneOpen = useStore((s) => s.viewerPaneOpen);
   const viewerPaneHasContent = useStore((s) => s.viewerPaneContent !== null);
 
@@ -35,7 +32,6 @@ export function TopBar() {
   const isReconnecting = currentSessionId ? (reconnecting.get(currentSessionId) ?? false) : false;
   const hasGaveUp = currentSessionId ? (reconnectGaveUp.get(currentSessionId) ?? false) : false;
   const status = currentSessionId ? (sessionStatus.get(currentSessionId) ?? null) : null;
-  const currentAudioMode = audioMode;
   const sessionName = currentSessionId ? (sessionNames.get(currentSessionId) ?? null) : null;
 
   // Derive mobile status line state
@@ -143,13 +139,9 @@ export function TopBar() {
             </button>
           </div>
 
-          {/* Audio input device indicator — mobile only, left of guard toggle */}
-          {currentAudioMode !== "off" && (
-            <AudioInputIndicator label={activeAudioInputLabel} audioActive={true} />
-          )}
-
-          {/* Voice controls (guard, voice-mode chip, audio cycle) */}
-          <VoiceControls disabled={!isConnected} />
+          {/* Voice (audio cycle, guard, voice-mode chip) lives in the hub
+              shell strip, not the per-node UI (contract §B: audio never
+              enters the iframe). */}
 
           {/* Session panel toggle — desktop only */}
           <button
@@ -226,31 +218,3 @@ function StatusLine({ isConnected, isThinking, isCompacting, isDisconnected }: {
   return null;
 }
 
-// ── Audio input device indicator ─────────────────────────────────────────────
-
-function classifyAudioDevice(label: string): "bluetooth" | "headset" | "speaker" | "phone" {
-  const l = label.toLowerCase();
-  if (l.includes("bluetooth") || l.includes("hands-free") || l.includes("handsfree")) return "bluetooth";
-  if (l.includes("headset") || l.includes("headphone")) return "headset";
-  if (l.includes("speakerphone") || l.includes("speaker phone")) return "speaker";
-  return "phone";
-}
-
-const audioDeviceText: Record<ReturnType<typeof classifyAudioDevice>, string> = {
-  bluetooth: "BT",
-  headset: "HD",
-  speaker: "Spkr",
-  phone: "Mic",
-};
-
-function AudioInputIndicator({ label, audioActive }: { label: string | null; audioActive: boolean }) {
-  const type = label ? classifyAudioDevice(label) : "phone";
-  return (
-    <div
-      className={`sm:hidden flex items-center gap-0.5 px-1 h-5 rounded ${audioActive ? "text-cc-fg" : "text-cc-muted opacity-50"}`}
-      title={label || "Audio input"}
-    >
-      <span className="text-[9px] font-semibold font-mono-code leading-none">{audioDeviceText[type]}</span>
-    </div>
-  );
-}
