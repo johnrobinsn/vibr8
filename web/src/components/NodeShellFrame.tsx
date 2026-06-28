@@ -12,15 +12,46 @@ import { SettingsPage } from "./SettingsPage.js";
 
 type View = "iframe" | "desktop" | "settings";
 
+// Virtual viewport the iframe always renders into; the wrapping
+// container scales it down to actually-available space with
+// transform: scale, so the node UI never shows scrollbars and the
+// shell never has to know the iframe's own breakpoints.
+const FRAME_DESIGN_W = 1440;
+const FRAME_DESIGN_H = 900;
+
 export function NodeShellFrame({ nodeId }: { nodeId: string }) {
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const frameWrapRef = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<View>("iframe");
   const [menuOpen, setMenuOpen] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(false);
+  const [scale, setScale] = useState(1);
   const menuRef = useRef<HTMLDivElement>(null);
   const nodes = useStore((s) => s.nodes);
   const activeNodeId = useStore((s) => s.activeNodeId);
   const darkMode = useStore((s) => s.darkMode);
+
+  // Rescale the iframe so the design viewport fills whatever space the
+  // shell strip leaves below it. Uniform scale (min of horizontal /
+  // vertical fit) — never upscales above 1× so the natural design
+  // doesn't look blown out on big monitors.
+  useEffect(() => {
+    if (view !== "iframe") return;
+    const wrap = frameWrapRef.current;
+    if (!wrap) return;
+    const recompute = () => {
+      const w = wrap.clientWidth;
+      const h = wrap.clientHeight;
+      if (!w || !h) return;
+      const sx = w / FRAME_DESIGN_W;
+      const sy = h / FRAME_DESIGN_H;
+      setScale(Math.min(sx, sy, 1));
+    };
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [view]);
 
   useEffect(() => {
     fetch("/api/auth/me").then((r) => r.json()).then((d) => {
@@ -168,12 +199,23 @@ export function NodeShellFrame({ nodeId }: { nodeId: string }) {
           <SettingsPage embedded onClose={() => setView("iframe")} />
         </div>
       ) : (
-        <iframe
-          ref={frameRef}
-          src={`/nodes/${nodeId}/ui/`}
-          title={`node ${nodeId}`}
-          className="flex-1 w-full border-0"
-        />
+        <div
+          ref={frameWrapRef}
+          className="flex-1 min-h-0 overflow-hidden relative bg-cc-bg"
+        >
+          <iframe
+            ref={frameRef}
+            src={`/nodes/${nodeId}/ui/`}
+            title={`node ${nodeId}`}
+            className="absolute top-0 left-0 border-0"
+            style={{
+              width: `${FRAME_DESIGN_W}px`,
+              height: `${FRAME_DESIGN_H}px`,
+              transform: `scale(${scale})`,
+              transformOrigin: "top left",
+            }}
+          />
+        </div>
       )}
     </div>
   );
