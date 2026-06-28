@@ -360,6 +360,12 @@ export default function App() {
     const frameTarget =
       usable.find((n) => n.id === activeNodeId) || usable[0];
     if (frameTarget) {
+      // Promote the auto-pick into the store so the active-node POST
+      // (and voice routing on the hub) actually point at this node
+      // instead of the empty default.
+      if (activeNodeId !== frameTarget.id) {
+        useStore.getState().setActiveNode(frameTarget.id);
+      }
       return <NodeShellFrame nodeId={frameTarget.id} />;
     }
     return <EmptyHubState />;
