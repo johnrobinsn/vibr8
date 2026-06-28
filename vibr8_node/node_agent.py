@@ -691,7 +691,6 @@ class NodeAgent:
             launcher, bridge, self._store,
             worktree_tracker=self._worktree_tracker,
             ring0_manager=ring0,
-            self_node_name=self.name,
             local_node_ops=self._ops,
         )
         app.router.add_routes(api_routes)
