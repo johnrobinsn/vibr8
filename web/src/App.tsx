@@ -110,7 +110,9 @@ export default function App() {
   // Poll the node registry at the App level so NodeShellFrame /
   // EmptyHubState (both rendered before Sidebar mounts) see the
   // current node list. Sidebar still runs its own richer poll for
-  // session enrichment.
+  // session enrichment. Also re-POST the per-client active node each
+  // tick so a hub restart (which loses its in-memory client→node map)
+  // self-heals within one poll interval.
   useEffect(() => {
     if (authState !== "authenticated" || NODE_MODE) return;
     let alive = true;
@@ -120,6 +122,8 @@ export default function App() {
           if (alive && list.length > 0) useStore.getState().setNodes(list);
         })
         .catch(() => {});
+      const { clientId: cid, activeNodeId: nid } = useStore.getState();
+      if (cid && nid) api.setClientActiveNode(cid, nid).catch(() => {});
     };
     tick();
     const id = setInterval(tick, 5000);
