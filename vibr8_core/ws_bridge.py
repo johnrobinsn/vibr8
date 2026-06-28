@@ -187,6 +187,23 @@ class WsBridge:
         self._native_subscribe_all.discard(client_id)
         logger.debug("[ws-bridge] Native WS unregistered for client %s", client_id[:8])
 
+    # ── Hub-shell control WebSocket ─────────────────────────────────────
+    # The shell (NodeShellFrame) has no session WS of its own — session
+    # traffic rides the iframe through the ui/v1 proxy to a node. Hub-side
+    # pushes like `voice_mode` need to reach the shell directly, so the
+    # shell opens a tiny control WS here that only populates _ws_by_client
+    # for that client. send-to-client lookups (broadcast_voice_mode,
+    # broadcast_audio_mode, etc.) then find it.
+
+    def register_shell_ws(self, client_id: str, ws: web.WebSocketResponse) -> None:
+        self._ws_by_client[client_id] = ws
+        logger.debug("[ws-bridge] Shell WS registered for client %s", client_id[:8])
+
+    def unregister_shell_ws(self, client_id: str, ws: web.WebSocketResponse) -> None:
+        if self._ws_by_client.get(client_id) is ws:
+            self._ws_by_client.pop(client_id, None)
+        logger.debug("[ws-bridge] Shell WS unregistered for client %s", client_id[:8])
+
     async def handle_native_message(self, client_id: str, data: dict) -> None:
         """Handle an incoming message from a native WebSocket.
 

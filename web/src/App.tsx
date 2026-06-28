@@ -107,6 +107,42 @@ export default function App() {
     api.getRing0Status().then((s) => setRing0SessionId(s.sessionId ?? null)).catch(() => {});
   }, []);
 
+  // Shell control WS — receives client-targeted hub pushes
+  // (voice_mode badge, etc.) that don't ride a node-vended session WS.
+  // Re-establishes on hub restart via the natural close → onclose → setTimeout
+  // reconnect loop; backoff capped at 5s.
+  useEffect(() => {
+    if (authState !== "authenticated" || NODE_MODE) return;
+    let alive = true;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    const connect = () => {
+      if (!alive) return;
+      const cid = useStore.getState().clientId;
+      if (!cid) return;
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${proto}//${location.host}/ws/hub-shell/${encodeURIComponent(cid)}`);
+      ws.onmessage = (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          if (d?.type === "voice_mode") {
+            useStore.getState().setVoiceMode(d.mode ?? null);
+          }
+        } catch {}
+      };
+      ws.onclose = () => {
+        if (!alive) return;
+        reconnectTimer = setTimeout(connect, 5000);
+      };
+    };
+    connect();
+    return () => {
+      alive = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
+    };
+  }, [authState]);
+
   // Poll the node registry at the App level so NodeShellFrame /
   // EmptyHubState (both rendered before Sidebar mounts) see the
   // current node list. Sidebar still runs its own richer poll for

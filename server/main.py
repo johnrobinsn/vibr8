@@ -280,6 +280,29 @@ async def handle_enrollment_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def handle_hub_shell_ws(request: web.Request) -> web.WebSocketResponse:
+    """Hub-side control WS the shell opens to receive client-targeted
+    pushes (voice_mode, audio_mode, ring0_switch_node, etc.) that the
+    bridge dispatches via _send_to_client(client_id). The shell has no
+    session WS of its own — session traffic rides the iframe through
+    /nodes/{id}/ws/browser/... — so without this route those pushes
+    silently drop on the stateless hub.
+    """
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+    client_id = request.match_info["client_id"]
+    bridge = request.app[BRIDGE_KEY]
+    bridge.register_shell_ws(client_id, ws)
+    logger.info("[shell-ws] open client=%s", client_id[:8])
+    try:
+        async for _msg in ws:
+            pass  # one-way push channel; ignore inbound
+    finally:
+        logger.info("[shell-ws] close client=%s", client_id[:8])
+        bridge.unregister_shell_ws(client_id, ws)
+    return ws
+
+
 async def handle_native_ws(request: web.Request) -> web.WebSocketResponse:
     """Handle native WebSocket from Android foreground service.
 
@@ -822,6 +845,7 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/cli/{session_id}", handle_cli_ws)
     app.router.add_get("/ws/browser/{session_id}", handle_browser_ws)
     app.router.add_get("/ws/native/{client_id}", handle_native_ws)
+    app.router.add_get("/ws/hub-shell/{client_id}", handle_hub_shell_ws)
     app.router.add_get("/ws/terminal/{session_id}", handle_terminal_ws)
     if HAS_WEBRTC:
         app.router.add_get("/ws/playground/{client_id}", handle_playground_ws)
