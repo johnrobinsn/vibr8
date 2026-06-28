@@ -106,6 +106,25 @@ export default function App() {
   useEffect(() => {
     api.getRing0Status().then((s) => setRing0SessionId(s.sessionId ?? null)).catch(() => {});
   }, []);
+
+  // Poll the node registry at the App level so NodeShellFrame /
+  // EmptyHubState (both rendered before Sidebar mounts) see the
+  // current node list. Sidebar still runs its own richer poll for
+  // session enrichment.
+  useEffect(() => {
+    if (authState !== "authenticated" || NODE_MODE) return;
+    let alive = true;
+    const tick = () => {
+      api.listNodes()
+        .then((list) => {
+          if (alive && list.length > 0) useStore.getState().setNodes(list);
+        })
+        .catch(() => {});
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { alive = false; clearInterval(id); };
+  }, [authState]);
   const previousSessionRef = useRef<string | null>(null);
   const hash = useHash();
 
