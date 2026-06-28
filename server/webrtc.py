@@ -953,22 +953,33 @@ class WebRTCManager:
                             asyncio.ensure_future(self._speak_short(client_id, "Empty note"))
                             return
                         asyncio.ensure_future(self._speak_short(client_id, "Done"))
-                        # Deliver via Ring0 (self-node in Option A) if enabled,
-                        # otherwise to the active session. Voice text goes via
-                        # local_node_ops.ring0_input so it reaches whichever
-                        # node owns Ring0 today.
+                        # Deliver the accumulated voice-mode buffer to this
+                        # client's active node's Ring0 via its tunnel —
+                        # same routing as the regular transcript path.
                         delivered = False
-                        if self._local_node_ops:
-                            try:
-                                r = await self._local_node_ops.ring0_input(
-                                    text=result, source_client_id=client_id,
-                                )
-                                if "error" not in r:
+                        if self._node_registry:
+                            active_nid = self._client_active_node(client_id)
+                            node = self._node_registry.get_node(active_nid) if active_nid else None
+                            if node and node.tunnel and node.status == "online":
+                                contract = node.capabilities.get("contract") or []
+                                try:
+                                    if "events/v1" in contract:
+                                        await node.tunnel.send_fire_and_forget({
+                                            "type": "transcript",
+                                            "text": result,
+                                            "clientId": client_id,
+                                        })
+                                    else:
+                                        await node.tunnel.send_fire_and_forget({
+                                            "type": "ring0_input",
+                                            "text": result,
+                                            "sourceClientId": client_id,
+                                        })
                                     delivered = True
                                     if isinstance(mode, NoteMode):
-                                        # Forwarded through ws_bridge.emit_ring0_event,
-                                        # which routes to this client's active node's
-                                        # Ring0 via the per-client map (Phase 8).
+                                        # The active-node-aware forwarder
+                                        # in server.main routes this back
+                                        # to the same node's Ring0.
                                         from vibr8_core.ring0_events import Ring0Event
                                         await self._ws_bridge.emit_ring0_event(
                                             Ring0Event(
@@ -976,14 +987,13 @@ class WebRTCManager:
                                                 source_client_id=client_id,
                                             )
                                         )
-                            except Exception:
-                                logger.exception("[stt] ring0_input on done failed")
+                                except Exception:
+                                    logger.exception("[stt] note-mode tunnel send failed")
                         if not delivered:
-                            target_session = _resolve_session()
-                            if target_session and self._ws_bridge:
-                                await self._ws_bridge.submit_user_message(
-                                    target_session, result, source_client_id=client_id,
-                                )
+                            logger.warning(
+                                "[stt] voice-mode result for client %s had no routable active node — dropped",
+                                client_id[:8],
+                            )
                         return
 
                     # In voice mode (e.g. note mode), only "done" is recognized.
