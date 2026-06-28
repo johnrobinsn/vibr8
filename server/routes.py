@@ -1375,12 +1375,32 @@ def create_routes(
 
     @routes.post("/api/webrtc/offer")
     async def webrtc_offer(request: web.Request) -> web.Response:
-        if webrtc_manager is None:
-            return web.json_response({"error": "WebRTC not available"}, status=501)
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        # On a node (no hub-style webrtc_manager) the desktop offer flows
+        # directly into NodeOperations.webrtc_offer, which drives that
+        # node's DesktopWebRTCManager (contract desktop/v1). The hub branch
+        # below is for the hub-resident audio/playground manager.
+        if webrtc_manager is None:
+            if not local_node_ops:
+                return web.json_response({"error": "WebRTC not available"}, status=501)
+            try:
+                answer = await local_node_ops.webrtc_offer(
+                    client_id=body.get("clientId", ""),
+                    sdp=body.get("sdp", ""),
+                    sdp_type=body.get("type", "offer"),
+                    desktop_role=body.get("desktopRole", "controller"),
+                    ice_servers=body.get("iceServers"),
+                )
+                if isinstance(answer, dict) and answer.get("error"):
+                    return web.json_response(answer, status=500)
+                return web.json_response(answer)
+            except Exception as e:
+                logger.exception("[webrtc] node-side desktop offer failed: %s", e)
+                return web.json_response({"error": str(e)}, status=500)
 
         client_id = body.get("clientId", "")
         tab_id = body.get("tabId", "")
