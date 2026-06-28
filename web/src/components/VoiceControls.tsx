@@ -40,6 +40,15 @@ export function VoiceControls({ disabled = false }: { disabled?: boolean }) {
 
   return (
     <div className="relative flex items-center gap-1.5">
+      {/* Voice mode indicator (e.g. note mode) — sits to the left of the
+          guard button so the active modal state reads first. */}
+      {voiceMode && audioMode !== "off" && (
+        <span className="flex items-center gap-1 px-2 h-7 rounded-lg text-xs font-semibold bg-cc-accent/15 text-cc-accent animate-pulse">
+          <span className="w-1.5 h-1.5 rounded-full bg-cc-accent" />
+          {voiceMode.toUpperCase()}
+        </span>
+      )}
+
       {/* Guard word toggle — only shown when audio is active */}
       {audioMode !== "off" && audioActive && (
         <button
@@ -60,14 +69,6 @@ export function VoiceControls({ disabled = false }: { disabled?: boolean }) {
             </svg>
           )}
         </button>
-      )}
-
-      {/* Voice mode indicator (e.g. note mode) */}
-      {voiceMode && audioMode !== "off" && (
-        <span className="flex items-center gap-1 px-2 h-7 rounded-lg text-xs font-semibold bg-cc-accent/15 text-cc-accent animate-pulse">
-          <span className="w-1.5 h-1.5 rounded-full bg-cc-accent" />
-          {voiceMode.toUpperCase()}
-        </span>
       )}
 
       {/* Audio cycle: off → connecting → in+out → in-only → off */}
