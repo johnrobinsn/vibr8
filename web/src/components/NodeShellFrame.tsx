@@ -47,6 +47,10 @@ export function NodeShellFrame({ nodeId }: { nodeId: string }) {
   return (
     <div className="h-[100dvh] flex flex-col bg-cc-bg text-cc-fg">
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-cc-border shrink-0">
+        <div className="flex items-center gap-1.5 mr-1">
+          <img src="/logo.svg" alt="" className="h-[1.2em] w-auto" />
+          <span className="text-sm font-semibold text-cc-fg tracking-tight">vibr8</span>
+        </div>
         <span className="text-xs text-cc-muted">node</span>
         <select
           value={activeNodeId}

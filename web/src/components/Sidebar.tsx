@@ -376,8 +376,6 @@ export function Sidebar() {
 
   const activeSessions = allSessionList.filter((s) => !s.archived);
   const archivedSessions = allSessionList.filter((s) => s.archived);
-  const currentSession = currentSessionId ? allSessionList.find((s) => s.id === currentSessionId) : null;
-  const logoSrc = currentSession?.backendType === "codex" ? "/logo-codex.svg" : "/logo.svg";
 
   function startRename(id: string, currentLabel: string) {
     const session = allSessionList.find((s) => s.id === id);
@@ -647,13 +645,10 @@ export function Sidebar() {
 
   return (
     <aside aria-label="Sessions" className="w-[260px] h-full flex flex-col bg-cc-sidebar border-r border-cc-border">
-      {/* Header */}
-      <div className="p-4 pb-3">
-        <div className="flex items-center gap-2">
-          <img src={logoSrc} alt="" className="h-[2.2em] w-auto" />
-          <span className="text-2xl font-semibold text-cc-fg tracking-tight">vibr8</span>
-        </div>
-      </div>
+      {/* Header — the vibr8 logo/wordmark belongs to the hub shell strip,
+          not the node-vended UI. Kept blank here to preserve sidebar
+          layout/padding while the shell above identifies the product. */}
+      <div className="p-4 pb-3" />
 
       {/* Worktree archive confirmation */}
       {confirmArchiveId && (
