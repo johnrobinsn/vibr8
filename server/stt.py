@@ -713,8 +713,13 @@ class STT:
                                     eou_prob, params.eou_threshold, self.eou_counter, params.eou_max_retries, text)
                         if params.verbose:
                             logger.info("[stt-verbose] EOU below threshold, continuing (retry %d)", self.eou_counter + 1)
+                        # Emit the running utterance (all confirmed segments
+                        # plus the current in-progress segment) so the UI
+                        # doesn't rewind to just the latest chunk when a
+                        # multi-sentence utterance is in flight.
+                        joined = " ".join(self.prompt_segments + [text])
                         stt._notify_listeners("interim_transcript", {
-                            "transcript": text,
+                            "transcript": joined,
                             "eouProb": float(eou_prob),
                             "retry": self.eou_counter,
                         })

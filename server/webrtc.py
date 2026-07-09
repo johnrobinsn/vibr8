@@ -344,13 +344,19 @@ class WebRTCManager:
         Audio stays hub-side; this carries only the resulting text."""
         active_nid = self._client_active_node(client_id)
         if not active_nid or not self._node_registry:
+            logger.debug("[stt] voice preview: no active node (client=%s)", client_id[:8])
             return
         node = self._node_registry.get_node(active_nid)
-        if node and node.tunnel and node.status == "online":
-            await node.tunnel.send_fire_and_forget({
-                "type": "broadcast_voice_preview",
-                "transcript": transcript,
-            })
+        if not node or not node.tunnel or node.status != "online":
+            logger.debug("[stt] voice preview: node %s not routable (tunnel=%s status=%s)",
+                         active_nid[:8], bool(node and node.tunnel),
+                         node.status if node else "?")
+            return
+        logger.info("[stt] voice preview → node %s (%d chars)", active_nid[:8], len(transcript))
+        await node.tunnel.send_fire_and_forget({
+            "type": "broadcast_voice_preview",
+            "transcript": transcript,
+        })
 
     def set_ring0_manager(self, manager) -> None:
         """Set a reference to Ring0Manager for voice routing."""
