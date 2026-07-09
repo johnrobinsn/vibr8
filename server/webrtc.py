@@ -334,28 +334,23 @@ class WebRTCManager:
         return ""
 
     async def _send_voice_preview(self, client_id: str, transcript: str) -> None:
-        """Route a live STT preview to the speaking client's active node,
-        which broadcasts it to its Ring0 session UI (hub→node, same shape
-        as the `transcript` contract message). Only meaningful when Ring0
-        is the voice target; the node owns its own session resolution.
+        """Fire the live STT preview at the speaking client's active node.
 
-        Audio stays hub-side — this carries only the resulting text."""
-        if not self.is_ring0_enabled():
-            return
+        Not part of the v1 contract table — a fire-and-forget push the
+        node may act on (render a ghost bubble, feed to Ring0 UI, etc.)
+        or silently ignore per contract §Versioning. Empty transcript
+        means 'clear'.
+
+        Audio stays hub-side; this carries only the resulting text."""
         active_nid = self._client_active_node(client_id)
-        if active_nid and self._node_registry:
-            node = self._node_registry.get_node(active_nid)
-            if node and node.tunnel and node.status == "online":
-                await node.tunnel.send_fire_and_forget({
-                    "type": "broadcast_voice_preview",
-                    "transcript": transcript,
-                })
-                return
-        if self._local_node_ops:
-            try:
-                await self._local_node_ops.broadcast_voice_preview(transcript=transcript)
-            except Exception:
-                logger.debug("[stt] voice preview routing failed", exc_info=True)
+        if not active_nid or not self._node_registry:
+            return
+        node = self._node_registry.get_node(active_nid)
+        if node and node.tunnel and node.status == "online":
+            await node.tunnel.send_fire_and_forget({
+                "type": "broadcast_voice_preview",
+                "transcript": transcript,
+            })
 
     def set_ring0_manager(self, manager) -> None:
         """Set a reference to Ring0Manager for voice routing."""
