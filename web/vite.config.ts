@@ -57,10 +57,12 @@ export default defineConfig({
           });
         },
       },
-      // Node-vended UI proxy: shell iframes /nodes/{id}/ui/ — keep the UI
-      // bytes served from Vite (so HMR reaches the iframe) but route the
-      // node's /api and /ws through the hub backend's tunnel proxy.
-      "^/nodes/[^/]+/api/": {
+      // Node-vended UI proxy: forward every /nodes/{id}/{ui,api,ws}/
+      // to the hub backend, which tunnels it through to the node's own
+      // loopback server. Without the /ui/ line here, Vite's SPA
+      // catch-all would answer with the shell's own bundle, hiding
+      // whatever HTML the node actually vends.
+      "^/nodes/[^/]+/(ui|api)/": {
         target: `${httpScheme}://${backendHost}:${backendPort}`,
         secure: false,
       },
