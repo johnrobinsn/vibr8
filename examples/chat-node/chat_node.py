@@ -151,12 +151,26 @@ class ChatNode:
             ) as ws:
                 self._ws = ws
                 logger.info("Tunnel connected")
-                async for msg in ws:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        await self._on_hub_line(ws, msg.data)
-                    elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
-                        break
-                self._ws = None
+                hb = asyncio.create_task(self._heartbeat_loop(ws))
+                try:
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            await self._on_hub_line(ws, msg.data)
+                        elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                            break
+                finally:
+                    hb.cancel()
+                    self._ws = None
+
+    async def _heartbeat_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        """Contract §A2: every 30s. Skip this and the hub marks the node
+        offline after 90s of silence and greys it out in the picker."""
+        while not ws.closed:
+            await asyncio.sleep(30)
+            try:
+                await ws.send_str(json.dumps({"type": "heartbeat"}) + "\n")
+            except Exception:
+                break
 
     async def _on_hub_line(self, ws: aiohttp.ClientWebSocketResponse, raw: str) -> None:
         for line in raw.strip().split("\n"):
