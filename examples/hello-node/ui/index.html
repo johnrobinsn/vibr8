@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>hello-node</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      max-width: 42rem; margin: 3rem auto; padding: 0 1.5rem;
+      line-height: 1.55;
+    }
+    h1 { margin-bottom: 0.25rem; }
+    .subtitle { color: #888; margin-top: 0; }
+    section {
+      border: 1px solid #8884; border-radius: 12px;
+      padding: 1.25rem 1.5rem; margin-top: 1.25rem;
+    }
+    section h2 { margin-top: 0; font-size: 1rem; letter-spacing: 0.02em; text-transform: uppercase; color: #888; }
+    button {
+      font: inherit; padding: 0.4rem 1rem; border-radius: 8px;
+      border: 1px solid #8886; background: transparent; cursor: pointer;
+    }
+    button:hover { background: #8882; }
+    .out { font-family: ui-monospace, monospace; margin-top: 0.75rem; opacity: 0.85; min-height: 1.4em; }
+    .counter { font-size: 2rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .status { font-size: 0.85rem; color: #888; margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>hello-node</h1>
+  <p class="subtitle">A vibr8 node with the smallest possible surface.</p>
+
+  <section>
+    <h2>REST — GET /api/ping</h2>
+    <button id="ping">Ping the node</button>
+    <div class="out" id="pingOut">—</div>
+  </section>
+
+  <section>
+    <h2>WebSocket — /ws/counter (shared across every connected browser)</h2>
+    <div class="counter" id="counter">–</div>
+    <button id="bump">Bump the counter</button>
+    <div class="status" id="wsStatus">connecting…</div>
+  </section>
+
+<script>
+// Resolve API/WS paths relative to the current document — when the hub
+// vends us we live under /nodes/{id}/ui/, and our API/WS live under
+// /nodes/{id}/api/ and /nodes/{id}/ws/. When running standalone (open
+// http://127.0.0.1:4470/ui/ directly), the prefix is empty. Either way,
+// stripping "/ui/..." off the pathname gives the right base.
+const path = location.pathname.replace(/\/ui\/.*$/, "");
+const apiBase = `${path}/api`;
+const wsBase  = `${path}/ws`;
+
+// -- REST ping ------------------------------------------------------------
+const pingBtn = document.getElementById("ping");
+const pingOut = document.getElementById("pingOut");
+pingBtn.onclick = async () => {
+  pingOut.textContent = "…";
+  try {
+    const r = await fetch(`${apiBase}/ping`);
+    pingOut.textContent = JSON.stringify(await r.json());
+  } catch (e) {
+    pingOut.textContent = "error: " + e.message;
+  }
+};
+
+// -- WebSocket counter ----------------------------------------------------
+const counter = document.getElementById("counter");
+const bumpBtn = document.getElementById("bump");
+const wsStatus = document.getElementById("wsStatus");
+const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+const ws = new WebSocket(`${wsProto}//${location.host}${wsBase}/counter`);
+ws.onopen = () => { wsStatus.textContent = "connected"; };
+ws.onclose = () => { wsStatus.textContent = "disconnected"; };
+ws.onerror = () => { wsStatus.textContent = "error"; };
+ws.onmessage = (e) => {
+  try {
+    const d = JSON.parse(e.data);
+    if (d.type === "state") counter.textContent = d.value;
+  } catch {}
+};
+bumpBtn.onclick = () => {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "bump" }));
+  }
+};
+</script>
+</body>
+</html>
