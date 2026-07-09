@@ -21,6 +21,15 @@
     }
     .msg.user { align-self: flex-end; background: #4a80ff20; border: 1px solid #4a80ff40; }
     .msg.assistant { align-self: flex-start; background: #8884; border: 1px solid #8886; }
+    .msg.preview {
+      align-self: flex-end; background: #4a80ff10; border: 1px dashed #4a80ff40;
+      font-style: italic; opacity: 0.7;
+    }
+    .msg.preview::after {
+      content: "…"; margin-left: 0.15rem; opacity: 0.6;
+      animation: blink 1.2s steps(3, end) infinite;
+    }
+    @keyframes blink { 50% { opacity: 0.1; } }
     .composer {
       display: flex; gap: 0.5rem; padding: 0.75rem 1rem;
       border-top: 1px solid #8884;
@@ -66,14 +75,37 @@ function render(m) {
   log.scrollTop = log.scrollHeight;
 }
 
-// Live push channel — the node writes to /ws/chat both when the browser
-// posts /api/chat and when a `transcript` event arrives from the hub.
+// A single "ghost" bubble that shows the interim voice transcript
+// while the user is still speaking. The hub sends broadcast_voice_preview
+// on every partial and once more with empty text when the segment is
+// confirmed; on the final `transcript` event the node clears it and the
+// real user message takes its place.
+let previewEl = null;
+function renderPreview(text) {
+  if (!text) {
+    if (previewEl) { previewEl.remove(); previewEl = null; }
+    return;
+  }
+  if (empty && empty.parentNode) empty.remove();
+  if (!previewEl) {
+    previewEl = document.createElement("div");
+    previewEl.className = "msg preview";
+    log.appendChild(previewEl);
+  }
+  previewEl.textContent = text;
+  log.scrollTop = log.scrollHeight;
+}
+
+// Live push channel — the node writes to /ws/chat when: the browser
+// posts /api/chat (typed), a `transcript` event arrives from the hub
+// (final voice), and every time an interim voice preview lands.
 const proto = location.protocol === "https:" ? "wss:" : "ws:";
 const ws = new WebSocket(`${proto}//${location.host}${wsBase}/chat`);
 ws.onmessage = (e) => {
   try {
     const d = JSON.parse(e.data);
     if (d.type === "message") render(d);
+    else if (d.type === "preview") renderPreview(d.text || "");
   } catch {}
 };
 

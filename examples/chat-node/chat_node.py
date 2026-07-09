@@ -191,6 +191,17 @@ class ChatNode:
                 )
                 continue
 
+            # Interim voice preview (hub → node). Not part of the v1
+            # contract table, but the hub emits it while the user is
+            # still speaking so you can render live-updating text.
+            # Empty string means "clear" (segment confirmed / final
+            # transcript will arrive shortly on the `transcript` line).
+            if t == "broadcast_voice_preview":
+                asyncio.create_task(
+                    self._push_to_browser_preview(str(msg.get("transcript", "")))
+                )
+                continue
+
             try:
                 if t == "http_request":
                     data = await self._on_http_request(msg)
@@ -237,6 +248,10 @@ class ChatNode:
         if not user_text:
             return
 
+        # Clear any lingering voice-preview ghost — the real message
+        # is about to take its place.
+        await self._push_to_browser_preview("")
+
         self._history.append({"role": "user", "content": user_text})
         await self._push_to_browser({"role": "user", "content": user_text})
 
@@ -253,6 +268,16 @@ class ChatNode:
     async def _push_to_browser(self, msg: dict) -> None:
         """Send one chat message to every /ws/chat browser."""
         blob = json.dumps({"type": "message", **msg})
+        for ws in list(self._chat_ws):
+            try:
+                await ws.send_str(blob)
+            except Exception:
+                self._chat_ws.discard(ws)
+
+    async def _push_to_browser_preview(self, text: str) -> None:
+        """Push an interim voice preview to every /ws/chat browser.
+        Empty text clears the ghost bubble."""
+        blob = json.dumps({"type": "preview", "text": text})
         for ws in list(self._chat_ws):
             try:
                 await ws.send_str(blob)
