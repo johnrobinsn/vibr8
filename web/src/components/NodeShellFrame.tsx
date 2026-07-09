@@ -74,6 +74,12 @@ export function NodeShellFrame({ nodeId }: { nodeId: string }) {
         </div>
         <span className="text-xs text-cc-muted">node</span>
         <select
+          // Remount the native <select> whenever the id+status set of
+          // nodes changes — Chrome caches option `disabled` state on an
+          // already-mounted select, so React attribute updates alone
+          // don't refresh the visible dropdown until it's closed and
+          // reopened. A fresh key drops the cached widget entirely.
+          key={nodes.map((n) => `${n.id}:${n.status}`).join("|")}
           value={activeNodeId}
           onChange={(e) => useStore.getState().setActiveNode(e.target.value)}
           className="px-2 py-1 text-xs rounded-lg bg-cc-bg border border-cc-border text-cc-fg cursor-pointer focus:outline-none focus:ring-1 focus:ring-cc-primary"
