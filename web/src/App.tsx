@@ -20,7 +20,7 @@ import { NodeShellFrame } from "./components/NodeShellFrame.js";
 import { EmptyHubState } from "./components/EmptyHubState.js";
 import { connectSession, disconnectSession } from "./ws.js";
 import { startWebRTC, setAudioInOnly } from "./webrtc.js";
-import { NODE_MODE } from "./nodeMode.js";
+import { NODE_MODE, BASE_PREFIX } from "./nodeMode.js";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 
 function useHash() {
@@ -236,7 +236,7 @@ export default function App() {
     const title = currentSessionId
       ? (sessionNames.get(currentSessionId) ?? info?.name ?? "")
       : "";
-    fetch("/api/_title", {
+    fetch(`${BASE_PREFIX}/api/_title`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: title }),
