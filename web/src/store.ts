@@ -278,6 +278,7 @@ interface AppState {
 
   // Node actions
   setNodes: (nodes: NodeInfo[]) => void;
+  setNodeTitle: (nodeId: string, title: string) => void;
   setActiveNode: (nodeId: string) => void;
   setAndroidDevices: (devices: AndroidDeviceInfo[]) => void;
   clearSessionState: () => void;
@@ -940,6 +941,9 @@ export const useStore = create<AppState>((set, get) => ({
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
   setNodes: (nodes) => set({ nodes }),
+  setNodeTitle: (nodeId, title) => set((s) => ({
+    nodes: s.nodes.map((n) => n.id === nodeId ? { ...n, title } : n),
+  })),
   setActiveNode: (nodeId) => {
     persistActiveNodeId(nodeId);
     set({ activeNodeId: nodeId });

@@ -204,6 +204,16 @@ class WsBridge:
             self._ws_by_client.pop(client_id, None)
         logger.debug("[ws-bridge] Shell WS unregistered for client %s", client_id[:8])
 
+    async def broadcast_node_title(self, node_id: str, text: str) -> None:
+        """Push a node's newly-updated title to every open hub-shell WS.
+        The shell picks the ones that match its currently-active node."""
+        msg = json.dumps({"type": "node_title", "nodeId": node_id, "text": text})
+        for cid, ws in list(self._ws_by_client.items()):
+            try:
+                await ws.send_str(msg)
+            except Exception:
+                self._ws_by_client.pop(cid, None)
+
     async def handle_native_message(self, client_id: str, data: dict) -> None:
         """Handle an incoming message from a native WebSocket.
 

@@ -127,6 +127,8 @@ export default function App() {
           const d = JSON.parse(e.data);
           if (d?.type === "voice_mode") {
             useStore.getState().setVoiceMode(d.mode ?? null);
+          } else if (d?.type === "node_title") {
+            useStore.getState().setNodeTitle(d.nodeId, d.text ?? "");
           }
         } catch {}
       };
@@ -220,6 +222,26 @@ export default function App() {
     if (NODE_MODE) return;
     api.setClientActiveNode(clientId, activeNodeId).catch(() => {});
   }, [clientId, activeNodeId]);
+
+  // In NODE_MODE (this bundle is running inside a node-vended iframe),
+  // publish the current session's title upstream so the shell strip can
+  // display it. The node's local /api/_title relays it as a `title`
+  // tunnel event to the hub, which broadcasts to open hub-shell WSes.
+  const sessionNames = useStore((s) => s.sessionNames);
+  useEffect(() => {
+    if (!NODE_MODE) return;
+    const info = currentSessionId
+      ? useStore.getState().sdkSessions.find((s) => s.sessionId === currentSessionId)
+      : undefined;
+    const title = currentSessionId
+      ? (sessionNames.get(currentSessionId) ?? info?.name ?? "")
+      : "";
+    fetch("/api/_title", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: title }),
+    }).catch(() => {});
+  }, [currentSessionId, sessionNames]);
 
   // Auto-reconnect audio if it was active before reload. Voice lives in
   // the hub shell — never inside a node-vended iframe (contract §B).

@@ -65,6 +65,7 @@ never use it for anything else.
 | `speak` | `text`, `clientId?` | say this aloud (§B) |
 | `busy` | `busy` (bool) | node Ring0 working/idle (§B) |
 | `attention` | `reason`, `clientId?` | node wants the user (§B) |
+| `title` | `text` | node-published UI title (e.g. current session name). Additive — hubs may ignore. |
 
 **Hub → node, correlated:**
 

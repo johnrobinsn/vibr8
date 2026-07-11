@@ -396,6 +396,11 @@ class NodeAgent:
     async def _emit_attention(self, reason: str) -> None:
         await self._send_to_hub({"type": "attention", "reason": reason})
 
+    async def _emit_title(self, text: str) -> None:
+        """Fire-and-forget: tell the hub what to show in the shell strip.
+        Additive to contract §A2 — hubs that don't understand it drop it."""
+        await self._send_to_hub({"type": "title", "text": text})
+
     # ── Contract ui/v1: HTTP + WS proxying (docs/hub-node-contract-v1.md §A3)
 
     async def _send_to_hub(self, payload: dict) -> None:
@@ -683,6 +688,22 @@ class NodeAgent:
 
         app.router.add_get("/ui", handle_ui)
         app.router.add_get("/ui/{path:.*}", handle_ui)
+
+        # POST /api/_title — the node's own UI publishes the currently
+        # displayed title (session name, etc.) here; the node relays it
+        # to the hub as a fire-and-forget `title` tunnel event so the
+        # shell can render it in the strip. Registered before
+        # create_routes so it wins any name collision.
+        async def set_title(request: web.Request) -> web.Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "Invalid JSON"}, status=400)
+            text = str((body or {}).get("text", "")).strip()
+            await self._emit_title(text)
+            return web.json_response({"ok": True})
+
+        app.router.add_post("/api/_title", set_title)
 
         # Ring0 MCP routes (reuse from server.routes)
         from server.routes import create_routes

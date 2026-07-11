@@ -91,7 +91,21 @@ export function NodeShellFrame({ nodeId }: { nodeId: string }) {
           ))}
         </select>
 
-        <div className="flex-1" />
+        {/* Node-published title (e.g. current session name). Empty when
+            the node hasn't sent one; hidden so it doesn't reserve a gap. */}
+        <div className="flex-1 min-w-0 flex justify-center">
+          {(() => {
+            const t = nodes.find((n) => n.id === nodeId)?.title;
+            return t ? (
+              <span
+                className="truncate text-xs text-cc-fg font-medium max-w-full px-2"
+                title={t}
+              >
+                {t}
+              </span>
+            ) : null;
+          })()}
+        </div>
 
         {/* Voice belongs to the shell, never the iframe (contract §B) */}
         <VoiceControls />

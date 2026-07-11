@@ -505,6 +505,15 @@ async def handle_node_ws(request: web.Request) -> web.StreamResponse:
             n = registry.get_node(nid)
             if n:
                 n.ring0_enabled = msg.get("enabled", False)
+        elif msg_type == "title":
+            # Node-published title (e.g., currently-viewed session name).
+            # Store on the registry so /api/nodes reflects it, and push
+            # to every hub-shell WS so open browsers update in real time.
+            text = str(msg.get("text", ""))
+            n = registry.get_node(nid)
+            if n and n.title != text:
+                n.title = text
+                await bridge.broadcast_node_title(nid, text)
         elif msg_type in ("ws_data", "ws_close"):
             # Proxied browser-WS channel traffic (contract ui/v1).
             from server.node_ui_proxy import dispatch_channel_message
