@@ -3,7 +3,7 @@ import { useStore } from "./store.js";
 import { api } from "./api.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ChatView } from "./components/ChatView.js";
-import { TopBar } from "./components/TopBar.js";
+import { NodeFloatingControls } from "./components/NodeFloatingControls.js";
 import { HomePage } from "./components/HomePage.js";
 import { TaskPanel } from "./components/TaskPanel.js";
 import { DesktopView } from "./components/DesktopView.js";
@@ -459,10 +459,12 @@ export default function App() {
         <Sidebar />
       </div>
 
-      {/* Main area */}
+      {/* Main area — the old TopBar strip is gone; NodeFloatingControls
+          overlays the status line + hamburger + reconnect + viewer-pane
+          toggle on top of whatever content this area is showing. */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <TopBar />
         <div className="flex-1 overflow-hidden relative">
+          <NodeFloatingControls />
           {/* Terminal sessions — kept mounted but hidden to preserve buffer */}
           {terminalSessionIds.map((id) => (
             <div key={id} className={`absolute inset-0 ${currentSessionId === id ? "" : "hidden"}`}>

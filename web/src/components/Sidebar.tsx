@@ -638,9 +638,10 @@ export function Sidebar() {
   return (
     <aside aria-label="Sessions" className="w-[260px] h-full flex flex-col bg-cc-sidebar border-r border-cc-border">
       {/* Header — the vibr8 logo/wordmark belongs to the hub shell strip,
-          not the node-vended UI. Kept blank here to preserve sidebar
-          layout/padding while the shell above identifies the product. */}
-      <div className="p-4 pb-3" />
+          not the node-vended UI. When a non-terminal session is active,
+          the Chat/Editor view toggle lives here (moved out of the old
+          TopBar). */}
+      <ChatEditorToggle />
 
       {/* Worktree archive confirmation */}
       {confirmArchiveId && (
@@ -906,6 +907,53 @@ export function Sidebar() {
         <EnvManager onClose={() => setShowEnvManager(false)} />
       )}
     </aside>
+  );
+}
+
+// ── Chat / Editor view toggle ────────────────────────────────────────────────
+// Sits at the top of the sidebar as the header. Hidden when no
+// non-terminal session is active — same visibility rule the old
+// TopBar used.
+
+function ChatEditorToggle() {
+  const currentSessionId = useStore((s) => s.currentSessionId);
+  const sdkSessions = useStore((s) => s.sdkSessions);
+  const activeTab = useStore((s) => s.activeTab);
+  const setActiveTab = useStore((s) => s.setActiveTab);
+
+  const isTerminalSession = currentSessionId
+    ? sdkSessions.find((x) => x.sessionId === currentSessionId)?.backendType === "terminal"
+    : false;
+
+  if (!currentSessionId || isTerminalSession) {
+    return <div className="p-4 pb-3" />;
+  }
+
+  return (
+    <div className="px-3 pt-3 pb-2">
+      <div className="flex items-center bg-cc-hover rounded-lg p-0.5">
+        <button
+          onClick={() => setActiveTab("chat")}
+          className={`flex-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
+            activeTab === "chat"
+              ? "bg-cc-card text-cc-fg shadow-sm"
+              : "text-cc-muted hover:text-cc-fg"
+          }`}
+        >
+          Chat
+        </button>
+        <button
+          onClick={() => setActiveTab("editor")}
+          className={`flex-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
+            activeTab === "editor"
+              ? "bg-cc-card text-cc-fg shadow-sm"
+              : "text-cc-muted hover:text-cc-fg"
+          }`}
+        >
+          Editor
+        </button>
+      </div>
+    </div>
   );
 }
 
