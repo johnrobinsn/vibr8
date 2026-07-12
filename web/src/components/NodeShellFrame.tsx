@@ -16,6 +16,7 @@ export function NodeShellFrame({ nodeId }: { nodeId: string }) {
   const [view, setView] = useState<View>("iframe");
   const [menuOpen, setMenuOpen] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(false);
+  const [iframeNonce] = useState(() => Date.now().toString(36));
   const menuRef = useRef<HTMLDivElement>(null);
   const nodes = useStore((s) => s.nodes);
   const activeNodeId = useStore((s) => s.activeNodeId);
@@ -165,12 +166,14 @@ export function NodeShellFrame({ nodeId }: { nodeId: string }) {
       ) : (
         <iframe
           ref={frameRef}
-          // Key on nodeId so switching nodes always remounts a fresh iframe
-          // rather than reusing a stale document; the cache-busting query
-          // is a belt-and-braces guard for dev where the node ships a
-          // new build under the same URL.
+          // Key on nodeId so switching nodes always remounts a fresh
+          // iframe rather than reusing a stale document. iframeNonce
+          // (set once on this NodeShellFrame mount) tacks a
+          // ?v={nonce} onto the URL so a shell reload forces the
+          // browser to re-request /ui/ instead of reusing whatever
+          // was cached from a previous build.
           key={nodeId}
-          src={`/nodes/${nodeId}/ui/?v=${nodeId}`}
+          src={`/nodes/${nodeId}/ui/?v=${iframeNonce}`}
           title={`node ${nodeId}`}
           className="flex-1 w-full border-0"
         />
