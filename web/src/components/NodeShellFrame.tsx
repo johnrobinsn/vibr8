@@ -165,7 +165,12 @@ export function NodeShellFrame({ nodeId }: { nodeId: string }) {
       ) : (
         <iframe
           ref={frameRef}
-          src={`/nodes/${nodeId}/ui/`}
+          // Key on nodeId so switching nodes always remounts a fresh iframe
+          // rather than reusing a stale document; the cache-busting query
+          // is a belt-and-braces guard for dev where the node ships a
+          // new build under the same URL.
+          key={nodeId}
+          src={`/nodes/${nodeId}/ui/?v=${nodeId}`}
           title={`node ${nodeId}`}
           className="flex-1 w-full border-0"
         />
