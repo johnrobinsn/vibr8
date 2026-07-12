@@ -224,24 +224,26 @@ export default function App() {
   }, [clientId, activeNodeId]);
 
   // In NODE_MODE (this bundle is running inside a node-vended iframe),
-  // publish the current session's title upstream so the shell strip can
-  // display it. The node's local /api/_title relays it as a `title`
-  // tunnel event to the hub, which broadcasts to open hub-shell WSes.
+  // publish whatever the node's TopBar shows as its title so the hub
+  // shell strip can mirror it. Mirrors TopBar's own logic: "Desktop"
+  // for the desktop view, the session's name otherwise. Posts to the
+  // node's local /api/_title, which relays it as a `title` tunnel event.
   const sessionNames = useStore((s) => s.sessionNames);
   useEffect(() => {
     if (!NODE_MODE) return;
-    const info = currentSessionId
-      ? useStore.getState().sdkSessions.find((s) => s.sessionId === currentSessionId)
-      : undefined;
-    const title = currentSessionId
-      ? (sessionNames.get(currentSessionId) ?? info?.name ?? "")
-      : "";
+    let title = "";
+    if (activeView === "desktop") {
+      title = "Desktop";
+    } else if (currentSessionId) {
+      const info = useStore.getState().sdkSessions.find((s) => s.sessionId === currentSessionId);
+      title = sessionNames.get(currentSessionId) ?? info?.name ?? "";
+    }
     fetch(`${BASE_PREFIX}/api/_title`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: title }),
     }).catch(() => {});
-  }, [currentSessionId, sessionNames]);
+  }, [currentSessionId, sessionNames, activeView]);
 
   // Auto-reconnect audio if it was active before reload. Voice lives in
   // the hub shell — never inside a node-vended iframe (contract §B).
