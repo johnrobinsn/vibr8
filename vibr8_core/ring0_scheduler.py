@@ -489,8 +489,29 @@ class TaskScheduler:
         return None
 
     def _schedule_task_execution(self, task: TaskDefinition, *, is_missed_run: bool = False) -> None:
-        """Create a tracked, semaphore-gated asyncio.Task for executing a task."""
+        """Create a tracked, semaphore-gated asyncio.Task for executing a task.
+
+        Must add task.id to self._executing SYNCHRONOUSLY (before returning),
+        not lazily inside the spawned _execute_task coroutine. Otherwise
+        _run_loop's `if task.id in self._executing: continue` guard fails to
+        deduplicate: the loop iteration re-selects the same task, calls
+        _schedule_task_execution again, and spawns a duplicate — over and over
+        without yielding — because the guarded _execute_task hasn't had a chance
+        to run yet and add itself to self._executing. That's a busy loop that
+        starves the event loop.
+
+        Symptom (observed 2026-07-12): if any task's `next_run_at` is in the
+        past when start() is called (e.g. hub was down long enough for a
+        daily task to become overdue), _run_loop immediately hits the
+        `delay <= 0` branch, calls _schedule_task_execution, loops, and
+        re-selects the same task infinitely. Main event loop pegged at 100%
+        CPU, aiohttp's site.start() never gets scheduled, port never binds.
+        """
         timeout = MISSED_RUN_TIMEOUT if is_missed_run else EXECUTION_TIMEOUT
+
+        # Populate _executing SYNCHRONOUSLY so _run_loop's dedupe guard works
+        # even before _execute_task has a chance to run.
+        self._executing.add(task.id)
 
         async def _guarded_execute() -> None:
             async with self._exec_semaphore:
@@ -501,6 +522,10 @@ class TaskScheduler:
 
         def _on_done(t: asyncio.Task) -> None:
             self._execution_tasks.pop(task.id, None)
+            # _execute_task already discards from _executing in its finally
+            # block, but discard here too as a safety net for the case where
+            # _execute_task didn't run at all (task cancelled before start).
+            self._executing.discard(task.id)
             if t.cancelled():
                 logger.info("[scheduler] Task %s was cancelled", task.id)
             elif t.exception():
