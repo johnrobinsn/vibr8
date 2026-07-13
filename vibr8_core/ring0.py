@@ -693,6 +693,14 @@ class Ring0Manager:
                 self._backend_type = data.get("backendType", "claude")
             except Exception:
                 logger.warning("[ring0] Failed to load state from %s", self._config_path)
+        else:
+            # First boot on this node — default Ring0 to ON so the meta-agent
+            # is available without the user having to toggle it via Settings.
+            # Persist immediately so subsequent boots load through the normal
+            # branch above (and users can disable it if they want).
+            self._enabled = True
+            logger.info("[ring0] No config at %s — enabling by default", self._config_path)
+            self._save_state()
 
     def _save_state(self) -> None:
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
