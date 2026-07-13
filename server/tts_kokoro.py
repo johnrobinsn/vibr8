@@ -34,11 +34,8 @@ def _ensure_pipeline() -> None:
     global _pipeline
     if _pipeline is not None:
         return
-    import threading
     from server.stt import STT
     from kokoro import KPipeline
-    if STT._load_lock is None:
-        STT._load_lock = threading.Lock()
     with STT._load_lock:
         if _pipeline is not None:
             return

@@ -162,14 +162,18 @@ class STT:
     """
 
     shared_resources: dict[str, Any] = {}
-    # Serialize preload across concurrent callers (warmup_voice_models,
-    # main.py's _preload_stt, and a first AsyncSTT() inst can all race).
-    # transformers' `low_cpu_mem_usage=True` / `device_map=` paths go
-    # through accelerate.init_empty_weights, which monkey-patches
-    # nn.Module.__init__ via a *global* (not thread-local) state. Two
-    # concurrent loaders trip over each other and leave modules with
-    # meta tensors that .to(device) refuses to materialize.
-    _load_lock: Any = None  # threading.Lock — initialized on first use
+    # Serialize preload across concurrent callers (warmup_voice_models and
+    # tts_kokoro's _ensure_pipeline can race, plus a first AsyncSTT()
+    # materialization). transformers' `low_cpu_mem_usage=True` /
+    # `device_map=` paths go through accelerate.init_empty_weights, which
+    # monkey-patches nn.Module.__init__ via a *global* (not thread-local)
+    # state. Two concurrent loaders trip over each other and leave modules
+    # with meta tensors that .to(device) refuses to materialize.
+    #
+    # Initialized at module scope (not lazily) so the check-and-set
+    # `if _load_lock is None: _load_lock = Lock()` race can't leak two
+    # separate locks that then don't serialize anything.
+    _load_lock: Any = threading.Lock()
 
     class Event(Enum):
         VOICE_WAS_DETECTED = auto()
@@ -254,9 +258,6 @@ class STT:
         loaders leave modules with meta tensors that `.to(device)` then
         refuses to materialize ("Cannot copy out of meta tensor; no data").
         """
-        import threading
-        if STT._load_lock is None:
-            STT._load_lock = threading.Lock()
         with STT._load_lock:
             if "vad" not in STT.shared_resources:
                 logger.info("[stt] Loading Silero VAD...")
