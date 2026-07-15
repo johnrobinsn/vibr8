@@ -5,31 +5,72 @@
 <h1 align="center">vibr8</h1>
 
 <p align="center">
-  Web UI for launching and interacting with coding agents (Claude Code, Codex, OpenCode, Hermes) and computer-use agents
+  A modality-elastic personal agent — the agent that comes with you across your day.<br/>
+  Voice on a walk. Text + screen at your laptop. Full multimodal at your desk.<br/>
+  Same agent, same context, adapts to whatever's around you.
 </p>
+
+<p align="center">
+  <em>Licensed under Apache 2.0 · Built by <a href="https://ringzero.ai">RingZero LLC</a></em>
+</p>
+
+---
+
+## What is vibr8?
+
+vibr8 is a **layer** on top of coding-agent CLIs (Claude Code, Codex, OpenCode, Hermes). It doesn't replace them — it wraps them, so the agent you use scales across whatever interface you have available.
+
+**Four design axes:**
+
+- **Modality-elastic** — voice-only when you're walking, voice + car browser in traffic, text + screen at your laptop, full bidirectional audio/video/text/drawing at your desk. Same session, same context, degrades gracefully to whatever channel is available.
+- **Personal** — designed for individual use, not enterprise. Self-hosted on your own machine.
+- **Self-hostable** — your context and skills live on your computer. No SaaS lock-in. Apache 2.0 licensed.
+- **Adaptive** — persistent memory, per-user personalization, and (soon) model-level adaptation. An agent that changes with you, not just remembers you.
+
+The **ring0 meta-agent** runs alongside your coding agent, handles voice I/O, orchestrates transitions between devices, and translates chatty agent output into voice-suitable dialog.
 
 ---
 
 ## Features
 
-- **Multiple coding-agent backends** — Claude Code, Codex (app-server), OpenCode, and Hermes (ACP) in one UI. Each session picks its backend, model, and permission mode independently.
-- **Multi-session management** — Launch, monitor, and switch between any number of concurrent sessions across all backends.
-- **Computer-use agent** — Vision-language model (UI-TARS) controls desktop GUIs autonomously — screenshots, clicks, typing, scrolling.
-- **Real-time voice** — Bidirectional WebRTC audio with push-to-talk, speech-to-text (Whisper + Silero VAD with speculative decoding), and text-to-speech (Kokoro local TTS by default, OpenAI cloud TTS optional).
-- **Speaker fingerprinting** — Multi-embedding voice profiles (one per device/environment) gate STT to a specific speaker, blocking other voices before transcription.
-- **Target speaker extraction (TSE)** — Optional WeSep BSRNN model isolates the enrolled speaker's voice from background talkers (TV, family in the room) before Whisper runs. Useful in noisy environments.
-- **Prompt accumulation** — Multi-segment utterances are combined before submission, so pauses mid-thought don't split your input.
-- **Live streaming** — Watch agent output stream in real-time over WebSocket (NDJSON protocol).
-- **Remote nodes** — Run sessions on remote machines (Docker, EC2, macOS) connected via WebSocket tunnel, with any of the four coding-agent backends.
-- **Ring0 meta-agent** — Voice-controlled supervisor that manages sessions, permissions, second screens, artifacts, and client devices via MCP tools.
-- **Artifacts + viewer pane** — Sessions and Ring0 can publish persistent content items (summaries, plans, reports) that surface in a resizable side panel, separate from the chat transcript.
-- **Second screen** — Push markdown, images, PDFs, HTML, or live session mirrors to paired display devices (TVs, tablets, etc.).
-- **Code viewer** — Syntax-highlighted file viewer with CodeMirror.
-- **Git integration** — Branch tracking, worktree isolation, ahead/behind counts, and diff stats per session.
-- **Environment sets** — Create and switch between named sets of environment variables.
-- **Voice commands** — Guard-word activated commands for hands-free control (guard mode, note mode, node switching, TTS mute, etc.).
-- **Auto-reconnect** — Automatic reconnection with timeout, cancel, and manual retry.
-- **Dark / light mode** — Persisted theme preference.
+Grouped by experiential area — each maps to one or more of the four axes above.
+
+### Voice-first interaction (modality-elastic)
+
+- **Real-time bidirectional voice** — WebRTC audio with push-to-talk; streaming STT (Whisper + Silero VAD with speculative decoding); streaming TTS (Kokoro local by default, OpenAI cloud optional)
+- **Speaker fingerprinting** — multi-embedding voice profiles (one per device/environment); STT gate blocks other voices before transcription
+- **Target speaker extraction (TSE)** — WeSep BSRNN model isolates the enrolled speaker's voice from background talkers (TV, family in the room) in noisy environments
+- **Voice commands** — guard-word activated hands-free control (guard mode, note mode, node switching, TTS mute)
+- **Prompt accumulation** — mid-thought pauses don't split your utterance
+
+### Screens & devices (modality-elastic)
+
+- **Second screen** — push markdown, images, PDFs, HTML, or live session mirrors to paired displays (TVs, tablets, car browsers, iPads)
+- **Code viewer** — syntax-highlighted file viewing (CodeMirror)
+- **Artifacts + viewer pane** — persistent content items (summaries, plans, reports) surface in a resizable side panel, separate from the chat transcript
+
+### Layer over agentic harnesses (layer identity)
+
+- **Multiple coding-agent backends** — Claude Code, Codex (app-server), OpenCode, Hermes (ACP) in one UI. Each session picks its backend, model, and permission mode independently.
+- **Multi-session management** — launch, monitor, and switch between any number of concurrent sessions across all backends
+- **Live streaming** — real-time agent output over WebSocket (NDJSON protocol)
+- **Git integration** — per-session branch tracking, worktree isolation, ahead/behind counts, diff stats
+- **Environment sets** — named sets of environment variables
+
+### Ring0 meta-agent (orchestration)
+
+- **Voice-controlled supervisor** — manages sessions, permissions, second screens, artifacts, and client devices via MCP tools
+- **Voice-optimized dialog** — translates chatty agent output into voice-suitable dialog so voice-only control of coding agents actually works
+- **Cross-session bridge** — the meta-layer between your underlying coding agent and the modality-elastic surfaces
+
+### Self-hostable, personal, and adaptive
+
+- **Runs on your own hardware** — local desktop or remote nodes
+- **Remote nodes** — Docker, EC2, macOS via outbound WebSocket tunnel (no SSH or local network access required); any backend can run on any node
+- **Local-first defaults** — Kokoro TTS + Whisper STT run locally; cloud services are optional, not required
+- **Computer-use agent** — vision-language model (UI-TARS) controls desktop GUIs autonomously (screenshots, clicks, typing, scrolling)
+- **Auto-reconnect** — connection resilience with timeout, cancel, and manual retry
+- **Dark / light mode** — persisted theme preference
 
 ## Prerequisites
 
