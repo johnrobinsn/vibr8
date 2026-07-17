@@ -1,15 +1,16 @@
 """Artifact storage — persistent curated content items shared by Ring0/sessions.
 
 The metadata index (title, type, source, etc.) lives in
-``~/.vibr8/artifacts.json``. Content bodies are stored as separate files under
-``~/.vibr8/artifacts/<id>`` so an artifact's payload (a 10 MB audio file, a
-PDF, a large markdown report) never has to ride inline through the
-MCP/websocket transport — clients fetch it from
-``GET /api/artifacts/<id>/content`` instead.
+``<node-data-dir>/artifacts.json``. Content bodies are stored as separate
+files under ``<node-data-dir>/artifacts/<id>`` so an artifact's payload
+(a 10 MB audio file, a PDF, a large markdown report) never has to ride
+inline through the MCP/websocket transport — clients fetch it from
+``GET /nodes/{nodeId}/api/artifacts/<id>/content`` (contract ui/v1
+vending path) instead.
 
-Legacy artifacts (created before this change) had their content inlined in
-``artifacts.json``; they're served from the same content endpoint via a
-fallback path, no migration step required.
+Artifacts are node-scoped: creation, listing, deletion, and content
+serving all happen on the owning node's local aiohttp server — the hub
+does not proxy this route.
 """
 
 from __future__ import annotations
@@ -64,8 +65,14 @@ def _content_path(artifact_id: str) -> Path:
     return _CONTENT_DIR / artifact_id
 
 
-def _content_url(artifact_id: str) -> str:
-    return f"/api/artifacts/{artifact_id}/content"
+def _content_url(artifact_id: str, node_id: str) -> str:
+    """Vending-form content URL. ``node_id`` is required — sessions and
+    artifacts are node-internal, so the URL must self-describe the owning
+    node so any hub-origin caller (shell, second-screen, cross-node
+    viewer) can fetch through the hub's ``/nodes/{id}/`` proxy."""
+    if not node_id:
+        raise ValueError("_content_url requires node_id under contract ui/v1")
+    return f"/nodes/{node_id}/api/artifacts/{artifact_id}/content"
 
 
 def _mime_for(artifact: dict) -> str:
@@ -163,27 +170,17 @@ def _copy_from_file(artifact_id: str, source_path: str) -> int:
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def list_artifacts(session_id: str | None = None) -> list[dict]:
-    """Return metadata only — never the inline `content` field for new
-    artifacts (clients fetch payload via ``contentUrl``). Legacy artifacts
-    keep their inline content for backwards compat with older clients.
+    """Return metadata only — the inline ``content`` field is stripped;
+    clients fetch payload via ``contentUrl``.
+
+    ``contentUrl`` is written at create time by :func:`create_artifact`,
+    so no backfill is needed. Any legacy artifacts predating the
+    node-scoped URL format should be wiped from disk.
     """
     artifacts = _load()
     if session_id:
         artifacts = [a for a in artifacts if a.get("sourceSessionId") == session_id]
-
-    out: list[dict] = []
-    for a in artifacts:
-        if a.get("contentUrl"):
-            # New format: drop inline content from list responses
-            slim = {k: v for k, v in a.items() if k != "content"}
-            out.append(slim)
-        else:
-            # Legacy: keep inline content but advertise a URL too — the route
-            # falls back to the inline blob, so clients can use the URL path
-            # uniformly going forward.
-            with_url = dict(a)
-            with_url["contentUrl"] = _content_url(a["id"])
-            out.append(with_url)
+    out = [{k: v for k, v in a.items() if k != "content"} for a in artifacts]
     out.sort(key=lambda a: a.get("createdAt", 0), reverse=True)
     return out
 
@@ -195,7 +192,9 @@ def get_artifact(artifact_id: str) -> dict | None:
     return None
 
 
-def create_artifact(username: str, data: dict) -> dict:
+def create_artifact(username: str, data: dict, node_id: str) -> dict:
+    """Create a persistent artifact on this node. ``node_id`` is required
+    so ``contentUrl`` self-describes the owning node (see :func:`_content_url`)."""
     artifact_id = str(uuid.uuid4())
     artifact_type = data.get("type", "markdown")
     source_file_path = data.get("sourceFilePath")
@@ -216,7 +215,7 @@ def create_artifact(username: str, data: dict) -> dict:
         "id": artifact_id,
         "title": data.get("title", "Untitled"),
         "type": artifact_type,
-        "contentUrl": _content_url(artifact_id),
+        "contentUrl": _content_url(artifact_id, node_id),
         "size": size,
         "sourceSessionId": data.get("sourceSessionId"),
         "sourceSessionName": data.get("sourceSessionName"),
@@ -248,30 +247,15 @@ def delete_artifact(artifact_id: str) -> bool:
 
 
 def read_content(artifact_id: str) -> Optional[tuple[bytes, str, str | None]]:
-    """Return (bytes, mime, filename) for an artifact, or None if not found.
-
-    Prefers the on-disk content file; falls back to the inline ``content``
-    field on legacy artifacts.
-    """
+    """Return (bytes, mime, filename) for an artifact, or None if not found."""
     artifact = get_artifact(artifact_id)
     if not artifact:
         return None
     mime = _mime_for(artifact)
     filename = artifact.get("filename")
-
     path = _content_path(artifact_id)
     if path.exists():
         return path.read_bytes(), mime, filename
-
-    inline = artifact.get("content", "")
-    if not inline:
-        # No on-disk file and no inline content. Empty body is a valid
-        # response for an existing artifact (e.g. a deliberately-empty note).
-        return b"", mime, filename
-
-    if artifact.get("type") in _BINARY_TYPES:
-        try:
-            return base64.b64decode(inline), mime, filename
-        except Exception:
-            return None
-    return inline.encode("utf-8"), mime, filename
+    # Missing content file for an existing artifact — return empty body
+    # (a valid response, e.g. an intentionally-empty note).
+    return b"", mime, filename

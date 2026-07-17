@@ -88,6 +88,14 @@ start() {
   key="$(mint_node_key)"
   scheme="wss"
   [ -f "$(dirname "$0")/certs/cert.pem" ] || scheme="ws"
+  # Screen-capture (x11grab, used by desktop/v1) needs an X display —
+  # the node inherits $DISPLAY from this shell. If it's unset the
+  # desktop tab will 500 on webrtc/offer with "no display: $DISPLAY not
+  # set" and the browser will show a "Node offline" card. Warn now so
+  # it's obvious before the user clicks Desktop.
+  if [ -z "${DISPLAY:-}" ]; then
+    echo "[dev-launch] warning: \$DISPLAY not set — desktop capture will fail. Re-run with e.g. 'DISPLAY=:0 ./dev-launch.sh' if you need the Desktop tab."
+  fi
   VIBR8_NODE_DATA_DIR="$DEV_NODE_DIR" \
     nohup uv run python -m vibr8_node \
       --hub "$scheme://127.0.0.1:$DEV_PORT" \

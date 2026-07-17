@@ -44,11 +44,15 @@ class HubBrowserBridge:
     async def broadcast_name_update(self, session_id: str, name: str, user_renamed: bool = False) -> None:
         return await self._ws_bridge.broadcast_name_update(session_id, name, user_renamed)
 
-    async def broadcast_ring0_switch_ui(self, target_session_id: str, *, client_id: str = "") -> bool:
-        return await self._ws_bridge.broadcast_ring0_switch_ui(target_session_id, client_id=client_id)
+    async def send_ring0_switch_ui(
+        self, target_session_id: str, *, client_id: str,
+    ) -> bool:
+        return await self._ws_bridge.send_ring0_switch_ui(
+            target_session_id, client_id=client_id,
+        )
 
-    async def broadcast_ring0_switch_node(self, node_id: str, *, client_id: str = "") -> bool:
-        return await self._ws_bridge.broadcast_ring0_switch_node(node_id, client_id=client_id)
+    async def send_ring0_switch_node(self, node_id: str, *, client_id: str) -> bool:
+        return await self._ws_bridge.send_ring0_switch_node(node_id, client_id=client_id)
 
     async def broadcast_to_all_browsers(self, msg: dict[str, Any]) -> None:
         return await self._ws_bridge.broadcast_to_all_browsers(msg)

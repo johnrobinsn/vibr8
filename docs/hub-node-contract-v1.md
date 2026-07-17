@@ -15,6 +15,46 @@ terminated. Binary payloads are base64 strings in `*B64` fields.
 
 ---
 
+## Design principles
+
+The plumbing below is shaped by three principles. Read them before adding
+a new route, message type, or capability flag — most "should this live on
+the hub?" questions have already been answered here.
+
+**1. Sessions are node-internal.** A session id is only meaningful on the
+node that owns it. Any operation that names a specific session id
+(`send_message`, `switch_ui`, `respond_permission`, `get_session_output`,
+…) is a **node-scoped** operation: Ring0 lives on the node, the session
+state lives on the node, and the vended iframe UI is served by the node.
+The node's own `ws_bridge` pushes session events (including `ring0_switch_ui`)
+down the iframe's session WS directly. Session-scoped work must never
+traverse the hub route table or the shell — no exceptions.
+
+**2. Shell contract is small and node-agnostic.** The shell knows about
+nodes; it does not know about sessions. Its allowed responsibilities:
+
+- Node selection: active-node dropdown, `/api/nodes/{id}/activate`,
+  `ring0_switch_node` pushes over `/ws/hub-shell/{clientId}`.
+- Voice pipeline: STT / TTS / guard word / voice modes (§B).
+- Theme, focus, tab visibility via the §D postMessage bridge.
+- Desktop viewer (frozen `desktop/v1`).
+
+The shell must not learn session ids, session names, permission requests,
+message content, or any other per-session state. If a proposed change
+would put "sessionId" on a shell WS message, on a `/ws/hub-shell/*`
+payload, on `/api/clients/*` state, or in a §D postMessage type — the
+change belongs on the node side instead.
+
+**3. `_HUB_ONLY_PREFIXES` shrinks over time, never grows.** The list in
+`vibr8_node/node_agent.py` enumerates the routes the node's hub-proxy
+middleware forwards to the hub. Every entry there is a hub-side
+dependency the node can't service locally. Adding a session-scoped route
+to that list is a **design smell** — it usually means the caller should
+be talking to the node's own copy of the route (via the node's local
+server) instead of round-tripping through the hub.
+
+---
+
 ## A. Plumbing
 
 ### A1. Registration (HTTP, node → hub)
@@ -180,3 +220,33 @@ The shell MUST function with an iframe that never sends `hello`
 3. Unknown message types and fields are silently ignored, never errors.
 4. Every new feature must answer: *node-land or contract?* Default
    node-land. Contract additions need a written amendment to this file.
+
+---
+
+## Future considerations
+
+### Binary payloads on the tunnel
+
+The tunnel is NDJSON with `*B64` fields for binary — every byte transmitted
+pays ~33% base64 overhead plus JSON escaping and per-line framing. Fine
+today for small vending traffic (HTML, JSON, small WS frames). Gets
+expensive for large or hot payloads: multi-megabyte artifact bytes over
+`http_request` / `response`, high-rate session streams, video/audio.
+Direct browser → node isn't an option (the outbound-only invariant is
+load-bearing). Escape hatch when it starts hurting:
+
+- **Binary WebSocket frames on the tunnel**: current channel multiplexing
+  is text-only (`ws_data.text` / `ws_data.dataB64`); a binary framing
+  addition could pass bytes as `ws_data.data` without base64. Requires a
+  new capability flag; keep the base64 path for pre-flag nodes.
+- **WebRTC data channels for bulk transfer**: `desktop/v1` already
+  negotiates WebRTC through the hub for screen frames + input; the same
+  peer connection could carry an artifact-bytes data channel. Uses UDP
+  hole-punching / TURN, so no inbound listener on the node.
+- **Hub-cached artifact CDN**: for immutable content (artifacts are
+  immutable by design), the node uploads once to the hub over the tunnel;
+  browsers fetch from the hub directly at native speed. Keeps the
+  outbound-only invariant but moves per-node storage semantics.
+
+None of these are urgent while the working set is small and warm-cached.
+Revisit when a specific payload class is measurably slow.

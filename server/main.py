@@ -862,7 +862,17 @@ def create_app() -> web.Application:
     app.router.add_get("/ws/node/{node_id}", handle_node_ws)
 
     # REST API
-    api_routes = create_routes(launcher, ws_bridge, session_store, worktree_tracker, webrtc_manager, terminal_manager, auth_manager, ring0_manager, node_registry, local_node_ops=local_node_ops, hub_browser_bridge=hub_browser_bridge)
+    api_routes = create_routes(
+        launcher, ws_bridge, session_store, worktree_tracker,
+        webrtc_manager, terminal_manager, auth_manager, ring0_manager,
+        node_registry,
+        local_node_ops=local_node_ops,
+        hub_browser_bridge=hub_browser_bridge,
+        # Artifacts are node-scoped under contract ui/v1 — the hub does
+        # not serve /api/artifacts. Browsers reach them via the
+        # /nodes/{id}/ vending proxy.
+        include_artifacts=False,
+    )
     app.router.add_routes(api_routes)
 
     # Node-vended UI proxy (contract ui/v1): /nodes/{id}/{ui,api,ws}/* over

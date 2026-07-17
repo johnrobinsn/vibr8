@@ -2733,91 +2733,65 @@ class WsBridge:
         self._persist_session(session)
         asyncio.ensure_future(self._push_to_all_native_clients("sessions_changed"))
 
-    async def broadcast_ring0_switch_ui(self, target_session_id: str, *, client_id: str = "") -> bool:
-        """Send ring0_switch_ui to a specific client or broadcast to all browsers.
+    async def send_ring0_switch_ui(
+        self, target_session_id: str, *, client_id: str,
+    ) -> bool:
+        """Send ring0_switch_ui to a single browser client.
 
-        The browser extracts the node ID from the qualified session ID
-        (nodeId:rawId) and switches node automatically.
+        switch_ui is a node-scoped operation under contract ui/v1: Ring0
+        lives on the node, the target session is on the node, and the
+        iframe UI is served by the node. This helper runs on the node's
+        own ws_bridge and pushes the message down the iframe's session
+        WS — the hub/shell are not involved. `client_id` is required.
 
-        Returns True if the message was sent successfully, False if the target client was not found.
+        Returns True if the message was sent successfully, False if the
+        target client was not connected.
         """
-        node_id, _ = self.parse_qualified_id(target_session_id)
-        msg_data: dict[str, Any] = {"type": "ring0_switch_ui", "sessionId": target_session_id}
-        if node_id:
-            msg_data["nodeId"] = node_id
-        messages = [json.dumps(msg_data)]
+        if not client_id:
+            raise ValueError("send_ring0_switch_ui requires client_id")
+        msg = json.dumps({"type": "ring0_switch_ui", "sessionId": target_session_id})
 
-        # Target a specific client if provided
-        if client_id:
-            ws = self._ws_by_client.get(client_id)
-            if not ws:
-                # Prefix match fallback
-                for cid, w in self._ws_by_client.items():
-                    if cid.startswith(client_id):
-                        ws = w
-                        break
-            if ws and not ws.closed:
-                try:
-                    for m in messages:
-                        await ws.send_str(m)
-                    return True
-                except Exception:
-                    pass
-            return False
+        ws = self._ws_by_client.get(client_id)
+        if not ws:
+            for cid, w in self._ws_by_client.items():
+                if cid.startswith(client_id):
+                    ws = w
+                    break
+        if ws and not ws.closed:
+            try:
+                await ws.send_str(msg)
+                return True
+            except Exception:
+                pass
+        return False
 
-        # Broadcast to all browsers
-        for session in self._sessions.values():
-            dead: list[web.WebSocketResponse] = []
-            for ws in session.browser_sockets:
-                try:
-                    for m in messages:
-                        await ws.send_str(m)
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                cid = session.browser_sockets.pop(ws, "")
-                if cid:
-                    self._cleanup_client_tracking_for_ws(cid, ws)
-        return True
+    async def send_ring0_switch_node(self, node_id: str, *, client_id: str) -> bool:
+        """Send ring0_switch_node to a single browser client.
 
-    async def broadcast_ring0_switch_node(self, node_id: str, *, client_id: str = "") -> bool:
-        """Send ring0_switch_node to a specific client or broadcast to all browsers.
+        Node switches originate from one speaker's request (voice command,
+        MCP call from Ring0), so we target that one client — never fan
+        out to every tab. `client_id` is required.
 
-        The browser updates its active-node selection in response. Mirrors
-        broadcast_ring0_switch_ui for the standalone node-switch case.
-
-        Returns True if sent successfully, False if the target client was not found.
+        Returns True if sent successfully, False if the target client was
+        not connected.
         """
+        if not client_id:
+            raise ValueError("send_ring0_switch_node requires client_id")
         msg = json.dumps({"type": "ring0_switch_node", "nodeId": node_id})
 
-        if client_id:
-            ws = self._ws_by_client.get(client_id)
-            if not ws:
-                for cid, w in self._ws_by_client.items():
-                    if cid.startswith(client_id):
-                        ws = w
-                        break
-            if ws and not ws.closed:
-                try:
-                    await ws.send_str(msg)
-                    return True
-                except Exception:
-                    pass
-            return False
-
-        # Broadcast to all browsers
-        for session in self._sessions.values():
-            dead: list[web.WebSocketResponse] = []
-            for ws in session.browser_sockets:
-                try:
-                    await ws.send_str(msg)
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                cid = session.browser_sockets.pop(ws, "")
-                if cid:
-                    self._cleanup_client_tracking_for_ws(cid, ws)
-        return True
+        ws = self._ws_by_client.get(client_id)
+        if not ws:
+            for cid, w in self._ws_by_client.items():
+                if cid.startswith(client_id):
+                    ws = w
+                    break
+        if ws and not ws.closed:
+            try:
+                await ws.send_str(msg)
+                return True
+            except Exception:
+                pass
+        return False
 
     def get_message_history(self, session_id: str) -> list[dict[str, Any]]:
         """Get message history for a session (used by Ring0 MCP)."""

@@ -11,7 +11,15 @@ import { SettingsPage } from "./SettingsPage.js";
 
 type View = "iframe" | "settings";
 
-export function NodeShellFrame({ nodeId }: { nodeId: string }) {
+export function NodeShellFrame({
+  nodeId,
+  pinned = false,
+}: {
+  nodeId: string;
+  /** When true, the node switcher dropdown is replaced with a static
+   * name label. Set by App.tsx when the URL carries ?pin=<node>. */
+  pinned?: boolean;
+}) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [view, setView] = useState<View>("iframe");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -74,23 +82,36 @@ export function NodeShellFrame({ nodeId }: { nodeId: string }) {
           <span className="text-sm font-semibold text-cc-fg tracking-tight">vibr8</span>
         </div>
         <span className="text-xs text-cc-muted">node</span>
-        <select
-          // Remount the native <select> whenever the id+status set of
-          // nodes changes — Chrome caches option `disabled` state on an
-          // already-mounted select, so React attribute updates alone
-          // don't refresh the visible dropdown until it's closed and
-          // reopened. A fresh key drops the cached widget entirely.
-          key={nodes.map((n) => `${n.id}:${n.status}`).join("|")}
-          value={activeNodeId}
-          onChange={(e) => useStore.getState().setActiveNode(e.target.value)}
-          className="px-2 py-1 text-xs rounded-lg bg-cc-bg border border-cc-border text-cc-fg cursor-pointer focus:outline-none focus:ring-1 focus:ring-cc-primary"
-        >
-          {nodes.map((n) => (
-            <option key={n.id} value={n.id} disabled={n.status === "offline"}>
-              {n.name} {n.status === "offline" ? "(offline)" : ""}
-            </option>
-          ))}
-        </select>
+        {pinned ? (
+          // Pinned deeplink (?pin=…) — hide the switcher, render just
+          // the current node's name. Node switching (voice command
+          // `vibr8 node <name>`, MCP switch_node) still writes to
+          // the store, but the shell URL keeps overriding on reload.
+          <span
+            className="px-2 py-1 text-xs text-cc-fg font-medium"
+            title="This URL is pinned to a single node"
+          >
+            {nodes.find((n) => n.id === nodeId)?.name ?? nodeId.slice(0, 8)}
+          </span>
+        ) : (
+          <select
+            // Remount the native <select> whenever the id+status set of
+            // nodes changes — Chrome caches option `disabled` state on an
+            // already-mounted select, so React attribute updates alone
+            // don't refresh the visible dropdown until it's closed and
+            // reopened. A fresh key drops the cached widget entirely.
+            key={nodes.map((n) => `${n.id}:${n.status}`).join("|")}
+            value={activeNodeId}
+            onChange={(e) => useStore.getState().setActiveNode(e.target.value)}
+            className="px-2 py-1 text-xs rounded-lg bg-cc-bg border border-cc-border text-cc-fg cursor-pointer focus:outline-none focus:ring-1 focus:ring-cc-primary"
+          >
+            {nodes.map((n) => (
+              <option key={n.id} value={n.id} disabled={n.status === "offline"}>
+                {n.name} {n.status === "offline" ? "(offline)" : ""}
+              </option>
+            ))}
+          </select>
+        )}
 
         {/* Node-published title (e.g. current session name). Empty when
             the node hasn't sent one; hidden so it doesn't reserve a gap. */}

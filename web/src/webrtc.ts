@@ -291,33 +291,47 @@ async function _connectDesktop(): Promise<void> {
     }
   };
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
+  // Handshake + signaling. If any of these fail (e.g. the node's
+  // screen capture errored — headless node with no $DISPLAY, screen
+  // capture unavailable, hub returning 5xx), close this peer and route
+  // through _handleDesktopDisconnect so the reconnect / "offline"
+  // policy fires. Previously the exception just bubbled out and left
+  // desktopStatus stuck at "connecting", so the UI spun forever
+  // instead of showing the offline card.
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
 
-  if (pc.iceGatheringState !== "complete") {
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 10_000);
-      pc.onicegatheringstatechange = () => {
-        if (pc.iceGatheringState === "complete") {
-          clearTimeout(timer);
-          resolve();
-        }
-      };
-    });
+    if (pc.iceGatheringState !== "complete") {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 10_000);
+        pc.onicegatheringstatechange = () => {
+          if (pc.iceGatheringState === "complete") {
+            clearTimeout(timer);
+            resolve();
+          }
+        };
+      });
+    }
+
+    const answer = await api.webrtcOffer(
+      desktopClientId,
+      { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
+      { tabId: useStore.getState().tabId, desktop: true, nodeId: useStore.getState().activeNodeId },
+    );
+
+    await pc.setRemoteDescription(
+      new RTCSessionDescription({ sdp: answer.sdp, type: answer.type as RTCSdpType }),
+    );
+
+    desktopSession = { pc, remoteVideoStream, inputChannel, statsInterval: null };
+    (_dw.__v8_desktop as unknown) = desktopSession;
+  } catch (err) {
+    console.error("[desktop] connect failed:", err);
+    try { pc.close(); } catch { /* ignore */ }
+    _handleDesktopDisconnect();
+    throw err;
   }
-
-  const answer = await api.webrtcOffer(
-    desktopClientId,
-    { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
-    { tabId: useStore.getState().tabId, desktop: true, nodeId: useStore.getState().activeNodeId },
-  );
-
-  await pc.setRemoteDescription(
-    new RTCSessionDescription({ sdp: answer.sdp, type: answer.type as RTCSdpType }),
-  );
-
-  desktopSession = { pc, remoteVideoStream, inputChannel, statsInterval: null };
-  (_dw.__v8_desktop as unknown) = desktopSession;
 }
 
 function _handleDesktopDisconnect(): void {

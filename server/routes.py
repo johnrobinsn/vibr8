@@ -157,6 +157,7 @@ def create_routes(
     node_registry: Any | None = None,
     local_node_ops: Any | None = None,
     hub_browser_bridge: Any | None = None,
+    include_artifacts: bool = True,
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
     node_register_rate: dict[str, list[float]] = {}
@@ -695,13 +696,13 @@ def create_routes(
             return web.json_response({"error": str(e)}, status=503)
         if not is_remote and ring0_manager and ring0_manager.session_id == sid:
             return web.json_response({"error": "Ring0 session cannot be renamed"}, status=403)
+        # `rename_session` on NodeOperations expands the id, sets the
+        # name, and broadcasts to browsers itself — no hub-side rebroadcast
+        # needed, and doing one here with `sid` (possibly a prefix) would
+        # miss the browser store keys anyway.
         result = await client.rename_session(session_id=raw_sid, name=name)
         if "error" in result:
             return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
-        # Broadcast to all browsers so other tabs/devices see the rename
-        # (hub-only side effect — remote nodes broadcast independently)
-        if not is_remote:
-            await hub_browser_bridge.broadcast_name_update(sid, name, user_renamed=True)
         return web.json_response(result)
 
     @routes.post("/api/sessions/{id}/kill")
@@ -1637,6 +1638,13 @@ def create_routes(
 
     @routes.post("/api/ring0/switch-ui")
     async def ring0_switch_ui(request: web.Request) -> web.Response:
+        # switch_ui is a node-scoped operation (contract ui/v1). This
+        # handler runs on the node's local server: Ring0 lives on the
+        # node, the target session is on the node, and the vended iframe
+        # UI is served by the node. The node's ws_bridge pushes
+        # ring0_switch_ui down the iframe's session WS — the hub and
+        # shell are not involved. `/api/ring0/switch-ui` is deliberately
+        # NOT in the node's hub-proxy list.
         try:
             body = await request.json()
         except Exception:
@@ -1645,23 +1653,30 @@ def create_routes(
         if not session_id:
             return web.json_response({"error": "sessionId required"}, status=400)
         try:
-            _client, raw_sid, _ = _resolve_client(session_id)
-            # Confirm the session exists on the target node before broadcasting.
-            sess = await _client.get_session(session_id=raw_sid)
+            client, raw_sid, _ = _resolve_client(session_id)
+            sess = await client.get_session(session_id=raw_sid)
             if "error" in sess:
-                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-            resolved = raw_sid
+                return web.json_response(
+                    {"error": f"Session not found: {session_id}"}, status=404,
+                )
         except Exception as e:
             return web.json_response({"error": str(e)}, status=503)
+        # Ring0 hands us an 8-char prefix (from list_sessions output);
+        # `get_session` internally expands it. Broadcast the *full* id so
+        # the browser's store keys (sessionNames, sdkSessions) match, or
+        # the title effect / connectSession will silently miss.
+        full_sid = sess.get("sessionId") or raw_sid
         client_id = body.get("clientId", "")
         if not client_id:
             client_id = hub_browser_bridge.get_ring0_prompt_client()
         if not client_id:
-            return web.json_response({"error": "clientId required — specify which client to switch"}, status=400)
-        sent = await hub_browser_bridge.broadcast_ring0_switch_ui(resolved, client_id=client_id)
+            return web.json_response(
+                {"error": "clientId required — specify which client to switch"}, status=400,
+            )
+        sent = await hub_browser_bridge.send_ring0_switch_ui(full_sid, client_id=client_id)
         if not sent:
             return web.json_response({"error": f"Client {client_id} not connected"}, status=400)
-        return web.json_response({"ok": True, "sessionId": resolved})
+        return web.json_response({"ok": True, "sessionId": full_sid})
 
     @routes.get("/api/ring0/prompt-context")
     async def ring0_prompt_context(request: web.Request) -> web.Response:
@@ -1669,7 +1684,12 @@ def create_routes(
         session_id = request.query.get("sessionId", "")
         if not client_id and not session_id:
             client_id = hub_browser_bridge.get_ring0_prompt_client()
-        result = await node_ops.prompt_context(
+        # Prompt context is hub-side state (voice sets the prompt client
+        # on the hub's ws_bridge). Older code called `node_ops.prompt_context`
+        # here — that name was never defined in this scope and would raise
+        # NameError; on the stateless hub `local_node_ops` is NOT_READY
+        # anyway, so we read the hub bridge directly.
+        result = ws_bridge.get_prompt_context(
             client_id=client_id,
             session_id=session_id,
         )
@@ -1869,21 +1889,16 @@ def create_routes(
         name = body.get("name", "").strip()
         if not sid or not name:
             return web.json_response({"error": "sessionId and name are required"}, status=400)
-        # Migrate via NodeClient; rename_session() updates the session-state
-        # half. The hub still drives the user-facing broadcast since the
-        # browsers connect here, not to the node (this comes apart cleanly
-        # in 4c-3 when the HubBrowserBridge split lands).
         try:
-            client, raw_sid, is_remote = _resolve_client(sid)
+            client, raw_sid, _ = _resolve_client(sid)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=503)
+        # NodeOperations.rename_session expands the id + broadcasts to
+        # browsers with the full id; no hub-side rebroadcast needed.
         result = await client.rename_session(session_id=raw_sid, name=name)
         if "error" in result:
             return web.json_response(result, status=_status_for_error(result["error"]))
-        resolved = sid  # qualified id stays as caller supplied it
-        if not is_remote:
-            await hub_browser_bridge.broadcast_name_update(resolved, name, user_renamed=True)
-        return web.json_response({"ok": True, "sessionId": resolved, "name": name})
+        return web.json_response(result)
 
     _ALLOWED_SESSION_MODES = {"plan", "acceptEdits", "bypassPermissions"}
 
@@ -1901,22 +1916,16 @@ def create_routes(
         if mode not in _ALLOWED_SESSION_MODES:
             return web.json_response({"error": f"mode must be one of: {', '.join(sorted(_ALLOWED_SESSION_MODES))}"}, status=400)
         try:
-            client, raw_sid, is_remote = _resolve_client(session_id)
+            client, raw_sid, _ = _resolve_client(session_id)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=503)
+        # NodeOperations.set_permission_mode expands the id + broadcasts
+        # session_update to browsers with the full id; no hub-side
+        # rebroadcast needed.
         result = await client.set_permission_mode(session_id=raw_sid, mode=mode)
         if "error" in result:
             return web.json_response(result, status=_status_for_error(result["error"]))
-        # Hub-side browser broadcast — for hub-local sessions only; remote
-        # nodes broadcast to their own bridge. (Will move to HubBrowserBridge
-        # in 4c-3.)
-        if not is_remote:
-            session = ws_bridge.get_session(raw_sid)
-            if session:
-                await hub_browser_bridge._broadcast_to_browsers(
-                    session, {"type": "session_update", "session": {"permissionMode": mode}},
-                )
-        return web.json_response({"ok": True, "sessionId": session_id, "mode": mode})
+        return web.json_response(result)
 
     @routes.get("/api/ring0/get-session-mode")
     async def ring0_get_session_mode(request: web.Request) -> web.Response:
@@ -2354,99 +2363,68 @@ def create_routes(
         })
 
     # ── Artifacts ─────────────────────────────────────────────────────────
+    # Artifacts are node-scoped under contract ui/v1 — storage, CRUD, and
+    # content bytes all live on the owning node's local aiohttp server.
+    # The hub does not proxy /api/artifacts (see vibr8_node/node_agent.py
+    # _HUB_ONLY_PREFIXES) and does not register these routes
+    # (server/main.py passes include_artifacts=False). Browsers reach
+    # artifacts through the hub's /nodes/{id}/ vending proxy.
 
-    @routes.get("/api/artifacts")
-    async def artifacts_list(request: web.Request) -> web.Response:
-        node_id = request.query.get("nodeId", "")
-        session_id = request.query.get("sessionId")
-        try:
-            client, _ = _resolve_node_client(node_id)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=503)
-        result = await client.artifacts_list(session_id=session_id)
-        return web.json_response(result.get("artifacts", []))
+    if include_artifacts:
 
-    @routes.post("/api/artifacts")
-    async def artifacts_create(request: web.Request) -> web.Response:
-        username = _get_username(request)
-        body = await request.json()
-        node_id = body.get("nodeId", "")
-        try:
-            client, _ = _resolve_node_client(node_id)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=503)
-        artifact = await client.artifacts_create(username=username, data=body)
-        return web.json_response(artifact)
+        @routes.get("/api/artifacts")
+        async def artifacts_list(request: web.Request) -> web.Response:
+            session_id = request.query.get("sessionId")
+            result = await local_node_ops.artifacts_list(session_id=session_id)
+            return web.json_response(result.get("artifacts", []))
 
-    @routes.delete("/api/artifacts/{id}")
-    async def artifacts_delete(request: web.Request) -> web.Response:
-        artifact_id = request.match_info["id"]
-        node_id = request.query.get("nodeId", "")
-        try:
-            client, _ = _resolve_node_client(node_id)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=503)
-        result = await client.artifacts_delete(artifact_id=artifact_id)
-        if "error" in result:
-            return web.json_response(result, status=404)
-        return web.json_response(result)
+        @routes.post("/api/artifacts")
+        async def artifacts_create(request: web.Request) -> web.Response:
+            username = _get_username(request)
+            body = await request.json()
+            artifact = await local_node_ops.artifacts_create(username=username, data=body)
+            return web.json_response(artifact)
 
-    @routes.get("/api/artifacts/{id}/content")
-    async def artifacts_get_content(request: web.Request) -> web.Response:
-        """Serve an artifact's raw bytes with the correct Content-Type.
-
-        Decouples payload size from the MCP/websocket transport: large
-        artifacts (audio, PDFs, images) ride this endpoint, not the
-        artifact-list response. Artifacts are immutable, so the response is
-        long-cached.
-        """
-        artifact_id = request.match_info["id"]
-        node_id = request.query.get("nodeId", "")
-
-        if node_id:
-            # Remote artifact — fetch bytes via tunnel (base64-encoded).
-            try:
-                client, _ = _resolve_node_client(node_id)
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=503)
-            result = await client.artifacts_read_content(artifact_id=artifact_id)
+        @routes.delete("/api/artifacts/{id}")
+        async def artifacts_delete(request: web.Request) -> web.Response:
+            artifact_id = request.match_info["id"]
+            result = await local_node_ops.artifacts_delete(artifact_id=artifact_id)
             if "error" in result:
+                return web.json_response(result, status=404)
+            return web.json_response(result)
+
+        @routes.get("/api/artifacts/{id}/content")
+        async def artifacts_get_content(request: web.Request) -> web.Response:
+            """Serve an artifact's raw bytes with the correct Content-Type.
+
+            Decouples payload size from the MCP/websocket transport: large
+            artifacts (audio, PDFs, images) ride this endpoint, not the
+            artifact-list response. Artifacts are immutable, so the
+            response is long-cached.
+            """
+            artifact_id = request.match_info["id"]
+            result = artifacts.read_content(artifact_id)
+            if result is None:
                 return web.Response(status=404, text="Not found")
-            import base64
-            body = base64.b64decode(result["contentBase64"])
-            mime = result.get("contentType", "application/octet-stream")
-            filename = result.get("filename")
+            body, mime, filename = result
+
+            # Download-type artifacts get `attachment` so the browser saves them
+            # instead of trying to render inline. The right MIME on top (e.g.
+            # application/vnd.android.package-archive for an .apk) is what makes
+            # mobile Chrome show the install prompt when the user taps.
+            artifact = artifacts.get_artifact(artifact_id)
+            disposition = "attachment" if artifact and artifacts.is_download_type(artifact.get("type", "")) else "inline"
+
             headers = {
                 "Content-Type": mime,
                 "Cache-Control": "public, max-age=31536000, immutable",
-                "Content-Disposition": (
-                    f'inline; filename="{filename}"' if filename else "inline"
-                ),
             }
+            if filename:
+                safe = filename.replace('"', "").replace("\r", "").replace("\n", "")
+                headers["Content-Disposition"] = f'{disposition}; filename="{safe}"'
+            else:
+                headers["Content-Disposition"] = disposition
             return web.Response(body=body, headers=headers)
-
-        result = artifacts.read_content(artifact_id)
-        if result is None:
-            return web.Response(status=404, text="Not found")
-        body, mime, filename = result
-
-        # Download-type artifacts get `attachment` so the browser saves them
-        # instead of trying to render inline. The right MIME on top (e.g.
-        # application/vnd.android.package-archive for an .apk) is what makes
-        # mobile Chrome show the install prompt when the user taps.
-        artifact = artifacts.get_artifact(artifact_id)
-        disposition = "attachment" if artifact and artifacts.is_download_type(artifact.get("type", "")) else "inline"
-
-        headers = {
-            "Content-Type": mime,
-            "Cache-Control": "public, max-age=31536000, immutable",
-        }
-        if filename:
-            safe = filename.replace('"', "").replace("\r", "").replace("\n", "")
-            headers["Content-Disposition"] = f'{disposition}; filename="{safe}"'
-        else:
-            headers["Content-Disposition"] = disposition
-        return web.Response(body=body, headers=headers)
 
     # ── Voice Logs ───────────────────────────────────────────────────────
 
@@ -2875,7 +2853,7 @@ def create_routes(
 
         Resolves the target client (from body `clientId` or the current
         Ring0 prompt context), updates that client's per-client active
-        node, and broadcasts `ring0_switch_node` so the browser's UI
+        node, and sends `ring0_switch_node` to that one client so its UI
         flips to match. Per-client state is the source of truth — see
         `POST /api/clients/{client_id}/active-node` for the direct form.
         """
@@ -2896,7 +2874,7 @@ def create_routes(
             client_id = hub_browser_bridge.get_ring0_prompt_client()
         if client_id:
             hub_browser_bridge.set_client_active_node(client_id, node_id)
-            await hub_browser_bridge.broadcast_ring0_switch_node(node_id, client_id=client_id)
+            await hub_browser_bridge.send_ring0_switch_node(node_id, client_id=client_id)
             logger.info("[nodes] client %s active node → %r (%s)", client_id[:8], name, node_id[:8])
         else:
             logger.warning("[nodes] activate %s called without a client context — no-op", node_id[:8])

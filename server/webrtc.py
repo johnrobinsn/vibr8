@@ -1361,7 +1361,7 @@ class WebRTCManager:
         asyncio.ensure_future(self._speak_short(client_id, f"Switched to node {target.name}"))
         if self._ws_bridge:
             asyncio.ensure_future(
-                self._hub_browser_bridge.broadcast_ring0_switch_node(target.id, client_id=client_id)
+                self._hub_browser_bridge.send_ring0_switch_node(target.id, client_id=client_id)
             )
 
     async def _consume_audio(

@@ -43,6 +43,7 @@ class NodeOperations:
         desktop_webrtc: Any = None,
         default_backend: str = "claude",
         work_dir: str = "",
+        node_id: str = "",
         on_sessions_changed: Optional[SessionsChangedCallback] = None,
         worktree_tracker: Any | None = None,
         task_scheduler: Any | None = None,
@@ -54,6 +55,11 @@ class NodeOperations:
         self._desktop_webrtc = desktop_webrtc
         self._default_backend = default_backend
         self._work_dir = work_dir
+        # This node's hub-assigned id, used to build vending-form URLs
+        # (e.g. artifact contentUrl). Empty on hub-side placeholder ops
+        # (NOT_READY) — anything that actually reads it is a node-side
+        # code path.
+        self._node_id = node_id
         self._on_sessions_changed = on_sessions_changed
         self._worktree_tracker = worktree_tracker
         self._scheduler = task_scheduler
@@ -287,8 +293,12 @@ class NodeOperations:
         if not name:
             return {"error": "name is required"}
         session_names.set_name(session_id, name, unique=False)
+        # Broadcast with the full id so browser stores (keyed on full ids)
+        # actually pick up the change. Ring0 hands us 8-char prefixes; if
+        # the broadcast used those, browsers would miss the update.
+        await self._bridge.broadcast_name_update(session_id, name, user_renamed=True)
         await self._notify_sessions_changed()
-        return {"ok": True, "name": name}
+        return {"ok": True, "sessionId": session_id, "name": name}
 
     # ── Messaging & permission ────────────────────────────────────────────
 
@@ -429,7 +439,12 @@ class NodeOperations:
         if not session:
             return {"error": f"Session {session_id} not found"}
         self._bridge._handle_set_permission_mode(session, mode)
-        return {"ok": True}
+        # Notify browsers so the mode chip updates immediately. Use the
+        # full id (post-expansion) so the browser store lookup keys match.
+        await self._bridge._broadcast_to_browsers(
+            session, {"type": "session_update", "session": {"permissionMode": mode}},
+        )
+        return {"ok": True, "sessionId": session_id, "mode": mode}
 
     async def respond_permission(
         self,
@@ -906,7 +921,7 @@ class NodeOperations:
 
     async def artifacts_create(self, username: str = "", data: dict | None = None) -> dict:
         from vibr8_core import artifacts
-        artifact = artifacts.create_artifact(username, data or {})
+        artifact = artifacts.create_artifact(username, data or {}, self._node_id)
         await self._bridge.broadcast_to_all_browsers({"type": "artifacts_changed"})
         return artifact
 

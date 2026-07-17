@@ -141,19 +141,6 @@ class NodeAgent:
             if self._ws and not self._ws.closed:
                 await self._send_sessions_update(self._ws)
 
-        self._ops = NodeOperations(
-            launcher=self._launcher,
-            bridge=self._bridge,
-            store=self._store,
-            ring0=self._ring0,
-            desktop_webrtc=self._desktop_webrtc,
-            default_backend=self.default_backend,
-            work_dir=self.work_dir,
-            worktree_tracker=self._worktree_tracker,
-            task_scheduler=self._scheduler,
-            on_sessions_changed=_on_sessions_changed,
-        )
-
         # Restore persisted state
         self._launcher.restore_from_disk()
         self._bridge.restore_from_disk()
@@ -162,10 +149,28 @@ class NodeAgent:
         # proxy middleware needs at app-construction time, and the hub
         # endpoint on Ring0 so its MCP subprocess (spawned by the auto-launch
         # below) starts with VIBR8_HUB_URL / VIBR8_HUB_TOKEN already in env.
+        # Also sets self.node_id, which NodeOperations captures to build
+        # vending-form URLs (e.g. artifact contentUrl).
         registered = await self._register()
         if not registered:
             logger.error("Failed to register with hub — exiting")
             return
+
+        # NodeOperations depends on self.node_id from registration — this
+        # is why it's constructed here rather than above the register call.
+        self._ops = NodeOperations(
+            launcher=self._launcher,
+            bridge=self._bridge,
+            store=self._store,
+            ring0=self._ring0,
+            desktop_webrtc=self._desktop_webrtc,
+            default_backend=self.default_backend,
+            work_dir=self.work_dir,
+            node_id=self.node_id,
+            worktree_tracker=self._worktree_tracker,
+            task_scheduler=self._scheduler,
+            on_sessions_changed=_on_sessions_changed,
+        )
 
         # Start minimal local aiohttp server for CLI WebSocket + Ring0 MCP
         await self._start_local_server()
@@ -527,9 +532,9 @@ class NodeAgent:
     def _make_hub_proxy_middleware(self):
         """Create aiohttp middleware that proxies hub-only routes to the hub.
 
-        Routes like /api/clients, /api/ring0/query-client, /api/ring0/switch-ui,
-        /api/second-screen/*, and /api/artifacts* operate on browser-side state
-        that only exists on the hub. On a node, these are forwarded.
+        Routes like /api/clients, /api/ring0/query-client, /api/second-screen/*,
+        and /api/artifacts* operate on browser-side state that only exists on
+        the hub. On a node, these are forwarded.
         """
         hub_http_url = self._hub_http_url()
         hub_token = self.hub_service_token
@@ -541,16 +546,21 @@ class NodeAgent:
         # routes (send-message, interrupt, respond-permission, …) run
         # locally; NodeOperations._expand_session_id handles the 8-char
         # prefixes Ring0 passes from list_sessions output.
+        # Notable exclusions:
+        #   * /api/ring0/switch-ui: session-scoped, stays node-local. The
+        #     node's ws_bridge pushes ring0_switch_ui down the iframe's
+        #     session WS — the switch never traverses the hub/shell.
+        #   * /api/artifacts: artifact storage is per-node
+        #     (~/.vibr8-node/{name}/artifacts/); the node serves CRUD and
+        #     content bytes locally. Browsers reach them through the
+        #     hub's /nodes/{id}/ vending proxy.
         _HUB_ONLY_PREFIXES = (
             "/api/clients",
             "/api/nodes",
             "/api/ring0/query-client",
-            "/api/ring0/switch-ui",
-            "/api/ring0/switch-audio",
             "/api/ring0/clients",
             "/api/ring0/prompt-context",
             "/api/second-screen/",
-            "/api/artifacts",
         )
 
         node_bridge = self._bridge
@@ -571,8 +581,7 @@ class NodeAgent:
             try:
                 body = await request.read() if request.can_read_body else None
                 _wants_client_id = (
-                    path in ("/api/ring0/switch-ui", "/api/ring0/switch-audio")
-                    or (path.startswith("/api/nodes/") and path.endswith("/activate"))
+                    path.startswith("/api/nodes/") and path.endswith("/activate")
                 )
                 if body and _wants_client_id and node_bridge:
                     import json as _json

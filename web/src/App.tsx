@@ -18,7 +18,10 @@ import { AgentControls } from "./components/AgentControls.js";
 import { ViewerPane } from "./components/ViewerPane.js";
 import { NodeShellFrame } from "./components/NodeShellFrame.js";
 import { EmptyHubState } from "./components/EmptyHubState.js";
+import { PinnedNodeUnavailable } from "./components/PinnedNodeUnavailable.js";
+import { PINNED_NODE, resolvePinnedNode } from "./pinnedNode.js";
 import { connectSession, disconnectSession } from "./ws.js";
+import { dispatchHubShellMessage } from "./hubShellRouter.js";
 import { startWebRTC, setAudioInOnly } from "./webrtc.js";
 import { NODE_MODE, BASE_PREFIX } from "./nodeMode.js";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
@@ -123,14 +126,10 @@ export default function App() {
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       ws = new WebSocket(`${proto}//${location.host}/ws/hub-shell/${encodeURIComponent(cid)}`);
       ws.onmessage = (e) => {
-        try {
-          const d = JSON.parse(e.data);
-          if (d?.type === "voice_mode") {
-            useStore.getState().setVoiceMode(d.mode ?? null);
-          } else if (d?.type === "node_title") {
-            useStore.getState().setNodeTitle(d.nodeId, d.text ?? "");
-          }
-        } catch {}
+        // Router table lives in hubShellRouter.ts; unknown types log
+        // a warning so gaps between the server's push types and the
+        // shell's handlers become visible in dev.
+        dispatchHubShellMessage(e.data);
       };
       ws.onclose = () => {
         if (!alive) return;
@@ -417,10 +416,40 @@ export default function App() {
   // active for this tab. Falls back to the first online ui/v1 node if
   // the persisted activeNodeId doesn't match a usable one; falls back
   // to the empty-state bootstrap when no usable node exists.
+  //
+  // Deeplink: `/@<node-name-or-id>` (or `/n/<name>`, or the legacy
+  // `?pin=<name>` query form) restricts the shell to a single node
+  // and shows a pin-specific unavailable card if that node isn't
+  // registered/online — never silently falls back to a different node.
   if (!NODE_MODE) {
     const usable = nodes.filter(
       (n) => n.status === "online" && n.contract?.includes("ui/v1"),
     );
+
+    if (PINNED_NODE) {
+      const pinSpec = PINNED_NODE;  // local const so TS narrowing survives inside the closure below
+      const pinned = resolvePinnedNode(pinSpec, usable);
+      if (pinned) {
+        if (activeNodeId !== pinned.id) {
+          useStore.getState().setActiveNode(pinned.id);
+        }
+        return <NodeShellFrame nodeId={pinned.id} pinned />;
+      }
+      // Pin doesn't resolve to an online usable node. Distinguish
+      // "known but offline" from "not registered" so the user knows
+      // whether to bring the node online or fix the URL.
+      const pinLower = pinSpec.toLowerCase();
+      const registered = nodes.some(
+        (n) => n.name.toLowerCase() === pinLower || n.id.startsWith(pinSpec),
+      );
+      return (
+        <PinnedNodeUnavailable
+          pin={pinSpec}
+          reason={registered ? "offline" : "unregistered"}
+        />
+      );
+    }
+
     const frameTarget =
       usable.find((n) => n.id === activeNodeId) || usable[0];
     if (frameTarget) {
