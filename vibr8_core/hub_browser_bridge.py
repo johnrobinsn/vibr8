@@ -35,6 +35,13 @@ class HubBrowserBridge:
         # operations read this map. Replaces hub-wide
         # `node_registry.active_node_id`.
         self._client_active_nodes: dict[str, str] = {}
+        # Per-client deeplink pin. The shell tab uses `/@<node>` in its
+        # URL to lock the tab to one node; the shell reports the resolved
+        # node id back to the hub via `POST /api/clients/{id}/active-node`
+        # so the hub can refuse a conflicting Ring0/voice `switch_node`
+        # rather than pretending to switch and having the client silently
+        # snap back. Empty / missing entry means unpinned.
+        self._client_pinned_nodes: dict[str, str] = {}
 
     # Enumerated explicitly for IDE discovery and to document the surface;
     # __getattr__ below handles anything we missed.
@@ -97,6 +104,35 @@ class HubBrowserBridge:
 
     def clear_client_active_node(self, client_id: str) -> None:
         self._client_active_nodes.pop(client_id, None)
+
+    # ── Per-client deeplink pin ──────────────────────────────────────────
+
+    def set_client_pin(self, client_id: str, pinned_node_id: str) -> None:
+        """Record (or clear) the deeplink pin for a client. Empty
+        ``pinned_node_id`` clears the pin — call this on every
+        active-node POST so a client that navigates away from
+        ``/@<node>`` has its stale pin cleared."""
+        if not client_id:
+            return
+        if pinned_node_id:
+            self._client_pinned_nodes[client_id] = pinned_node_id
+        else:
+            self._client_pinned_nodes.pop(client_id, None)
+
+    def get_client_pin(self, client_id: str) -> str:
+        """Return the client's pinned node id, or ``""`` if unpinned."""
+        if not client_id:
+            return ""
+        return self._client_pinned_nodes.get(client_id, "")
+
+    def would_conflict_with_pin(self, client_id: str, target_node_id: str) -> str:
+        """If activating ``target_node_id`` on this client would conflict
+        with an existing pin, return the pinned node id. Otherwise return
+        ``""`` (unpinned, or pin matches target)."""
+        pinned = self.get_client_pin(client_id)
+        if pinned and pinned != target_node_id:
+            return pinned
+        return ""
 
     # ── Catch-all ────────────────────────────────────────────────────────
 

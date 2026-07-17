@@ -219,8 +219,17 @@ export default function App() {
   // shell owns the active-node concept, not the embedded UI.
   useEffect(() => {
     if (NODE_MODE) return;
-    api.setClientActiveNode(clientId, activeNodeId).catch(() => {});
-  }, [clientId, activeNodeId]);
+    // Include the pinned nodeId (if any) so the hub can refuse a
+    // conflicting Ring0/voice switch_node against this client and
+    // return an honest error to Ring0 instead of pretending to
+    // switch. Resolves lazily against the current nodes list — the
+    // pin might not resolve to an id until the node registry has
+    // been fetched, which is fine (unpinned-looking to the hub in
+    // the meantime, corrected on the next poll tick).
+    const pinnedId =
+      PINNED_NODE ? resolvePinnedNode(PINNED_NODE, nodes)?.id ?? null : null;
+    api.setClientActiveNode(clientId, activeNodeId, pinnedId).catch(() => {});
+  }, [clientId, activeNodeId, nodes]);
 
   // In NODE_MODE (this bundle is running inside a node-vended iframe),
   // publish whatever the node's TopBar shows as its title so the hub

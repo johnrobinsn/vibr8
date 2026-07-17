@@ -2856,6 +2856,11 @@ def create_routes(
         node, and sends `ring0_switch_node` to that one client so its UI
         flips to match. Per-client state is the source of truth — see
         `POST /api/clients/{client_id}/active-node` for the direct form.
+
+        If the resolved client is deeplink-pinned (its shell URL is
+        `/@<node>`) to a *different* node, this endpoint returns 409 so
+        Ring0's `switch_node` tool tells the user "can't switch, this
+        tab is pinned" rather than silently no-op'ing.
         """
         if node_registry is None:
             return web.json_response({"error": "Node registry not available"}, status=503)
@@ -2872,7 +2877,27 @@ def create_routes(
         client_id = (body.get("clientId") if isinstance(body, dict) else "") or ""
         if not client_id:
             client_id = hub_browser_bridge.get_ring0_prompt_client()
+
         if client_id:
+            pinned_id = hub_browser_bridge.would_conflict_with_pin(client_id, node_id)
+            if pinned_id:
+                pinned_node = node_registry.get_node(pinned_id)
+                pinned_label = pinned_node.name if pinned_node else pinned_id[:8]
+                logger.info(
+                    "[nodes] activate %s denied — client %s pinned to %r (%s)",
+                    node_id[:8], client_id[:8], pinned_label, pinned_id[:8],
+                )
+                return web.json_response(
+                    {
+                        "error": (
+                            f"Client is pinned to node '{pinned_label}' "
+                            f"(URL uses /@{pinned_label}) — the switch was refused."
+                        ),
+                        "pinnedNodeId": pinned_id,
+                        "pinnedNodeName": pinned_label,
+                    },
+                    status=409,
+                )
             hub_browser_bridge.set_client_active_node(client_id, node_id)
             await hub_browser_bridge.send_ring0_switch_node(node_id, client_id=client_id)
             logger.info("[nodes] client %s active node → %r (%s)", client_id[:8], name, node_id[:8])
@@ -2888,12 +2913,28 @@ def create_routes(
         Per-client (and eventually per-tab) active node replaces the
         hub-wide `node_registry.active_node_id`. Voice routing and UI
         operations should read from this map.
+
+        Optional body field ``pinnedNodeId`` records the shell's
+        deeplink pin (from `/@<node>`) so the hub can refuse a
+        conflicting Ring0/voice `switch_node`. Pass explicit ``null``
+        or omit to clear any prior pin (tab navigated away from
+        `/@<node>`).
         """
         client_id = request.match_info["client_id"]
         body = await request.json() if request.content_length else {}
         node_id = (body.get("nodeId") if isinstance(body, dict) else "") or ""
+        pinned_node_id = ""
+        if isinstance(body, dict):
+            _p = body.get("pinnedNodeId")
+            pinned_node_id = _p if isinstance(_p, str) else ""
         hub_browser_bridge.set_client_active_node(client_id, node_id)
-        logger.info("[nodes] client %s active node → %s", client_id[:8], node_id[:8] or "(none)")
+        hub_browser_bridge.set_client_pin(client_id, pinned_node_id)
+        logger.info(
+            "[nodes] client %s active node → %s%s",
+            client_id[:8],
+            node_id[:8] or "(none)",
+            f" (pinned {pinned_node_id[:8]})" if pinned_node_id else "",
+        )
         return web.json_response({"ok": True, "clientId": client_id, "nodeId": node_id})
 
     @routes.post("/api/nodes/hub-name")

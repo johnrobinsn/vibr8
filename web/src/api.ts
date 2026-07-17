@@ -545,10 +545,18 @@ export const api = {
 
   // Nodes
   listNodes: () => get<NodeInfo[]>("/nodes"),
-  setClientActiveNode: (clientId: string, nodeId: string) =>
+  setClientActiveNode: (
+    clientId: string,
+    nodeId: string,
+    // Optional: the id of the node this tab is deeplink-pinned to
+    // (`/@<node>` in the URL). The hub uses it to reject conflicting
+    // Ring0/voice switch_node attempts against this client. Pass null
+    // when the tab is unpinned so the hub clears any prior pin state.
+    pinnedNodeId?: string | null,
+  ) =>
     post<{ ok: boolean; clientId: string; nodeId: string }>(
       `/clients/${encodeURIComponent(clientId)}/active-node`,
-      { nodeId },
+      pinnedNodeId ? { nodeId, pinnedNodeId } : { nodeId, pinnedNodeId: null },
     ),
 
   // Node API keys

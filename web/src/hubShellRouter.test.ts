@@ -62,7 +62,7 @@ describe("dispatchHubShellMessage", () => {
     expect(nodes.find((n) => n.id === "node-a")?.title).toBe("current-session");
   });
 
-  it("routes ring0_switch_node via applyLocalNodeSwitch", () => {
+  it("routes ring0_switch_node via applyLocalNodeSwitch when the tab is unpinned", () => {
     // applyLocalNodeSwitch bails on empty / no-change, so we set an
     // initial node id different from the target.
     store.useStore.setState({
@@ -79,6 +79,36 @@ describe("dispatchHubShellMessage", () => {
     expect(ok).toBe(true);
     expect(spy).toHaveBeenCalledWith("node-b");
     spy.mockRestore();
+  });
+
+  it("drops ring0_switch_node when the tab is pinned — client-side belt to the server-side denial", async () => {
+    // Simulate a deeplinked shell: PINNED_NODE is truthy. Because the
+    // module-level constant is read at import time, we reset modules,
+    // mock ./pinnedNode.js to return a fixed value, and re-import the
+    // router so it picks up the mocked module.
+    vi.resetModules();
+    vi.doMock("./pinnedNode.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("./pinnedNode.js")>();
+      return { ...actual, PINNED_NODE: "blah" };
+    });
+    const pinnedRouter = await import("./hubShellRouter.js");
+    const pinnedWs = await import("./ws.js");
+    const spy = vi.spyOn(pinnedWs, "applyLocalNodeSwitch");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const ok = pinnedRouter.dispatchHubShellMessage(
+      JSON.stringify({ type: "ring0_switch_node", nodeId: "other-node" }),
+    );
+    // Router still returns true — the handler ran and made a
+    // deliberate choice to drop the message.
+    expect(ok).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("ignored — tab is pinned to 'blah'"),
+    );
+    spy.mockRestore();
+    warn.mockRestore();
+    vi.doUnmock("./pinnedNode.js");
   });
 
   it("warns and returns false on an unknown type — the visible signal that a new server push type needs a shell handler", () => {

@@ -1355,6 +1355,20 @@ class WebRTCManager:
         if target.status != "online":
             asyncio.ensure_future(self._speak_short(client_id, f"{target.name} is offline"))
             return
+        # Refuse the switch if the client's tab is deeplink-pinned (URL
+        # uses /@<node>) to a different node — otherwise we'd tell the
+        # user "switched to X" while the pinned tab silently snaps back.
+        pinned_id = self._hub_browser_bridge.would_conflict_with_pin(client_id, target.id)
+        if pinned_id:
+            pinned_node = self._node_registry.get_node(pinned_id)
+            pinned_label = pinned_node.name if pinned_node else pinned_id[:8]
+            asyncio.ensure_future(
+                self._speak_short(
+                    client_id,
+                    f"This tab is pinned to {pinned_label}. Open a new tab to switch.",
+                )
+            )
+            return
 
         self._hub_browser_bridge.set_client_active_node(client_id, target.id)
         logger.info("[voice] client %s switched to node %r (id=%s) via voice command", client_id[:8], target.name, target.id[:8])
