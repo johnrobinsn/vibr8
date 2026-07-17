@@ -420,6 +420,8 @@ class TaskScheduler:
                     continue
                 logger.info("[scheduler] Missed run for task %s (%s), executing now (%.1fh overdue)",
                              task.id, task.name, age / 3600)
+                task.next_run_at = compute_next_run(task, after=now)
+                self._save_task(task)
                 self._schedule_task_execution(task, is_missed_run=True)
 
     async def _run_loop(self) -> None:
