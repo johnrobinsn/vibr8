@@ -284,6 +284,10 @@ async function _connectDesktop(): Promise<void> {
       _desktopReconnectAttempt = 0;
       const store = useStore.getState();
       store.setDesktopStatus("connected");
+      // A successful connect clears any prior signaling error so the
+      // overlay stops naming it (the retry that succeeded is proof
+      // that whatever the server was complaining about is fixed).
+      store.setDesktopError(null);
       // Start stats polling
       _startDesktopStats(pc);
     } else if (state === "failed" || state === "disconnected") {
@@ -327,7 +331,15 @@ async function _connectDesktop(): Promise<void> {
     desktopSession = { pc, remoteVideoStream, inputChannel, statsInterval: null };
     (_dw.__v8_desktop as unknown) = desktopSession;
   } catch (err) {
-    console.error("[desktop] connect failed:", err);
+    // Surface the server's real reason (e.g. "$DISPLAY not set" for a
+    // headless node) so the DesktopView overlay can name it instead
+    // of showing a generic "Node offline". api.ts throws `Error(err.error
+    // || res.statusText)` — err.message here is the server's JSON
+    // `.error` string when the response was well-formed.
+    const msg =
+      err instanceof Error && err.message ? err.message : String(err);
+    console.error("[desktop] connect failed:", msg);
+    useStore.getState().setDesktopError(msg);
     try { pc.close(); } catch { /* ignore */ }
     _handleDesktopDisconnect();
     throw err;
@@ -433,13 +445,18 @@ export function stopDesktopStream(): void {
   store.setDesktopRemoteStream(null);
   store.setDesktopStatus("idle");
   store.setDesktopStats(null);
+  store.setDesktopError(null);
 }
 
 /** Retry connection once (from "offline" state). */
 export function retryDesktopStream(): void {
   _desktopUserStopped = false;
   _desktopReconnectAttempt = 0;
-  useStore.getState().setDesktopStatus("connecting");
+  const store = useStore.getState();
+  store.setDesktopStatus("connecting");
+  // Drop stale error text — if the retry fails, _connectDesktop
+  // repopulates it with the fresh reason.
+  store.setDesktopError(null);
   _connectDesktop().catch(() => _handleDesktopDisconnect());
 }
 

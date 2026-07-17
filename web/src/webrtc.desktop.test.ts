@@ -143,4 +143,15 @@ describe("startDesktopStream — signaling failure", () => {
     // stale video frame under the offline card.
     expect(useStore.getState().desktopStreamActive).toBe(false);
   });
+
+  it("captures the server error message so DesktopView can show it instead of a generic 'Node offline'", async () => {
+    void webrtc.startWebRTC({ desktop: true }).catch(() => {});
+
+    // Let the first attempt settle — desktopError should be populated
+    // immediately after the offer's rejection propagates through the
+    // catch block, without waiting for the retries to exhaust.
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+
+    expect(useStore.getState().desktopError).toBe("HTTP 500: NoDisplayError");
+  });
 });

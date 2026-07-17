@@ -131,6 +131,12 @@ interface AppState {
   desktopRemoteStream: MediaStream | null;
   desktopStatus: "idle" | "connecting" | "connected" | "reconnecting" | "offline";
   desktopStats: { fps: number; bitrate: number; rtt: number } | null;
+  // Last connect error surfaced to the user. Populated when the signaling
+  // fetch throws (e.g. server returns 500 with `$DISPLAY not set` because
+  // the node is headless) so the offline / reconnecting overlays can show
+  // the actual reason instead of a generic "Node offline". Cleared on
+  // successful connect and on explicit user stop.
+  desktopError: string | null;
 
   // Focus management
   pendingFocus: "composer" | "terminal" | "home" | null;
@@ -263,6 +269,7 @@ interface AppState {
   setDesktopRemoteStream: (stream: MediaStream | null) => void;
   setDesktopStatus: (status: "idle" | "connecting" | "connected" | "reconnecting" | "offline") => void;
   setDesktopStats: (stats: { fps: number; bitrate: number; rtt: number } | null) => void;
+  setDesktopError: (message: string | null) => void;
 
   // Focus management actions
   setPendingFocus: (target: "composer" | "terminal" | "home" | null) => void;
@@ -368,6 +375,7 @@ export const useStore = create<AppState>((set, get) => ({
   desktopRemoteStream: null,
   desktopStatus: "idle" as const,
   desktopStats: null,
+  desktopError: null,
   guardEnabled: typeof window !== "undefined" ? localStorage.getItem("cc-guard-enabled") !== "false" : true,
   voiceMode: null,
   activeAudioInputLabel: null,
@@ -930,6 +938,7 @@ export const useStore = create<AppState>((set, get) => ({
   setDesktopRemoteStream: (stream) => set({ desktopRemoteStream: stream }),
   setDesktopStatus: (status) => set({ desktopStatus: status }),
   setDesktopStats: (stats) => set({ desktopStats: stats }),
+  setDesktopError: (message) => set({ desktopError: message }),
   setGuardEnabled: (enabled) => {
     localStorage.setItem("cc-guard-enabled", String(enabled));
     set({ guardEnabled: enabled });
@@ -1057,6 +1066,7 @@ export const useStore = create<AppState>((set, get) => ({
       desktopRemoteStream: null,
       desktopStatus: "idle" as const,
       desktopStats: null,
+      desktopError: null,
       guardEnabled: true,
       voiceMode: null,
       activeAudioInputLabel: null,
