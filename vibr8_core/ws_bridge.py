@@ -47,8 +47,27 @@ NATIVE_INBOUND_TYPES: frozenset[str] = frozenset({
 
 # Server → native client, fire-and-forget push events (only reach a
 # client that has subscribed via ``{"type": "subscribe"}``). Message
-# shape: ``{"type": "push", "event": <name>, "sessionId": <sid>, ...}``.
+# shape: ``{"type": "push", "event": <name>, ...envelope..., ...payload...}``.
+# Under the node-agnostic observer contract (see
+# docs/native-client-contract.md §B2) the wire surface reduces to
+# ``attention`` and ``busy`` — both are relays of events/v1 hooks the
+# hub already receives from nodes, enriched by the hub with
+# ``nodeId`` + ``nodeName`` so notifications can name the source node.
 NATIVE_PUSH_EVENTS: frozenset[str] = frozenset({
+    "attention",
+    "busy",
+})
+
+# Transitional: legacy event names still fired by pre-migration code
+# in this file (`_push_to_native_clients(session.id, "…")`). None of
+# these currently reach any native client — under contract ui/v1 the
+# ``vibr8_node``-specific `WsBridge` instances run on nodes, whose
+# `_native_ws_by_client` map is empty (Android connects only to the
+# hub). They are pinned here so the source-parsing test can distinguish
+# "known dark, being migrated" from "someone added a new push type
+# without updating the contract". This set MUST shrink to empty as
+# the fires are ported to `_attention_hook` (per docs) or deleted.
+_NATIVE_PUSH_EVENTS_LEGACY_DARK: frozenset[str] = frozenset({
     "guard_state",
     "tts_muted",
     "voice_mode",
@@ -145,9 +164,17 @@ class WsBridge:
         # NodeAgent. speak(text): this node's Ring0 wants TTS; busy(bool):
         # Ring0 working/idle; attention(reason): node wants the user. All
         # None on the hub's own bridge.
+        # Events/v1 hooks. NodeAgent wires them at startup so the node
+        # can emit these into the tunnel; on the hub they stay None
+        # (there's no "up-stream" to relay to). `_attention_hook` grew
+        # additive kwargs (severity/context_key/expires_at) for the
+        # observer channel that carries these events to native clients —
+        # implementers pass whatever context is available and the hub
+        # forwards it verbatim to subscribed native observers. All kwargs
+        # are optional so existing single-arg call sites keep working.
         self._speak_hook: Callable[[str], Awaitable[None]] | None = None
         self._busy_hook: Callable[[bool], Awaitable[None]] | None = None
-        self._attention_hook: Callable[[str], Awaitable[None]] | None = None
+        self._attention_hook: Callable[..., Awaitable[None]] | None = None
         self._computer_use_agents: dict[str, Any] = {}  # session_id → ComputerUseAgent
         self._active_tts: dict[str, Any] = {}  # session_id → TTSEngine instance
         self._thinking_timers: dict[str, asyncio.TimerHandle] = {}
@@ -2497,8 +2524,16 @@ class WsBridge:
         if self._attention_hook and transition.endswith("waiting_for_permission"):
             from vibr8_core import session_names
             name = session_names.get_name(session.id) or session.id[:8]
+            # Reuse the session id as the contextKey: subsequent attentions
+            # about the same session collapse into one notification on the
+            # native side rather than stacking. Severity "warning" — the
+            # user is blocked, but nothing is on fire.
             asyncio.ensure_future(
-                self._attention_hook(f"session {name} is waiting for permission")
+                self._attention_hook(
+                    f"session {name} is waiting for permission",
+                    severity="warning",
+                    context_key=f"perm:{session.id}",
+                )
             )
 
     # ── "Take the Pen" helpers ───────────────────────────────────────────

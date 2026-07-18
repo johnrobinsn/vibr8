@@ -105,45 +105,80 @@ the constant and this table.
 
 ### B2. Push events (fire-and-forget, subscribed clients only)
 
-Pinned set: **`vibr8_core.ws_bridge.NATIVE_PUSH_EVENTS`**. A test
-asserts every `_push_to_native_clients(..., "<event>", ...)` call
-site in `ws_bridge.py` uses an event name from this set.
+Pinned set: **`vibr8_core.ws_bridge.NATIVE_PUSH_EVENTS`**. Two
+events only. A test asserts every push call site uses either an
+event in this set or the transitional
+`_NATIVE_PUSH_EVENTS_LEGACY_DARK` set (see §"Migration status" at
+the bottom of this doc).
 
 Message shape:
 
 ```json
-{ "type": "push", "event": "<name>", "sessionId": "<sid>", …extra… }
+{ "type": "push",
+  "event": "<name>",
+  "nodeId": "<hub-registered id>",
+  "nodeName": "<hub-registered name>",
+  …event-specific fields }
 ```
 
-Reaches only clients that have sent `{"type": "subscribe", …}`
-first (see B3 below). Unsubscribed native clients receive nothing
-from this channel.
+`nodeId` and `nodeName` are populated by the *hub* from the
+tunnel-authenticated source; nodes cannot spoof each other's
+identity. Reaches only clients that have sent
+`{"type": "subscribe", …}` first (see §C). Unsubscribed native
+clients receive nothing from this channel.
 
-| event | extra fields | fires when |
+#### `attention`
+
+"This node wants the user, now, out-of-band." Origin: the node
+emits an events/v1 `attention` tunnel event (see
+`hub-node-contract-v1.md` §B); the hub relays it to native
+observers with the envelope above.
+
+Payload fields (all string-typed; all beyond `reason` optional):
+
+| field | required | meaning |
 |---|---|---|
-| `permission_request` | `request: { … }` | The CLI in a subscribed session asks for a tool-use permission. |
-| `permission_cancelled` | `request_id: string` | A pending permission was resolved (by another surface) before this client acted. |
-| `status_change` | `status: "idle"\|"running"\|…`, plus session-specific fields | Session lifecycle transition. |
-| `cli_connected` | *(none extra)* | The CLI subprocess connected to the session. |
-| `cli_disconnected` | *(none extra)* | The CLI subprocess exited or dropped. |
-| `sessions_changed` | *(none)* | The session list changed (add / archive / delete / rename). Not scoped to a session. |
-| `guard_state` | `enabled: boolean` | Voice guard mode toggled (user-level). |
-| `tts_muted` | `muted: boolean` | TTS mute toggled (user-level). |
-| `voice_mode` | `mode: string \| null` | Voice mode changed (user-level). |
+| `reason` | yes | Display-ready one-liner. The client renders this verbatim as the notification body. Do not parse it for structure. |
+| `severity` | no | `"info"` \| `"warning"` \| `"urgent"`. Defaults to `"info"`. Clients may map to notification channels / priorities. |
+| `contextKey` | no | Dedup key. Re-fires with the same key from the same node **replace** the prior notification rather than stacking. |
+| `expiresAt` | no | ISO-8601. Clients may auto-clear a stale notification past this. |
 
-**Current Android wrapper does not consume these.** The shipping
-`KeepAliveService` in `vibr8-android` never sends `subscribe`, so it
-never triggers the emit path — every `_push_to_native_clients` call
-sees an empty subscriber set and drops. A future Android update can
-opt in without a server-side change.
+**Client contract:** render an OS notification with `nodeName` as
+title, `reason` as body; use `contextKey` as the notification id
+so duplicates collapse; elevate to a high-priority channel with
+vibration when `severity: "urgent"`; auto-clear after
+`expiresAt` if the user hasn't acted; tap → invoke the local
+`bring_to_foreground` action.
 
-Under contract ui/v1 the sessions that generate these pushes live
-on **nodes**, but `/ws/native/*` is registered only on the **hub**.
-That means today's server-side pushes fire from the *node's*
-`ws_bridge` into an empty `_native_ws_by_client` map — they do not
-reach any Android client at all. Fixing that is a design item
-separate from this contract; when it lands it will keep the
-push-event names above stable.
+**Client MUST NOT:** parse `reason`; assume delivery reliability;
+assume causal ordering with other events; treat missing
+optional fields as errors.
+
+**Clearing without action:** send another `attention` with the
+same `contextKey`. Explicit `attention_cleared` is a v2 addition
+if needed.
+
+#### `busy`
+
+"This node's main worker is / isn't currently active."
+Level-triggered — the last value is the current state until the
+next event supersedes it.
+
+| field | required | meaning |
+|---|---|---|
+| `busy` | yes | Boolean. `true` means the node's Ring0 (or main worker) is doing something; `false` means idle. |
+
+**Client contract:** update ambient status (persistent
+foreground-service notification text, tray-icon state,
+optional badge count on the 0→N or N→0 transition). Do **not**
+fire a user-facing OS notification. Do **not** infer session
+count or work quantity.
+
+**Delivery guarantees (both events):** best-effort. WebSocket
+drop = the event drops; not persisted, not replayed on reconnect.
+For urgent-severity attention that must survive a dead socket,
+FCM (or equivalent) is the future layer — kept out of v1 to
+preserve the "additive only" constraint on this contract.
 
 ---
 
@@ -184,10 +219,49 @@ because there's no `type` field.
 - **Server side**: all three sets are in use (see `ws_bridge.py`).
   `rpc_call` looks up `NATIVE_RPC_COMMANDS` to decide whether to
   prefer the native socket over the WebView; `handle_native_message`
-  dispatches on `NATIVE_INBOUND_TYPES`; `_push_to_native_clients`
-  emits events from `NATIVE_PUSH_EVENTS`.
+  dispatches on `NATIVE_INBOUND_TYPES`; the hub's tunnel handler for
+  `events/v1` `attention` and `busy` relays them to
+  `_push_to_all_native_clients` on the hub bridge, enriched with
+  `nodeId` and `nodeName`.
 - **Android wrapper** (`vibr8-android`): implements the RPC command
-  channel (both entries in `NATIVE_RPC_COMMANDS`). Does not send
-  `subscribe`, `unsubscribe`, or `permission_response`; ignores
-  push events. This is a strict subset of the surface described
-  here, per the "strict receiver" principle in §Design principles.
+  channel (both entries in `NATIVE_RPC_COMMANDS`). Does not yet
+  send `subscribe`, so push events reach no client today. A future
+  wrapper update sending `{"type":"subscribe", "all": true}` at
+  connect and handling `type: "push"` messages will start receiving
+  `attention` / `busy` without any server-side change.
+
+## Migration status
+
+The v1 push catalog reduces to two node-agnostic events
+(`attention`, `busy`). Several `vibr8_node`-specific push events
+still fire from `_push_to_native_clients(...)` call sites inside
+`ws_bridge.py`:
+
+- `permission_request`, `permission_cancelled`, `status_change`,
+  `cli_connected`, `cli_disconnected`, `sessions_changed`,
+  `guard_state`, `tts_muted`, `voice_mode`.
+
+**Every one is currently dark** — under contract ui/v1 these fire
+on the *node's* `WsBridge` instance, whose `_native_ws_by_client`
+map is empty because Android connects only to the hub. So no
+subscriber sees them today. They are pinned by name in the
+transitional `_NATIVE_PUSH_EVENTS_LEGACY_DARK` set (`ws_bridge.py`)
+and by the test `test_legacy_dark_set_is_pin_not_growable` — the
+set is a one-way ratchet down to empty.
+
+The migration steps for each legacy event:
+
+- **`permission_request`** → attention hook (already fires in
+  `_emit_contract_status` when a session enters
+  `waiting_for_permission`; wire in place).
+- **`status_change` (idle→running)** → busy hook (already wired).
+- **`cli_connected` / `cli_disconnected` / `sessions_changed`** →
+  drop entirely; observer clients can poll on next foreground.
+- **`guard_state` / `tts_muted` / `voice_mode`** → drop entirely
+  (voice-specific, not observer-worthy).
+- **`permission_cancelled`** → drop; re-firing the corresponding
+  `attention` with the same `contextKey` supersedes.
+
+The call sites will be deleted in a follow-up commit; leaving them
+in place today means the two constants + tests documenting the
+reduced surface can land without churning the whole file at once.

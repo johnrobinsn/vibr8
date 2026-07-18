@@ -27,6 +27,7 @@ from vibr8_core.ws_bridge import (
     NATIVE_INBOUND_TYPES,
     NATIVE_PUSH_EVENTS,
     NATIVE_RPC_COMMANDS,
+    _NATIVE_PUSH_EVENTS_LEGACY_DARK,
 )
 
 
@@ -105,10 +106,57 @@ def test_handle_native_message_branches_match_inbound_types() -> None:
 
 
 def test_native_push_events_matches_frozen_set() -> None:
-    """The set of event names the server may push to subscribed native
-    clients. Frozen at v1 to these nine — see
-    docs/native-client-contract.md §B2."""
+    """The node-agnostic observer contract's push event catalog —
+    see docs/native-client-contract.md §B2. Reduced in v1 to
+    `attention` and `busy` (relays of events/v1 hooks) because the
+    prior larger set leaked ``vibr8_node``-specific concepts
+    (sessions, CLI, permission_request) into a channel other node
+    shapes (hello-node, wear-node) must also implement without
+    those primitives."""
     assert NATIVE_PUSH_EVENTS == frozenset({
+        "attention",
+        "busy",
+    })
+
+
+def test_push_to_native_clients_call_sites_use_documented_events() -> None:
+    """Grep every ``_push_to_native_clients(..., "<event>", ...)`` and
+    ``_push_to_all_native_clients("<event>", ...)`` call in
+    ``ws_bridge.py`` and assert every event name is in
+    NATIVE_PUSH_EVENTS *or* the transitional _NATIVE_PUSH_EVENTS_LEGACY_DARK
+    set (pinning the calls the migration is porting to `_attention_hook`
+    or deleting entirely — see the constant's docstring). Adding a
+    new event name outside both sets means somebody added a push type
+    that isn't in the contract and isn't part of the acknowledged
+    migration — the test forces an explicit decision."""
+    source = Path(ws_bridge.__file__).read_text()
+
+    per_session = re.compile(
+        r'_push_to_native_clients\([^,]+,\s*"([a-z_]+)"',
+    )
+    fanout = re.compile(
+        r'_push_to_all_native_clients\(\s*"([a-z_]+)"',
+    )
+
+    found = set(per_session.findall(source)) | set(fanout.findall(source))
+    allowed = set(NATIVE_PUSH_EVENTS) | set(_NATIVE_PUSH_EVENTS_LEGACY_DARK)
+    unknown = found - allowed
+    assert not unknown, (
+        f"_push_to_native_clients call sites emit event names outside "
+        f"both NATIVE_PUSH_EVENTS and the transitional legacy-dark set: "
+        f"{sorted(unknown)}. Either add to the contract (v1 doc §B2 + "
+        "NATIVE_PUSH_EVENTS) or the migration allowlist, or remove the "
+        "call site."
+    )
+
+
+def test_legacy_dark_set_is_pin_not_growable() -> None:
+    """The transitional legacy set MUST NOT grow — it's a one-way
+    ratchet down to empty as the migration proceeds. Pinning it in
+    the test file makes accidental additions loud. Delete this
+    assertion (and the constant) when the last legacy call site is
+    ported."""
+    assert _NATIVE_PUSH_EVENTS_LEGACY_DARK == frozenset({
         "guard_state",
         "tts_muted",
         "voice_mode",
@@ -121,33 +169,12 @@ def test_native_push_events_matches_frozen_set() -> None:
     })
 
 
-def test_push_to_native_clients_call_sites_use_documented_events() -> None:
-    """Grep every ``_push_to_native_clients(..., "<event>", ...)`` and
-    ``_push_to_all_native_clients("<event>", ...)`` call in
-    ``ws_bridge.py`` and assert the string literal is in
-    NATIVE_PUSH_EVENTS. Any drift means someone added a new push
-    event without updating the constant (and the contract doc)."""
-    source = Path(ws_bridge.__file__).read_text()
-
-    # Match either the per-session helper or the fan-out helper. The
-    # first positional string after the opening paren is the event
-    # name (the per-session variant takes session_id first, but the
-    # string literal we care about is the *second* positional).
-    per_session = re.compile(
-        r'_push_to_native_clients\([^,]+,\s*"([a-z_]+)"',
-    )
-    fanout = re.compile(
-        r'_push_to_all_native_clients\(\s*"([a-z_]+)"',
-    )
-
-    found = set(per_session.findall(source)) | set(fanout.findall(source))
-    unknown = found - set(NATIVE_PUSH_EVENTS)
-    assert not unknown, (
-        f"_push_to_native_clients call sites emit event names not in "
-        f"NATIVE_PUSH_EVENTS: {sorted(unknown)}. Add them to the "
-        "constant and docs/native-client-contract.md §B2, or remove "
-        "the call site."
-    )
+def test_legacy_dark_disjoint_from_contract_events() -> None:
+    """No event name may live in both sets — that would mean it's
+    both "part of the contract" and "being migrated away," which is
+    a design contradiction. Guards against a rename that accidentally
+    kept the old name in both places."""
+    assert not (NATIVE_PUSH_EVENTS & _NATIVE_PUSH_EVENTS_LEGACY_DARK)
 
 
 # ── Cross-repo assertion (best-effort, dev-machine only) ────────────────────

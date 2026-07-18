@@ -398,8 +398,30 @@ class NodeAgent:
     async def _emit_busy(self, busy: bool) -> None:
         await self._send_to_hub({"type": "busy", "busy": bool(busy)})
 
-    async def _emit_attention(self, reason: str) -> None:
-        await self._send_to_hub({"type": "attention", "reason": reason})
+    async def _emit_attention(
+        self,
+        reason: str,
+        *,
+        severity: str = "",
+        context_key: str = "",
+        expires_at: str = "",
+    ) -> None:
+        """Emit an events/v1 `attention` tunnel event. Optional structured
+        fields are forwarded verbatim; the hub relays them to subscribed
+        native observers (see docs/native-client-contract.md §B2).
+
+        Additive: single-arg callers keep working — omitted kwargs stay
+        out of the tunnel message so pre-v1 hubs that don't know about
+        them see the same shape as before.
+        """
+        msg: dict[str, Any] = {"type": "attention", "reason": reason}
+        if severity:
+            msg["severity"] = severity
+        if context_key:
+            msg["contextKey"] = context_key
+        if expires_at:
+            msg["expiresAt"] = expires_at
+        await self._send_to_hub(msg)
 
     async def _emit_title(self, text: str) -> None:
         """Fire-and-forget: tell the hub what to show in the shell strip.

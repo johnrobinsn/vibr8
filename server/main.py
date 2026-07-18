@@ -496,10 +496,41 @@ async def handle_node_ws(request: web.Request) -> web.StreamResponse:
             n = registry.get_node(nid)
             if n:
                 n.ring0_busy = bool(msg.get("busy"))
+            # Observer relay: forward node → hub events/v1 `busy` to any
+            # subscribed native clients (Android foreground service,
+            # future observer clients). Payload stays a plain boolean;
+            # the hub enriches with nodeId + nodeName so the client can
+            # display "<node> is working" without having to correlate.
+            node_name = n.name if n else ""
+            asyncio.ensure_future(
+                bridge._push_to_all_native_clients(
+                    "busy",
+                    {"busy": bool(msg.get("busy")), "nodeId": nid, "nodeName": node_name},
+                )
+            )
         elif msg_type == "attention":
+            n = registry.get_node(nid)
+            node_name = n.name if n else ""
             logger.info(
                 "[nodes] Attention from node %r: %s",
                 node.name, msg.get("reason", ""),
+            )
+            # Observer relay: forward events/v1 `attention` to subscribed
+            # native clients. Passes structured fields (severity,
+            # contextKey, expiresAt) verbatim so the client can dedup by
+            # contextKey and use severity for notification-channel
+            # selection. hub-enriches nodeId + nodeName so notifications
+            # can carry the node's name as the title.
+            attention_payload: dict[str, Any] = {
+                "reason": msg.get("reason", ""),
+                "nodeId": nid,
+                "nodeName": node_name,
+            }
+            for field in ("severity", "contextKey", "expiresAt"):
+                if field in msg:
+                    attention_payload[field] = msg[field]
+            asyncio.ensure_future(
+                bridge._push_to_all_native_clients("attention", attention_payload)
             )
         elif msg_type == "ring0_state":
             n = registry.get_node(nid)

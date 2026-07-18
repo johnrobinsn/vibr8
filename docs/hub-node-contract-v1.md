@@ -168,9 +168,14 @@ The node UI never touches audio. Spoken and typed input arrive identically.
   sender.
 - **`busy`** (node → hub): drives hub-side UI/voice affordances (e.g.
   thinking indicator). Best-effort, idempotent.
-- **`attention`** (node → hub): the node wants the user's attention
-  (`reason` is free text). v1 hubs may surface it as a notification line;
-  richer handling is v2 (`notify`/`present`).
+- **`attention`** (node → hub): the node wants the user's attention.
+  Required field `reason` (free display-ready text). Optional additive
+  fields: `severity` (`"info"`/`"warning"`/`"urgent"`), `contextKey`
+  (dedup key so re-fires from the same node collapse), `expiresAt`
+  (ISO-8601 when clients may clear a stale notification). Hubs relay
+  the message to any subscribed native observer with the envelope
+  documented in `docs/native-client-contract.md` §B2 (enriched with
+  `nodeId` + `nodeName` for provenance).
 
 Guard words, note mode, and `vibr8 node {name}` switching stay hub-side —
 they route *between* nodes and are part of the shell, not the node.

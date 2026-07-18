@@ -53,16 +53,24 @@ async def test_busy_hook_ignores_non_ring0_sessions():
 async def test_attention_hook_fires_on_permission_wait():
     bridge = WsBridge()
     bridge._ring0_manager = _ring0("r0")
-    reasons: list[str] = []
+    calls: list[tuple[str, dict]] = []
 
-    async def attention(reason: str) -> None:
-        reasons.append(reason)
+    async def attention(reason: str, **kwargs) -> None:
+        # `_attention_hook` grew additive kwargs (severity/context_key/
+        # expires_at) so the observer channel can carry a dedup key
+        # into the native envelope. Existing single-arg call sites and
+        # tests may still ignore them, but this test pins the shape:
+        # the wait-for-permission fire supplies severity + contextKey.
+        calls.append((reason, kwargs))
 
     bridge._attention_hook = attention
     bridge._emit_contract_status(_session("any-sess"), "running→waiting_for_permission")
     await asyncio.sleep(0)
-    assert len(reasons) == 1
-    assert "waiting for permission" in reasons[0]
+    assert len(calls) == 1
+    reason, kwargs = calls[0]
+    assert "waiting for permission" in reason
+    assert kwargs.get("severity") == "warning"
+    assert kwargs.get("context_key", "").startswith("perm:")
 
 
 async def test_no_hooks_is_a_no_op():
