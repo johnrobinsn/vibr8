@@ -22,6 +22,44 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ── Native-client (Android foreground service) contract ─────────────────────
+# Documented shape in docs/native-client-contract.md. These constants pin
+# the wire surface so a test (server/tests/test_native_client_contract.py)
+# fails loudly when someone adds or removes a message type on either
+# direction without updating the contract.
+
+# Server → native client, correlated RPC commands. Message shape:
+# ``{"command": <name>, "id": <rpc_id>, "params"?: {...}}``. The native
+# client replies with ``{"id": <rpc_id>, "result"|"error": ...}``.
+NATIVE_RPC_COMMANDS: frozenset[str] = frozenset({
+    "bring_to_foreground",
+    "launch_app",
+})
+
+# Native client → server, spontaneous message ``type`` values (the
+# separate RPC-response shape ``{"id", "result"/"error"}`` is correlated
+# by id rather than by ``type`` and is not in this set).
+NATIVE_INBOUND_TYPES: frozenset[str] = frozenset({
+    "subscribe",
+    "unsubscribe",
+    "permission_response",
+})
+
+# Server → native client, fire-and-forget push events (only reach a
+# client that has subscribed via ``{"type": "subscribe"}``). Message
+# shape: ``{"type": "push", "event": <name>, "sessionId": <sid>, ...}``.
+NATIVE_PUSH_EVENTS: frozenset[str] = frozenset({
+    "guard_state",
+    "tts_muted",
+    "voice_mode",
+    "status_change",
+    "permission_request",
+    "permission_cancelled",
+    "cli_connected",
+    "cli_disconnected",
+    "sessions_changed",
+})
+
 # ── Session state ────────────────────────────────────────────────────────────
 
 BackendType = str  # "claude" | "codex"
@@ -2534,9 +2572,10 @@ class WsBridge:
 
     async def rpc_call(self, client_id: str, method: str, params: dict | None = None, timeout: float = 5.0) -> dict:
         """Send an RPC request to a specific browser client and await the response."""
-        # Native-only commands: prefer native socket (works when WebView is paused)
-        _native_methods = {"bring_to_foreground", "launch_app"}
-        if method in _native_methods:
+        # Native-only commands: prefer native socket (works when WebView
+        # is paused). Set pinned at module level as NATIVE_RPC_COMMANDS —
+        # see docs/native-client-contract.md.
+        if method in NATIVE_RPC_COMMANDS:
             native_ws = self._native_ws_by_client.get(client_id)
             if not native_ws:
                 for cid in self._native_ws_by_client:
