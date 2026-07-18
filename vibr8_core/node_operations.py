@@ -933,19 +933,14 @@ class NodeOperations:
         await self._bridge.broadcast_to_all_browsers({"type": "artifacts_changed"})
         return {"ok": True}
 
-    async def artifacts_read_content(self, artifact_id: str = "") -> dict:
-        """Read artifact bytes; encoded as base64 since the tunnel is JSON."""
-        from vibr8_core import artifacts
-        import base64
-        result = artifacts.read_content(artifact_id)
-        if result is None:
-            return {"error": "Not found"}
-        data, content_type, filename = result
-        return {
-            "contentBase64": base64.b64encode(data).decode("ascii"),
-            "contentType": content_type,
-            "filename": filename,
-        }
+    # Removed: `artifacts_read_content` used to serve the hub's
+    # /api/artifacts/{id}/content route by tunnelling bytes back
+    # base64-encoded. Under contract ui/v1 the artifact routes live
+    # on the owning node (server/routes.py, gated by include_artifacts)
+    # and the content handler reads directly from disk via
+    # artifacts.read_content — no tunnel hop. Kept this stub-comment
+    # rather than a silent deletion so anyone chasing a tunnel command
+    # `artifacts_read_content` in old logs finds a breadcrumb.
 
     # ── Ring0 control ─────────────────────────────────────────────────────
 
