@@ -27,7 +27,6 @@ from vibr8_core.ws_bridge import (
     NATIVE_INBOUND_TYPES,
     NATIVE_PUSH_EVENTS,
     NATIVE_RPC_COMMANDS,
-    _NATIVE_PUSH_EVENTS_LEGACY_DARK,
 )
 
 
@@ -123,12 +122,11 @@ def test_push_to_native_clients_call_sites_use_documented_events() -> None:
     """Grep every ``_push_to_native_clients(..., "<event>", ...)`` and
     ``_push_to_all_native_clients("<event>", ...)`` call in
     ``ws_bridge.py`` and assert every event name is in
-    NATIVE_PUSH_EVENTS *or* the transitional _NATIVE_PUSH_EVENTS_LEGACY_DARK
-    set (pinning the calls the migration is porting to `_attention_hook`
-    or deleting entirely — see the constant's docstring). Adding a
-    new event name outside both sets means somebody added a push type
-    that isn't in the contract and isn't part of the acknowledged
-    migration — the test forces an explicit decision."""
+    NATIVE_PUSH_EVENTS. The prior transitional allowance for
+    legacy-dark names is gone; the ``vibr8_node``-specific fire sites
+    have been removed and the two helpers are now called only by the
+    hub's tunnel handler for events/v1 ``attention``/``busy``. Any
+    new push added must appear in the contract set."""
     source = Path(ws_bridge.__file__).read_text()
 
     per_session = re.compile(
@@ -139,42 +137,41 @@ def test_push_to_native_clients_call_sites_use_documented_events() -> None:
     )
 
     found = set(per_session.findall(source)) | set(fanout.findall(source))
-    allowed = set(NATIVE_PUSH_EVENTS) | set(_NATIVE_PUSH_EVENTS_LEGACY_DARK)
-    unknown = found - allowed
+    unknown = found - set(NATIVE_PUSH_EVENTS)
     assert not unknown, (
-        f"_push_to_native_clients call sites emit event names outside "
-        f"both NATIVE_PUSH_EVENTS and the transitional legacy-dark set: "
-        f"{sorted(unknown)}. Either add to the contract (v1 doc §B2 + "
-        "NATIVE_PUSH_EVENTS) or the migration allowlist, or remove the "
-        "call site."
+        f"_push_to_native_clients call sites in ws_bridge.py emit event "
+        f"names not in NATIVE_PUSH_EVENTS: {sorted(unknown)}. Either "
+        "add to the contract (v1 doc §B2 + NATIVE_PUSH_EVENTS) or "
+        "remove the call site."
     )
 
 
-def test_legacy_dark_set_is_pin_not_growable() -> None:
-    """The transitional legacy set MUST NOT grow — it's a one-way
-    ratchet down to empty as the migration proceeds. Pinning it in
-    the test file makes accidental additions loud. Delete this
-    assertion (and the constant) when the last legacy call site is
-    ported."""
-    assert _NATIVE_PUSH_EVENTS_LEGACY_DARK == frozenset({
-        "guard_state",
-        "tts_muted",
-        "voice_mode",
+def test_no_legacy_dark_fires_in_ws_bridge() -> None:
+    """The old ``vibr8_node``-specific push event names must not be
+    fired from ``ws_bridge.py`` under any wrapping. Guards against
+    regressions where someone reintroduces a dark
+    ``_push_to_native_clients(session.id, "permission_request", …)``
+    kind of call (which reached no client before the migration but
+    would silently bypass the events/v1 relay after)."""
+    source = Path(ws_bridge.__file__).read_text()
+    forbidden = {
+        "guard_state", "tts_muted", "voice_mode",
         "status_change",
-        "permission_request",
-        "permission_cancelled",
-        "cli_connected",
-        "cli_disconnected",
+        "permission_request", "permission_cancelled",
+        "cli_connected", "cli_disconnected",
         "sessions_changed",
-    })
-
-
-def test_legacy_dark_disjoint_from_contract_events() -> None:
-    """No event name may live in both sets — that would mean it's
-    both "part of the contract" and "being migrated away," which is
-    a design contradiction. Guards against a rename that accidentally
-    kept the old name in both places."""
-    assert not (NATIVE_PUSH_EVENTS & _NATIVE_PUSH_EVENTS_LEGACY_DARK)
+    }
+    for name in forbidden:
+        pattern = re.compile(
+            rf'_push_to_(?:all_)?native_clients\([^)]*"{name}"',
+        )
+        matches = pattern.findall(source)
+        assert not matches, (
+            f"Reintroduced legacy dark push fire for {name!r} in "
+            "ws_bridge.py — this event name is a vibr8_node-specific "
+            "concept and doesn't belong on the node-agnostic observer "
+            "channel. Route through _attention_hook or drop."
+        )
 
 
 # ── Cross-repo assertion (best-effort, dev-machine only) ────────────────────

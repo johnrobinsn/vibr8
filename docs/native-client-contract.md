@@ -232,36 +232,16 @@ because there's no `type` field.
 
 ## Migration status
 
-The v1 push catalog reduces to two node-agnostic events
-(`attention`, `busy`). Several `vibr8_node`-specific push events
-still fire from `_push_to_native_clients(...)` call sites inside
-`ws_bridge.py`:
+Migration complete. The 26 `vibr8_node`-specific
+`_push_to_native_clients(...)` call sites in `ws_bridge.py` have
+been removed. The two helper methods
+(`_push_to_native_clients` / `_push_to_all_native_clients`) survive
+because the hub's tunnel handler for events/v1 `attention` and
+`busy` uses them to relay to native observers. Their only remaining
+callers live in `server/main.py`.
 
-- `permission_request`, `permission_cancelled`, `status_change`,
-  `cli_connected`, `cli_disconnected`, `sessions_changed`,
-  `guard_state`, `tts_muted`, `voice_mode`.
-
-**Every one is currently dark** — under contract ui/v1 these fire
-on the *node's* `WsBridge` instance, whose `_native_ws_by_client`
-map is empty because Android connects only to the hub. So no
-subscriber sees them today. They are pinned by name in the
-transitional `_NATIVE_PUSH_EVENTS_LEGACY_DARK` set (`ws_bridge.py`)
-and by the test `test_legacy_dark_set_is_pin_not_growable` — the
-set is a one-way ratchet down to empty.
-
-The migration steps for each legacy event:
-
-- **`permission_request`** → attention hook (already fires in
-  `_emit_contract_status` when a session enters
-  `waiting_for_permission`; wire in place).
-- **`status_change` (idle→running)** → busy hook (already wired).
-- **`cli_connected` / `cli_disconnected` / `sessions_changed`** →
-  drop entirely; observer clients can poll on next foreground.
-- **`guard_state` / `tts_muted` / `voice_mode`** → drop entirely
-  (voice-specific, not observer-worthy).
-- **`permission_cancelled`** → drop; re-firing the corresponding
-  `attention` with the same `contextKey` supersedes.
-
-The call sites will be deleted in a follow-up commit; leaving them
-in place today means the two constants + tests documenting the
-reduced surface can land without churning the whole file at once.
+A regression test (`test_no_legacy_dark_fires_in_ws_bridge`) fails
+if any `permission_request` / `status_change` / `cli_connected` etc.
+event name reappears in a push call inside `ws_bridge.py`. Any new
+node-agnostic observer event must be added to `NATIVE_PUSH_EVENTS`
+and this doc's §B2.

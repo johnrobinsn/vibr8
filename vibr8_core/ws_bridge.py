@@ -58,27 +58,6 @@ NATIVE_PUSH_EVENTS: frozenset[str] = frozenset({
     "busy",
 })
 
-# Transitional: legacy event names still fired by pre-migration code
-# in this file (`_push_to_native_clients(session.id, "…")`). None of
-# these currently reach any native client — under contract ui/v1 the
-# ``vibr8_node``-specific `WsBridge` instances run on nodes, whose
-# `_native_ws_by_client` map is empty (Android connects only to the
-# hub). They are pinned here so the source-parsing test can distinguish
-# "known dark, being migrated" from "someone added a new push type
-# without updating the contract". This set MUST shrink to empty as
-# the fires are ported to `_attention_hook` (per docs) or deleted.
-_NATIVE_PUSH_EVENTS_LEGACY_DARK: frozenset[str] = frozenset({
-    "guard_state",
-    "tts_muted",
-    "voice_mode",
-    "status_change",
-    "permission_request",
-    "permission_cancelled",
-    "cli_connected",
-    "cli_disconnected",
-    "sessions_changed",
-})
-
 # ── Session state ────────────────────────────────────────────────────────────
 
 BackendType = str  # "claude" | "codex"
@@ -805,12 +784,10 @@ class WsBridge:
         msg = {"type": "guard_state", "enabled": enabled}
         if client_id:
             await self._send_to_client(client_id, msg)
-            await self._push_to_all_native_clients("guard_state", {"enabled": enabled})
         else:
             session = self._sessions.get(session_id)
             if session:
                 await self._broadcast_to_browsers(session, msg)
-                await self._push_to_native_clients(session_id, "guard_state", {"enabled": enabled})
 
     async def broadcast_audio_off(self, session_id: str) -> None:
         """Tell browser to disconnect WebRTC audio."""
@@ -825,24 +802,20 @@ class WsBridge:
         msg = {"type": "tts_muted", "muted": muted}
         if client_id:
             await self._send_to_client(client_id, msg)
-            await self._push_to_all_native_clients("tts_muted", {"muted": muted})
         else:
             session = self._sessions.get(session_id)
             if session:
                 await self._broadcast_to_browsers(session, msg)
-                await self._push_to_native_clients(session_id, "tts_muted", {"muted": muted})
 
     async def broadcast_voice_mode(self, session_id: str, mode: str | None, *, client_id: str | None = None) -> None:
         """Broadcast voice mode change to browser and native clients."""
         msg = {"type": "voice_mode", "mode": mode}
         if client_id:
             await self._send_to_client(client_id, msg)
-            await self._push_to_all_native_clients("voice_mode", {"mode": mode})
         else:
             session = self._sessions.get(session_id)
             if session:
                 await self._broadcast_to_browsers(session, msg)
-                await self._push_to_native_clients(session_id, "voice_mode", {"mode": mode})
 
     async def broadcast_node_switch(self, node_id: str, node_name: str | None = None) -> None:
         """Broadcast node_switch to all connected browsers (e.g. from voice command)."""
@@ -930,15 +903,10 @@ class WsBridge:
                 if not session.state.get("is_running"):
                     session.state["is_running"] = True
                     asyncio.ensure_future(self._notify_ring0_state_change(session, "idle→running"))
-                    asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
-                        "agentStatus": "running",
-                        "isRunning": True, "isWaitingForPermission": False,
-                    }))
                 # Auto-clear pending permissions (agent continued without waiting)
                 if session.pending_permissions:
                     for req_id in list(session.pending_permissions):
                         await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
-                        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
                     session.pending_permissions.clear()
                     session.state["is_waiting_for_permission"] = False
                 self._persist_session(session)
@@ -949,10 +917,6 @@ class WsBridge:
                 if session.state.get("is_running"):
                     session.state["is_running"] = False
                     asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
-                    asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
-                        "agentStatus": "idle",
-                        "isRunning": False, "isWaitingForPermission": False,
-                    }))
                     if session.controlled_by == "user":
                         self._schedule_pen_release(session)
                 session.state["is_waiting_for_permission"] = False
@@ -974,7 +938,6 @@ class WsBridge:
                 if session.pending_permissions:
                     for req_id in list(session.pending_permissions):
                         await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
-                        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
                     session.pending_permissions.clear()
                 self._persist_session(session)
                 # Cap active history
@@ -1000,7 +963,6 @@ class WsBridge:
                 else:
                     asyncio.ensure_future(self._notify_ring0_state_change(
                         session, "waiting_for_permission", detail=detail))
-                asyncio.ensure_future(self._push_to_native_clients(session.id, "permission_request", {"request": req}))
                 self._persist_session(session)
 
             await self._broadcast_to_browsers(session, msg)
@@ -1035,7 +997,6 @@ class WsBridge:
         async def on_disconnect() -> None:
             for req_id in list(session.pending_permissions):
                 await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
-                await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
             session.pending_permissions.clear()
             # Clear running/permission state and notify Ring0
             was_waiting = session.state.get("is_waiting_for_permission")
@@ -1050,7 +1011,6 @@ class WsBridge:
             self._persist_session(session)
             logger.info(f"[ws-bridge] Adapter disconnected for session {session_id}")
             await self._broadcast_to_browsers(session, {"type": "cli_disconnected"})
-            await self._push_to_native_clients(session.id, "cli_disconnected")
 
         adapter.on_disconnect(on_disconnect)
 
@@ -1068,7 +1028,6 @@ class WsBridge:
 
         # Notify browsers and native clients
         self._schedule_background(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
-        self._schedule_background(self._push_to_native_clients(session.id, "cli_connected"))
         logger.info(f"[ws-bridge] Codex adapter attached for session {session_id}")
 
     # ── Computer-use agent attachment ──────────────────────────────────────────
@@ -1122,7 +1081,6 @@ class WsBridge:
         self._persist_session(session)
         self._schedule_background(self._broadcast_to_browsers(session, init_msg))
         self._schedule_background(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
-        self._schedule_background(self._push_to_native_clients(session.id, "cli_connected"))
 
         # Replay any messages queued while the agent was initializing
         if session.pending_messages:
@@ -1156,8 +1114,6 @@ class WsBridge:
         session._replay_archived = False
         logger.info(f"[ws-bridge] CLI connected for session {session_id} (awaiting replay)")
         self._schedule_background(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
-        self._schedule_background(self._push_to_native_clients(session.id, "cli_connected"))
-        self._schedule_background(self._push_to_all_native_clients("sessions_changed"))
 
         # Flush queued messages. Snapshot + clear before awaiting so that if a
         # write fails and _send_to_cli re-queues into pending_messages, the
@@ -1211,11 +1167,9 @@ class WsBridge:
         is_waiting = session.state.get("is_waiting_for_permission")
         logger.info(f"[ws-bridge] CLI disconnected for session {session_id} is_running={is_running} is_waiting={is_waiting} pending_perms={len(pending_perms)}")
         await self._broadcast_to_browsers(session, {"type": "cli_disconnected"})
-        await self._push_to_native_clients(session.id, "cli_disconnected")
 
         for req_id in list(session.pending_permissions):
             await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
-            await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
         session.pending_permissions.clear()
         # Clear running/permission state and notify Ring0
         was_waiting = session.state.get("is_waiting_for_permission")
@@ -1227,7 +1181,6 @@ class WsBridge:
         elif was_running:
             asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
 
-        asyncio.ensure_future(self._push_to_all_native_clients("sessions_changed"))
 
     # ── Browser WebSocket handlers ───────────────────────────────────────
 
@@ -1556,11 +1509,6 @@ class WsBridge:
             session.state["is_running"] = True
             import asyncio
             asyncio.ensure_future(self._notify_ring0_state_change(session, "idle→running"))
-            asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
-                "agentStatus": "running",
-                "isRunning": True, "isWaitingForPermission": False,
-            }))
-
         text = msg.get("message")
 
         # TTS: speak assistant response if audio is active and TTS not muted.
@@ -1728,10 +1676,6 @@ class WsBridge:
             session.state["is_running"] = False
             import asyncio
             asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
-            asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
-                "agentStatus": "idle",
-                "isRunning": False, "isWaitingForPermission": False,
-            }))
             # Restart pen timeout when session goes idle
             if session.controlled_by == "user":
                 self._schedule_pen_release(session)
@@ -1840,7 +1784,6 @@ class WsBridge:
             # still recover on its own.
             self._record_perm_retry(session, perm)
             await self._broadcast_to_browsers(session, {"type": "permission_request", "request": perm})
-            await self._push_to_native_clients(session.id, "permission_request", {"request": perm})
             self._persist_session(session)
             # Notify Ring0 of every permission request — not just the first.
             tool_name = perm.get("tool_name", "?")
@@ -2175,7 +2118,6 @@ class WsBridge:
             "type": "permission_cancelled",
             "request_id": request_id,
         })
-        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": request_id})
 
     def _handle_interrupt(self, session: Session) -> None:
         self.interrupt_session(session.id)
@@ -2805,7 +2747,6 @@ class WsBridge:
             msg["userRenamed"] = True
         await self._broadcast_to_browsers(session, msg)
         self._persist_session(session)
-        asyncio.ensure_future(self._push_to_all_native_clients("sessions_changed"))
 
     async def send_ring0_switch_ui(
         self, target_session_id: str, *, client_id: str,
@@ -2961,7 +2902,6 @@ class WsBridge:
             "type": "permission_cancelled",
             "request_id": request_id,
         })
-        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": request_id})
         return True
 
     async def send_to_browsers(self, session_id: str, msg: dict[str, Any]) -> None:
