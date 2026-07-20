@@ -224,11 +224,11 @@ because there's no `type` field.
   `_push_to_all_native_clients` on the hub bridge, enriched with
   `nodeId` and `nodeName`.
 - **Android wrapper** (`vibr8-android`): implements the RPC command
-  channel (both entries in `NATIVE_RPC_COMMANDS`). Does not yet
-  send `subscribe`, so push events reach no client today. A future
-  wrapper update sending `{"type":"subscribe", "all": true}` at
-  connect and handling `type: "push"` messages will start receiving
-  `attention` / `busy` without any server-side change.
+  channel (both entries in `NATIVE_RPC_COMMANDS`), sends
+  `{"type":"subscribe", "all": true}` on WS connect, and handles
+  `type: "push"` messages — routing `attention` to an OS notification
+  (deduped by `nodeId`+`contextKey`, severity → channel) and `busy`
+  to the persistent foreground-service notification text.
 
 ## Migration status
 
