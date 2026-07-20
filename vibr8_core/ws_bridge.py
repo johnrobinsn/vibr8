@@ -156,6 +156,23 @@ class WsBridge:
         self._attention_hook: Callable[..., Awaitable[None]] | None = None
         self._computer_use_agents: dict[str, Any] = {}  # session_id → ComputerUseAgent
         self._active_tts: dict[str, Any] = {}  # session_id → TTSEngine instance
+        # Hard-cancel handles for the `_speak_text` coroutines. `_active_tts`
+        # holds the cooperative cancel flag (TTS engine polls `_cancelled`
+        # between HTTP chunks), but that has 100-300ms of latency and
+        # in-flight Opus frames pushed during the latency window repopulate
+        # the cleared track buffer — the user hears Ring0 keep talking for
+        # 1-3s after a barge-in. The task handle lets `cancel_tts` do a
+        # hard asyncio.Task.cancel() so the coroutine is interrupted now,
+        # and the `_tts_cancelled` set gates any in-flight `on_frame`
+        # callback so frames produced during cancel latency are dropped.
+        self._tts_tasks: dict[str, asyncio.Task[None]] = {}  # session_id → speak_text task
+        self._tts_cancelled: set[str] = set()  # session_ids whose frames must drop
+        # Per-client deferred TTS queue (D1 — queue-before-start). When voice
+        # is active on a client at TTS-enqueue time, the request is parked
+        # here and drained by `_drain_deferred_tts_loop` after a quiet
+        # window. Each entry: (session_id, text, track, enqueued_at).
+        self._deferred_tts: dict[str, list[tuple[str, Any, Any, float]]] = {}
+        self._deferred_tts_task: asyncio.Task[None] | None = None
         self._thinking_timers: dict[str, asyncio.TimerHandle] = {}
         self._on_cli_session_id: Callable[[str, str], None] | None = None
         self._on_cli_relaunch_needed: Callable[[str], None] | None = None
@@ -591,14 +608,56 @@ class WsBridge:
         return qid.split(":", 1)[-1]
 
     def cancel_tts(self, session_id: str) -> None:
-        """Cancel any in-progress TTS for *session_id* (called on barge-in)."""
+        """Cancel any in-progress TTS for *session_id* (called on barge-in).
+
+        Three-step cancel:
+
+        1. **Mark dropped frames** — add to ``_tts_cancelled`` so that any
+           `on_frame` callback in flight (from chunks already buffered in
+           the OpenAI HTTP stream) silently discards instead of pushing
+           more opus packets onto the track that ``barge_in`` just cleared.
+        2. **Cooperative cancel** — the TTS engine polls ``_cancelled``
+           between HTTP chunks (this is what existed before).
+        3. **Hard cancel** — ``asyncio.Task.cancel()`` on the stored
+           `_speak_text` task. This interrupts any pending HTTP read or
+           ``await tts.say(...)`` immediately, so the coroutine doesn't
+           keep producing frames for the next 100-300ms while waiting for
+           the cooperative check to land.
+
+        Also drops any deferred TTS request that was queued for this
+        session — the user is actively talking, so the queued response is
+        moot.
+        """
         if self._webrtc_manager and hasattr(self._webrtc_manager, "cancel_tts_for_session"):
-            import asyncio
             asyncio.ensure_future(self._webrtc_manager.cancel_tts_for_session(session_id))
+
+        self._tts_cancelled.add(session_id)
+
         tts = self._active_tts.pop(session_id, None)
         if tts:
             tts.cancel()
-            logger.info("[ws-bridge] TTS cancelled for session %s (barge-in)", session_id)
+
+        task = self._tts_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+
+        # Drop any deferred TTS for this session across all clients —
+        # the user is talking, the response they would have heard is stale.
+        dropped = 0
+        for client_id, queue in list(self._deferred_tts.items()):
+            kept = [entry for entry in queue if entry[0] != session_id]
+            dropped += len(queue) - len(kept)
+            if kept:
+                self._deferred_tts[client_id] = kept
+            else:
+                self._deferred_tts.pop(client_id, None)
+
+        if tts or task or dropped:
+            logger.info(
+                "[ws-bridge] TTS cancelled for session %s (barge-in) "
+                "task=%s tts_engine=%s deferred_dropped=%d",
+                session_id, bool(task), bool(tts), dropped,
+            )
 
     def _start_thinking_delayed(self, session_id: str, delay: float = 1.5) -> None:
         """Schedule the thinking tone after *delay* seconds.
@@ -1530,11 +1589,13 @@ class WsBridge:
                 session.id, audio_client_id, type(text).__name__, text_preview, track is not None, tts_muted, tts_allowed,
             )
             if track and not tts_muted and tts_allowed:
-                import asyncio
-                asyncio.ensure_future(self._speak_text(session.id, text, track))
+                # Hub side: polite-assistant queueing (queue-before-start
+                # + cancel-on-barge-in). See _enqueue_speak below.
+                self._enqueue_speak(session.id, text, track, audio_client_id)
         elif text and self._speak_hook:
-            # Node side (contract events/v1): no audio here — Ring0 speech is
-            # an explicit `speak` event the hub synthesizes (§B).
+            # Node side (contract events/v1): no audio here — Ring0 speech
+            # is an explicit `speak` tunnel event the hub synthesizes (§B).
+            # `track` is None on node bridges because the hub owns audio.
             ring0 = self._ring0_manager
             if ring0 and ring0.is_enabled and session.id == ring0.session_id:
                 spoken = self._flatten_message_text(text)
@@ -1580,8 +1641,10 @@ class WsBridge:
     @staticmethod
     def _flatten_message_text(text) -> str:
         """Flatten an assistant message (str, content-block list, or dict)
-        into the plain text suitable for TTS. Empty string when nothing
-        speakable."""
+        into plain text suitable for TTS. Empty string when nothing
+        speakable. Used by the node-side `_speak_hook` branch (events/v1);
+        the hub-side `_speak_text` below has its own equivalent inline
+        normalization (D1/D2 additions from main)."""
         if isinstance(text, dict):
             # e.g. {"role": "assistant", "content": "..."} or {"content": [...]}
             content = text.get("content", "")
@@ -1601,65 +1664,298 @@ class WsBridge:
             )
         return text if isinstance(text, str) else ""
 
-    async def _speak_text(self, session_id: str, text, track) -> None:
-        """Synthesize *text* via OpenAI TTS and push Opus frames to *track*."""
+
+    # ── D1: polite-assistant TTS queueing ────────────────────────────────
+    #
+    # Two behaviors stacked at this layer:
+    #   D1: queue-before-start — if the user is actively speaking when a
+    #       TTS request is enqueued, defer it. A background drain loop
+    #       releases it once voice has been quiet for the configured
+    #       window. Prevents Ring0 from cutting in mid-sentence with a
+    #       response to a *prior* turn (the response was already generated
+    #       before the user started their next utterance).
+    #   D2: cancel-on-barge-in — already in flight in `cancel_tts()`. The
+    #       deferred queue here also drops entries for the cancelled
+    #       session, since by the time the user has started a new turn
+    #       the old response is moot.
+    #
+    # Knobs (constants for now — could become STTParams fields later):
+    DEFERRED_TTS_VOICE_WINDOW_MS = 400   # voice within this window blocks start
+    DEFERRED_TTS_QUIET_WINDOW_MS = 600   # need this much quiet before release
+    DEFERRED_TTS_TICK_S = 0.2            # drain loop wake-up interval
+    DEFERRED_TTS_MAX_AGE_S = 10.0        # drop entries older than this (stale)
+    DEFERRED_TTS_MAX_PER_CLIENT = 3      # cap queue depth per client
+
+    def _enqueue_speak(
+        self, session_id: str, text, track, client_id: str,
+    ) -> None:
+        """Schedule TTS, deferring if the user is currently speaking.
+
+        Single entry point for all TTS calls so D1 (queue) and D2 (cancel)
+        are applied uniformly across callers.
+        """
+        if client_id and self._webrtc_manager is not None and self._is_voice_active(
+            client_id, self.DEFERRED_TTS_VOICE_WINDOW_MS,
+        ):
+            queue = self._deferred_tts.setdefault(client_id, [])
+            if len(queue) >= self.DEFERRED_TTS_MAX_PER_CLIENT:
+                evicted = queue.pop(0)
+                logger.warning(
+                    "[ws-bridge] Deferred TTS queue full for client %s — "
+                    "dropping oldest entry (session=%s, age=%.1fs)",
+                    client_id, evicted[0], time.time() - evicted[3],
+                )
+            queue.append((session_id, text, track, time.time()))
+            logger.info(
+                "[ws-bridge] TTS deferred for session %s (client=%s talking) "
+                "queue_depth=%d",
+                session_id, client_id, len(queue),
+            )
+            self._ensure_deferred_tts_drainer()
+            return
+        # Voice quiet (or no client_id to gate on) — proceed immediately.
+        asyncio.ensure_future(self._speak_text(session_id, text, track, client_id))
+
+    def _is_voice_active(self, client_id: str, window_ms: int) -> bool:
+        """Return True if any of this client's peers had voice within window."""
+        mgr = self._webrtc_manager
+        if mgr is None or not hasattr(mgr, "last_voice_at_for_client"):
+            return False
+        last_at = mgr.last_voice_at_for_client(client_id)
+        if not last_at:
+            return False
+        return (time.time() - last_at) * 1000.0 < window_ms
+
+    def _ensure_deferred_tts_drainer(self) -> None:
+        """Start the drain loop if not already running."""
+        task = self._deferred_tts_task
+        if task is not None and not task.done():
+            return
         try:
-            text = self._flatten_message_text(text)
-            if not isinstance(text, str) or not text.strip():
-                logger.info("[ws-bridge] TTS skipped: empty or non-string text for session %s (type=%s)", session_id, type(text).__name__)
-                return
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop (e.g. sync test setup) — skip; the test path doesn't
+            # need the drainer because tests assert queue contents directly.
+            return
+        self._deferred_tts_task = loop.create_task(self._drain_deferred_tts_loop())
 
-            # Strip markdown formatting for cleaner TTS output.
-            import re
-            text = re.sub(r'\*{1,3}', '', text)           # bold/italic: ** * ***
-            text = re.sub(r'#{1,6}\s*', '', text)         # headings: ##
-            text = re.sub(r'`{1,3}[^`]*`{1,3}', '', text) # inline/block code
-            text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)  # links: [text](url) → text
-            text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)  # list markers
-            text = text.strip()
-            if not text:
-                logger.info("[ws-bridge] TTS skipped: empty after markdown strip for session %s", session_id)
-                return
+    async def _drain_deferred_tts_loop(self) -> None:
+        """Periodically release deferred TTS once voice has been quiet.
 
-            # Pronunciation fixes: replace brand names with phonetic equivalents.
-            text = re.sub(r'(?i)\bvibr8\b', 'vibrate', text)
-
-            if self._webrtc_manager and hasattr(self._webrtc_manager, "say_for_session"):
-                self._cancel_thinking_timer(session_id)
-                self._webrtc_manager.set_thinking_any(False)
-                logger.info("[ws-bridge] Remote TTS starting for session %s: %d chars", session_id, len(text))
-                handled = await self._webrtc_manager.say_for_session(session_id, text, interrupt=True)
-                if handled:
-                    logger.info("[ws-bridge] Remote TTS enqueued for session %s", session_id)
+        Self-restarting: exits cleanly when there's nothing queued (next
+        `_enqueue_speak` brings it back up). Internal failures are logged
+        but don't kill the loop — the next tick retries.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self.DEFERRED_TTS_TICK_S)
+                if not self._deferred_tts:
                     return
+                try:
+                    self._drain_deferred_tts_once()
+                except Exception:
+                    logger.exception(
+                        "[ws-bridge] Deferred TTS drain pass failed (continuing)",
+                    )
+        except asyncio.CancelledError:
+            raise
 
-            frame_count = 0
-            def on_frame(frame):
-                nonlocal frame_count
-                frame_count += 1
-                track.push_opus_frame(frame)
+    def _drain_deferred_tts_once(self) -> None:
+        """Single pass over the deferred queue. Releases entries whose
+        client has been quiet long enough; drops stale entries."""
+        now = time.time()
+        for client_id in list(self._deferred_tts.keys()):
+            queue = self._deferred_tts.get(client_id) or []
+            if not queue:
+                self._deferred_tts.pop(client_id, None)
+                continue
 
-            # Stop thinking tone — TTS is taking over.
+            # Drop stale entries (LLM response that's been queued >10s is
+            # likely already obsolete — the user has moved on).
+            fresh: list[tuple[str, Any, Any, float]] = []
+            for entry in queue:
+                age = now - entry[3]
+                if age > self.DEFERRED_TTS_MAX_AGE_S:
+                    logger.warning(
+                        "[ws-bridge] Deferred TTS for session %s expired "
+                        "(age=%.1fs) — dropping",
+                        entry[0], age,
+                    )
+                else:
+                    fresh.append(entry)
+            if not fresh:
+                self._deferred_tts.pop(client_id, None)
+                continue
+
+            # Still talking? Wait another tick.
+            if self._is_voice_active(client_id, self.DEFERRED_TTS_QUIET_WINDOW_MS):
+                self._deferred_tts[client_id] = fresh
+                continue
+
+            # Quiet long enough — release one entry per tick (oldest
+            # first). Multiple queued entries get released across
+            # successive ticks so the user has a beat between them.
+            session_id, text, track, enqueued_at = fresh.pop(0)
+            wait_s = now - enqueued_at
+            if fresh:
+                self._deferred_tts[client_id] = fresh
+            else:
+                self._deferred_tts.pop(client_id, None)
+            logger.info(
+                "[ws-bridge] Releasing deferred TTS for session %s "
+                "(waited %.1fs, client=%s)",
+                session_id, wait_s, client_id,
+            )
+            # Use _enqueue_speak again rather than _speak_text directly so
+            # we re-check voice activity at release time — if the user
+            # started talking again between the quiet check and now, the
+            # entry just goes back in the queue (and we won't deadlock
+            # because the queue itself triggers _ensure_deferred_tts_drainer).
+            asyncio.ensure_future(
+                self._speak_text(session_id, text, track, client_id)
+            )
+
+    async def _speak_text(
+        self, session_id: str, text, track, client_id: str = "",
+    ) -> None:
+        """Synthesize *text* via OpenAI TTS and push Opus frames to *track*.
+
+        D2 (cancel-on-barge-in): registers this coroutine's task handle in
+        ``_tts_tasks`` so :meth:`cancel_tts` can hard-cancel via
+        ``Task.cancel()`` in addition to the engine's cooperative flag.
+        Any frames produced by an HTTP chunk already in flight at cancel
+        time are dropped because ``on_frame`` checks ``_tts_cancelled``
+        before pushing to the track.
+
+        D1 (queue-before-start): deferred at the call site via
+        :meth:`_speak_when_quiet`; once this function is reached the gate
+        has already passed.
+        """
+        # Normalize input
+        if isinstance(text, dict):
+            content = text.get("content", "")
+            if isinstance(content, list):
+                text = " ".join(
+                    block.get("text", "") for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+            elif isinstance(content, str):
+                text = content
+            else:
+                text = ""
+        elif isinstance(text, list):
+            text = " ".join(
+                block.get("text", "") for block in text
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        if not isinstance(text, str) or not text.strip():
+            logger.info("[ws-bridge] TTS skipped: empty or non-string text for session %s (type=%s)", session_id, type(text).__name__)
+            return
+
+        # Strip markdown formatting for cleaner TTS output.
+        import re
+        text = re.sub(r'\*{1,3}', '', text)
+        text = re.sub(r'#{1,6}\s*', '', text)
+        text = re.sub(r'`{1,3}[^`]*`{1,3}', '', text)
+        text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+        text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
+        text = text.strip()
+        if not text:
+            logger.info("[ws-bridge] TTS skipped: empty after markdown strip for session %s", session_id)
+            return
+
+        # Pronunciation fixes: replace brand names with phonetic equivalents.
+        text = re.sub(r'(?i)\bvibr8\b', 'vibrate', text)
+
+        if self._webrtc_manager and hasattr(self._webrtc_manager, "say_for_session"):
             self._cancel_thinking_timer(session_id)
-            if self._webrtc_manager:
-                self._webrtc_manager.set_thinking_any(False)
-            logger.info("[ws-bridge] TTS starting for session %s: %d chars", session_id, len(text))
-            from server.tts import create_tts
-            tts = create_tts(opus_frame_handler=on_frame)
-            # Cancel any prior TTS still running for this session.
-            prev = self._active_tts.pop(session_id, None)
-            if prev:
-                prev.cancel()
-            self._active_tts[session_id] = tts
-            try:
-                await tts.say(text)
-            finally:
-                if self._active_tts.get(session_id) is tts:
-                    self._active_tts.pop(session_id, None)
-            logger.info("[ws-bridge] TTS done for session %s: %d opus frames pushed", session_id, frame_count)
+            self._webrtc_manager.set_thinking_any(False)
+            logger.info("[ws-bridge] Remote TTS starting for session %s: %d chars", session_id, len(text))
+            handled = await self._webrtc_manager.say_for_session(session_id, text, interrupt=True)
+            if handled:
+                logger.info("[ws-bridge] Remote TTS enqueued for session %s", session_id)
+                return
+
+        # Stop thinking tone — TTS is taking over.
+        self._cancel_thinking_timer(session_id)
+        if self._webrtc_manager:
+            self._webrtc_manager.set_thinking_any(False)
+        logger.info(
+            "[ws-bridge] TTS starting for session %s client=%s: %d chars",
+            session_id, client_id or "?", len(text),
+        )
+
+        # Clear any stale cancel flag from a *prior* turn — we're about to
+        # start a fresh one. Any in-flight frame callbacks from the prior
+        # turn have either landed or have a captured-at-call-time guard
+        # (see `on_frame` below) that ignores this reset.
+        self._tts_cancelled.discard(session_id)
+
+        # Register this coroutine's task so cancel_tts() can hard-cancel.
+        my_task = asyncio.current_task()
+        if my_task is not None:
+            prev_task = self._tts_tasks.get(session_id)
+            if prev_task is not None and prev_task is not my_task and not prev_task.done():
+                prev_task.cancel()
+            self._tts_tasks[session_id] = my_task
+
+        # Capture a generation token so that frames produced by *this*
+        # invocation of _speak_text don't leak into the next one even if
+        # `cancel_tts` resets `_tts_cancelled` before the next callback
+        # lands. We compare-by-identity against the current TTS engine.
+        frame_count = 0
+        dropped_after_cancel = 0
+        from server.tts import create_tts
+        tts = create_tts(opus_frame_handler=None)
+
+        def on_frame(frame):
+            nonlocal frame_count, dropped_after_cancel
+            # D2: drop frames that arrive after barge-in. Two guards:
+            # (a) explicit per-session cancel flag, (b) engine identity —
+            # if a newer TTS engine has been installed for this session,
+            # this callback belongs to a stale generation.
+            if session_id in self._tts_cancelled:
+                dropped_after_cancel += 1
+                return
+            current = self._active_tts.get(session_id)
+            if current is not None and current is not tts:
+                dropped_after_cancel += 1
+                return
+            frame_count += 1
+            track.push_opus_frame(frame)
+
+        tts._opus_frame_handler = on_frame  # type: ignore[attr-defined]
+
+        # Cancel any prior TTS still running for this session.
+        prev = self._active_tts.pop(session_id, None)
+        if prev is not None and prev is not tts:
+            prev.cancel()
+        self._active_tts[session_id] = tts
+
+        try:
+            await tts.say(text)
+            logger.info(
+                "[ws-bridge] TTS done for session %s: %d opus frames pushed (dropped=%d)",
+                session_id, frame_count, dropped_after_cancel,
+            )
+        except asyncio.CancelledError:
+            logger.info(
+                "[ws-bridge] TTS task cancelled for session %s after %d frames (dropped=%d)",
+                session_id, frame_count, dropped_after_cancel,
+            )
+            raise
         except Exception:
             logger.exception("[ws-bridge] TTS failed for session %s", session_id)
         finally:
+            if self._active_tts.get(session_id) is tts:
+                self._active_tts.pop(session_id, None)
+            if self._tts_tasks.get(session_id) is my_task:
+                self._tts_tasks.pop(session_id, None)
+            # Stop the thinking tone. We deliberately leave _tts_cancelled
+            # in place: barge-in set it because the user is talking, and
+            # we don't want a follow-up TTS that races a still-active
+            # speech burst to slip through. _speak_text clears it at
+            # entry (above) when the next turn begins.
             self._stop_thinking(session_id)
 
     async def _handle_result_message(self, session: Session, msg: dict[str, Any]) -> None:
@@ -2603,6 +2899,19 @@ class WsBridge:
         for tts in self._active_tts.values():
             tts.cancel()
         self._active_tts.clear()
+
+        # D2: cancel all in-flight TTS coroutines hard (Task.cancel) and
+        # drop any deferred-TTS entries so the drain loop has nothing left
+        # to release after shutdown.
+        for task in self._tts_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._tts_tasks.clear()
+        self._tts_cancelled.clear()
+        self._deferred_tts.clear()
+        if self._deferred_tts_task is not None and not self._deferred_tts_task.done():
+            self._deferred_tts_task.cancel()
+            self._deferred_tts_task = None
 
         # Close all WebSocket connections.
         for session in self._sessions.values():

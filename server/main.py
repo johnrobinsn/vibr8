@@ -948,19 +948,31 @@ def create_app() -> web.Application:
     # ── Startup / Shutdown hooks ──────────────────────────────────────────
 
     async def on_startup(app: web.Application) -> None:
-        # Preload STT models (Whisper, VAD, EOU) in a background thread
-        # so we don't block the event loop during download/loading.
-        async def _preload_stt() -> None:
-            try:
-                from server.stt import AsyncSTT
-                logger.info("[server] Preloading STT models (background thread)...")
-                await asyncio.to_thread(AsyncSTT.preload_shared_resources)
-                logger.info("[server] STT models ready")
-            except Exception:
-                logger.exception("[server] Failed to preload STT models")
+        # aiohttp runs on_startup hooks BEFORE binding the listen socket.
+        # Preload paths use asyncio.to_thread → the default ThreadPoolExecutor.
+        # Two things bit us on 2026-07-12 after a 13-hour hub-idle window
+        # evicted whisper's safetensors mmap from page cache:
+        #
+        # 1. Cold-cache whisper load is ~40s (not the ~3-5s of a warm cache).
+        #    That's fine on its own.
+        # 2. Historically we spawned _preload_stt() *and*
+        #    warmup_voice_models(), which BOTH call STT.preload_shared_resources.
+        #    On a warm cache the winner finished in ~2s and the loser found
+        #    "asr_model" already in shared_resources → skip. On a cold cache
+        #    the winner takes 40s, giving the loser plenty of time to race
+        #    past the guard and start a second concurrent 15GB load. That's
+        #    what turned a 40s cold load into 8 minutes + swap thrashing.
+        #
+        # Fix: only one preload path (warmup_voice_models already covers
+        # everything _preload_stt did, and adds a JIT-compile transcribe).
+        # A 1s sleep at the top of each preload also lets aiohttp complete
+        # site.start() before the executor threads compete for GIL/RAM, so
+        # incoming connections aren't blocked while models warm up.
+        PRELOAD_DELAY_S = 1.0
 
         async def _preload_tts() -> None:
             try:
+                await asyncio.sleep(PRELOAD_DELAY_S)
                 import os
                 engine = os.getenv("VIBR8_TTS_ENGINE", "kokoro").lower()
                 if engine != "openai":
@@ -973,16 +985,20 @@ def create_app() -> web.Application:
             except Exception:
                 logger.exception("[server] Failed to preload Kokoro TTS model")
 
+        async def _deferred_warmup() -> None:
+            await asyncio.sleep(PRELOAD_DELAY_S)
+            from server.stt import warmup_voice_models
+            await warmup_voice_models()
+
         if HAS_WEBRTC and not _fast_startup:
-            spawn(_preload_stt())
             # Warm the voice pipeline (Whisper + Silero VAD + EOU + ECAPA + TSE)
             # in the background so the first utterance after the user enables
-            # voice doesn't pay 9-13s of first-inference latency. Runs entirely
-            # on worker threads inside warmup_voice_models so it does NOT block
-            # the event loop — the server is fully responsive while this runs.
+            # voice doesn't pay 9-13s of first-inference latency. This *also*
+            # populates STT.shared_resources, replacing the old dedicated
+            # _preload_stt path (which raced against this one and doubled the
+            # memory footprint under a cold cache).
             try:
-                from server.stt import warmup_voice_models
-                spawn(warmup_voice_models())
+                spawn(_deferred_warmup())
             except Exception:
                 logger.exception("[server] Failed to schedule voice-model warmup")
         if not _fast_startup:
