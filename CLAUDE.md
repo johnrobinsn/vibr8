@@ -156,7 +156,7 @@ UITarsAgent (Act/Watch modes, server/ui_tars_agent.py)
 
 ### Permission flow
 
-CLI emits a `control_request` (e.g. `tool=Bash`). The bridge stores it in `session.pending_permissions[request_id]`, broadcasts `permission_request` to browsers, pushes to native clients, and notifies Ring0 via a `waiting_for_permission` state change.
+CLI emits a `control_request` (e.g. `tool=Bash`). The bridge stores it in `session.pending_permissions[request_id]`, broadcasts `permission_request` to browsers, and notifies Ring0 via a `waiting_for_permission` state change (which in turn fires the events/v1 `attention` hook — the hub relays that to subscribed native observers per `docs/native-client-contract.md` §B2). The native channel does not receive a raw `permission_request` push; the observer contract carries only `attention` + `busy`.
 
 **Approval paths**:
 - **Browser**: dismiss button → `permission_response` over WS → `_handle_permission_response` pops pending, sends `control_response` to CLI, broadcasts `permission_cancelled`. For remote sessions the control_response goes via tunnel as a `cli_input`.

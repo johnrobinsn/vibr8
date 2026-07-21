@@ -1,22 +1,39 @@
 # Node-Vended UI: Architecture Direction and Plan
 
-Status: **Phases 0–3 implemented and verified** (2026-06-12, this branch);
-Phase 4 staged behind preconditions listed at the bottom.
+Status: **All phases (0–4) complete** as of 2026-07-20. This document
+predates the completion and is retained for the design rationale in
+the sections below; the current architecture is described normatively
+in **`docs/hub-node-contract-v1.md`** (contract), and the current
+observer channel is in **`docs/native-client-contract.md`**. Read
+those two documents for source-of-truth; treat this one as
+"how we got here" background.
 
-- Phase 0 — `docs/hub-node-contract-v1.md` written; nodes announce
-  `protocolVersion` + `contract` flags at registration.
-- Phase 1 — `server/node_ui_proxy.py` maps `/nodes/{id}/{ui,api,ws}/*`
-  onto the node's loopback server via `http_request` / `ws_open` /
-  `ws_data` / `ws_close` tunnel messages. Node serves `web/dist` at
-  `/ui/` and accepts browser WebSockets locally.
-- Phase 2 — frontend node mode (prefix-aware API/WS, shell-owned node
-  switching and voice, postMessage bridge); `NodeShellFrame` renders any
-  ui/v1 node's vended UI in the hub shell.
-- Phase 3 — events/v1: `transcript` in; `speak`/`busy`/`attention` out;
-  hub TTS sniffing disabled for contract nodes.
-- Verified end-to-end on a live hub + self-node: vended index/assets/API
-  over the tunnel, session created via `/nodes/local/api/`, browser WS
-  round-trip through the channel proxy delivering `session_init`.
+Phase completion summary (details in the sections below reflect the
+original plan; delta from plan-as-written to shipped:):
+
+- **Phases 0–3** — landed 2026-06-12 as originally planned: contract
+  doc, `node_ui_proxy` HTTP+WS mapping, frontend node mode +
+  postMessage bridge, events/v1 hooks.
+- **Phase 4a** — the hub is now stateless wrt sessions.
+  `local_node_ops` on the hub is a `SwappableNodeClient(NOT_READY)`
+  placeholder; every session-scoped route calls into a per-node
+  `NodeOperations` reachable via the tunnel. The host node runs as a
+  separate `vibr8_node` process registered like any other node.
+- **Phase 4b** — the shell↔hub contract shrunk to node selection,
+  voice, theme, and desktop viewer. Session-scoped ops (`switch_ui`,
+  session lifecycle, artifacts) are node-local. `_HUB_ONLY_PREFIXES`
+  in `vibr8_node/node_agent.py` codifies the boundary; the shell's
+  hub-shell WS handler is a small router (`hubShellRouter.ts`) with
+  an explicit allowlist and an "unhandled type" warning.
+- **Phase 4c** — the observer channel got the same treatment as the
+  shell contract. Native pushes reduced from nine `vibr8_node`-specific
+  event names (`permission_request`, `status_change`, `cli_connected`,
+  …) to two node-agnostic ones (`attention`, `busy`), so a
+  `hello-node`-shaped node can implement the channel without pretending
+  to have sessions or a CLI. Full spec: `docs/native-client-contract.md`.
+
+The plan-as-written below still reads correctly for the direction and
+the "why"; ignore any "not yet done" language — it's all done.
 
 ## Motivation
 

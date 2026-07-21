@@ -508,7 +508,6 @@ class TaskScheduler:
         `delay <= 0` branch, calls _schedule_task_execution, loops, and
         re-selects the same task infinitely. Main event loop pegged at 100%
         CPU, aiohttp's site.start() never gets scheduled, port never binds.
-        See docs/todo/scheduler-busy-loop-2026-07-12.md for the full trace.
         """
         timeout = MISSED_RUN_TIMEOUT if is_missed_run else EXECUTION_TIMEOUT
 
