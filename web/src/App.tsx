@@ -20,6 +20,7 @@ import { NodeShellFrame } from "./components/NodeShellFrame.js";
 import { EmptyHubState } from "./components/EmptyHubState.js";
 import { PinnedNodeUnavailable } from "./components/PinnedNodeUnavailable.js";
 import { PINNED_NODE, resolvePinnedNode } from "./pinnedNode.js";
+import { TASK_PANEL_ENABLED } from "./features.js";
 import { connectSession, disconnectSession } from "./ws.js";
 import { dispatchHubShellMessage } from "./hubShellRouter.js";
 import { startWebRTC, setAudioInOnly } from "./webrtc.js";
@@ -575,8 +576,13 @@ export default function App() {
         </div>
       </div>
 
-      {/* Task panel — overlay on mobile, inline on desktop */}
-      {currentSessionId && (
+      {/* Task panel — gated by TASK_PANEL_ENABLED (see features.ts).
+          Implementation intact; disabled while we decide on a new
+          surface for TodoWrite/usage-limit display. Flip the flag to
+          bring the render + mobile backdrop back at once. Any future
+          consumer of the same data can subscribe to the store's
+          `tasks` map directly. */}
+      {TASK_PANEL_ENABLED && currentSessionId && (
         <>
           {/* Mobile overlay backdrop */}
           {taskPanelOpen && (
