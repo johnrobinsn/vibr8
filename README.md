@@ -254,6 +254,29 @@ uv run python -m vibr8_node --hub wss://your-hub:3456 --name my-opencode-node \
 - **Voice switching**: Say "vibr8 node {name}" to switch the active node
 - **Node config**: Stored at `~/.vibr8-node/config.json` on the node
 
+### Pin a browser tab to a single node (`/@node` deeplink)
+
+Any of these URL forms locks the tab to one node — the switcher
+dropdown in the shell strip becomes a static label, voice / Ring0
+switch attempts refuse rather than silently redirect, and sharing
+the URL sends the recipient to the same pinned node:
+
+```
+https://your-hub/@blah        # canonical
+https://your-hub/n/blah       # equivalent, useful in scripts
+https://your-hub/?pin=blah    # legacy query form
+```
+
+`blah` matches by exact node name (case-insensitive), then by node
+id prefix. If the pinned node isn't registered or is offline, the
+shell renders a pin-specific "Node unavailable" card rather than
+falling back to a different node — the page updates automatically
+once the node comes online. Voice / Ring0 `switch_node` returns an
+honest error to the caller instead of pretending to switch. Useful
+for dedicating a tab (or a browser profile) to a single machine,
+e.g. leaving one tab pinned to your dev laptop and another pinned
+to a remote GPU box.
+
 ## Docker Hub Deployment
 
 Run the full vibr8 hub (server, Ring0, voice, virtual desktop, computer-use) in a single Docker container.
