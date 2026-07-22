@@ -157,6 +157,7 @@ interface AppState {
 
   // Remote nodes
   nodes: NodeInfo[];
+  nodesLoaded: boolean;
   activeNodeId: string;
 
   // Android devices
@@ -285,6 +286,7 @@ interface AppState {
 
   // Node actions
   setNodes: (nodes: NodeInfo[]) => void;
+  setNodesLoaded: (loaded: boolean) => void;
   setNodeTitle: (nodeId: string, title: string) => void;
   setActiveNode: (nodeId: string) => void;
   setAndroidDevices: (devices: AndroidDeviceInfo[]) => void;
@@ -395,6 +397,7 @@ export const useStore = create<AppState>((set, get) => ({
   })(),
   secondScreenDarkMode: localStorage.getItem("cc-second-screen-dark-mode") !== "false",
   nodes: [],
+  nodesLoaded: false,
   activeNodeId: getInitialActiveNodeId(),
   androidDevices: [],
   playgroundActive: false,
@@ -950,6 +953,7 @@ export const useStore = create<AppState>((set, get) => ({
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
   setNodes: (nodes) => set({ nodes }),
+  setNodesLoaded: (loaded) => set({ nodesLoaded: loaded }),
   setNodeTitle: (nodeId, title) => set((s) => ({
     nodes: s.nodes.map((n) => n.id === nodeId ? { ...n, title } : n),
   })),

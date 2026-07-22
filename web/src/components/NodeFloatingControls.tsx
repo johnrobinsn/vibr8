@@ -33,16 +33,21 @@ export function NodeFloatingControls() {
     ? sdkSessions.find((x) => x.sessionId === currentSessionId)?.backendType === "terminal"
     : false;
   const isConnected = currentSessionId ? (cliConnected.get(currentSessionId) ?? false) : false;
-  const connStatus = currentSessionId ? (connectionStatus.get(currentSessionId) ?? "disconnected") : "disconnected";
+  // Distinguish "no entry yet" (initial mount, before connectSession runs)
+  // from "explicitly disconnected". Without this, reload flashes the
+  // Reconnect chip + red status line for a beat before the WS opens.
+  const rawConnStatus = currentSessionId ? connectionStatus.get(currentSessionId) : undefined;
+  const connStatus = rawConnStatus ?? "disconnected";
+  const connStatusUnknown = !!currentSessionId && rawConnStatus === undefined;
   const isCliDisconnected = connStatus === "connected" && !isConnected;
   const isReconnecting = currentSessionId ? (reconnecting.get(currentSessionId) ?? false) : false;
   const hasGaveUp = currentSessionId ? (reconnectGaveUp.get(currentSessionId) ?? false) : false;
   const status = currentSessionId ? (sessionStatus.get(currentSessionId) ?? null) : null;
 
   const isDisconnectedLine =
-    isCliDisconnected || isReconnecting || hasGaveUp || connStatus === "disconnected";
+    !connStatusUnknown && (isCliDisconnected || isReconnecting || hasGaveUp || connStatus === "disconnected");
   const showReconnectChip =
-    !!currentSessionId && !isTerminalSession && (isReconnecting || hasGaveUp || (!isConnected && !isCliDisconnected));
+    !!currentSessionId && !isTerminalSession && !connStatusUnknown && (isReconnecting || hasGaveUp || (!isConnected && !isCliDisconnected));
   const showViewerToggle = !!currentSessionId && !isTerminalSession;
 
   return (

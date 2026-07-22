@@ -157,9 +157,16 @@ export default function App() {
     const tick = () => {
       api.listNodes()
         .then((list) => {
-          if (alive && list.length > 0) useStore.getState().setNodes(list);
+          if (!alive) return;
+          if (list.length > 0) useStore.getState().setNodes(list);
+          // Mark loaded after the first response (even if empty) so the
+          // shell can distinguish "genuinely no nodes" from "still
+          // fetching" and skip the EmptyHubState flash on reload.
+          useStore.getState().setNodesLoaded(true);
         })
-        .catch(() => {});
+        .catch(() => {
+          if (alive) useStore.getState().setNodesLoaded(true);
+        });
       const { clientId: cid, activeNodeId: nid } = useStore.getState();
       if (cid && nid) api.setClientActiveNode(cid, nid).catch(() => {});
     };
@@ -405,6 +412,10 @@ export default function App() {
   }, [desktopStreamActive, splitViewActive, desktopStatus]);
 
   const sessionsLoaded = useStore((s) => s.sessionsLoaded);
+  // Hold the shell render until the first /api/nodes fetch resolves so
+  // the reload path doesn't flash <EmptyHubState /> before the registry
+  // populates. Subscribed here so a store update triggers a re-render.
+  const nodesLoaded = useStore((s) => s.nodesLoaded);
 
   // Second screen bypasses auth — it uses pairing codes instead
   if (hash === "#/second-screen") {
@@ -432,6 +443,7 @@ export default function App() {
   // and shows a pin-specific unavailable card if that node isn't
   // registered/online — never silently falls back to a different node.
   if (!NODE_MODE) {
+    if (!nodesLoaded) return null;
     const usable = nodes.filter(
       (n) => n.status === "online" && n.contract?.includes("ui/v1"),
     );
