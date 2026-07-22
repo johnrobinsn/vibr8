@@ -241,6 +241,13 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
 
     case "result": {
       const r = data.data ?? {};
+      console.log(`[ws] result session=${sessionId.slice(0,8)} is_error=${r.is_error} subtype=${r.subtype}`);
+      // Clear running state up front so any exception below (e.g. an
+      // unexpected modelUsage shape) can't leave the UI stuck on the
+      // "Generating…" bar. Every other side effect is best-effort.
+      store.setStreaming(sessionId, null);
+      store.setStreamingStats(sessionId, null);
+      store.setSessionStatus(sessionId, "idle");
       const sessionUpdates: Partial<{ total_cost_usd: number; num_turns: number; context_used_percent: number; total_lines_added: number; total_lines_removed: number }> = {
         total_cost_usd: r.total_cost_usd,
         num_turns: r.num_turns,
@@ -255,7 +262,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
       // Compute context % from modelUsage if available
       if (r.modelUsage) {
         for (const usage of Object.values(r.modelUsage)) {
-          if (usage.contextWindow > 0) {
+          if (usage && usage.contextWindow > 0) {
             const pct = Math.round(
               ((usage.inputTokens + usage.outputTokens) / usage.contextWindow) * 100
             );
@@ -264,9 +271,6 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         }
       }
       store.updateSession(sessionId, sessionUpdates);
-      store.setStreaming(sessionId, null);
-      store.setStreamingStats(sessionId, null);
-      store.setSessionStatus(sessionId, "idle");
       // Play notification sound if enabled and tab is not focused
       if (!document.hasFocus() && store.notificationSound) {
         playNotificationSound();
