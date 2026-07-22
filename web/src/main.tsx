@@ -3,9 +3,15 @@ import { createRoot } from "react-dom/client";
 import App from "./App.js";
 import { NODE_MODE } from "./nodeMode.js";
 import { initShellBridge } from "./shellBridge.js";
+import { isDevInstance } from "./utils/devInstance.js";
 import "./index.css";
 
 initShellBridge();
+
+if (isDevInstance()) {
+  const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+  if (link) link.href = "/favicon-dev.svg";
+}
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

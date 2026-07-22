@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store.js";
 import { VoiceControls } from "./VoiceControls.js";
 import { SettingsPage } from "./SettingsPage.js";
+import { isDevInstance } from "../utils/devInstance.js";
 
 type View = "iframe" | "settings";
 
@@ -78,7 +79,16 @@ export function NodeShellFrame({
     <div className="h-[100dvh] flex flex-col bg-cc-bg text-cc-fg">
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-cc-border shrink-0">
         <div className="flex items-center gap-1.5 mr-1">
-          <img src="/logo.svg" alt="" className="h-[1.2em] w-auto" />
+          <span className="relative inline-block h-[1.2em]">
+            <img src="/logo.svg" alt="" className="h-[1.2em] w-auto" />
+            {isDevInstance() && (
+              <span
+                aria-label="dev instance"
+                title="dev instance"
+                className="absolute bottom-0 right-0 w-1.5 h-1.5 rounded-full bg-red-500 ring-1 ring-cc-bg"
+              />
+            )}
+          </span>
           <span className="text-sm font-semibold text-cc-fg tracking-tight">vibr8</span>
         </div>
         <span className="text-xs text-cc-muted">node</span>
