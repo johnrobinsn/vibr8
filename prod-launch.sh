@@ -90,12 +90,20 @@ start() {
   key="$(mint_node_key)"
 
   # Background backend (stateless hub, serves built web/dist as SPA).
+  # VIBR8_DISABLE_TLS=1: nginx on ringzero.ai terminates HTTPS at the
+  # edge and the SSH reverse tunnel encrypts the wire between EC2 and
+  # this box. Serving plain HTTP internally lets the tunnel forward
+  # from remote:5174 to local:3456 without nginx needing
+  # proxy_ssl_verify off (and matches the "nginx-terminates-TLS"
+  # philosophy). Set VIBR8_DISABLE_TLS=0 to run HTTPS locally instead
+  # (requires a matching nginx proxy_pass https://... config).
   NODE_ENV=production \
+  VIBR8_DISABLE_TLS=1 \
   VIBR8_HUB_DATA_DIR="$PROD_HUB_DIR" \
   PORT="$PROD_PORT" \
   VIBR8_LOG_FILE="$PROD_LOG" \
     nohup uv run python -m server.main >/tmp/vibr8-prod-stdout.log 2>&1 &
-  echo "[prod-launch] backend PID $! → https://localhost:$PROD_PORT (log: $PROD_LOG)"
+  echo "[prod-launch] backend PID $! → http://localhost:$PROD_PORT (log: $PROD_LOG)"
 
   # Wait for the hub HTTP listener to bind so the node can register.
   for _ in $(seq 1 50); do
@@ -103,8 +111,9 @@ start() {
     sleep 0.2
   done
 
-  scheme="wss"
-  [ -f "$(dirname "$0")/certs/cert.pem" ] || scheme="ws"
+  # Local hub is HTTP-only (see VIBR8_DISABLE_TLS above); node connects
+  # over ws://, not wss://.
+  scheme="ws"
   # Screen-capture (x11grab, used by desktop/v1) needs an X display —
   # the node inherits $DISPLAY from this shell. If it's unset the
   # desktop tab will 500 on webrtc/offer with "no display: $DISPLAY not
