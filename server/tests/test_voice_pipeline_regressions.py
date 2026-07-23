@@ -328,6 +328,36 @@ def test_preload_shared_resources_serializes_concurrent_callers(monkeypatch) -> 
     )
 
 
+def test_find_guard_word_prefers_command_over_bare_mention() -> None:
+    """A long dictation that mentions the product name many times must
+    still route a trailing "vibrate done" as the exit signal.
+
+    The old first-occurrence match trapped voice notes in note mode:
+    when a user dictated a note about "vibrate", the first bare
+    mention won, `after_word` never started with a known command, and
+    the closing "vibrate done" got recorded as a fragment instead of
+    ending the note. See the 2026-07-22 stuck-note incident.
+    """
+    text = (
+        "talk about vibrate the app and vibrate design. vibrate done."
+    )
+    m = WebRTCManager._find_guard_word(text)
+    assert m is not None
+    assert text[m[0]:].startswith("vibrate done"), text[m[0]:m[0] + 20]
+
+
+def test_find_guard_word_falls_back_to_first_when_no_command() -> None:
+    """Guard-mode gating still fires on pass-through speech that never
+    matches a command word — return the first occurrence so
+    is_guard_enabled callers still see a hit."""
+    text = "we talked about vibrate earlier and vibrate again"
+    m = WebRTCManager._find_guard_word(text)
+    assert m is not None
+    assert text[m[0]:m[0] + 7] == "vibrate"
+    # first, not second
+    assert m[0] == text.index("vibrate")
+
+
 def test_kokoro_pipeline_shares_stt_load_lock() -> None:
     """`_ensure_pipeline` must acquire `STT._load_lock` so concurrent
     Kokoro/STT preloads serialize against each other.
