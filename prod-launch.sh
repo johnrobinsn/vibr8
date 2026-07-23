@@ -81,6 +81,14 @@ start() {
   fi
   mkdir -p "$PROD_NODE_DIR"
 
+  # Mint (or reuse) the node's API key BEFORE starting the hub. The hub
+  # loads ~/.vibr8/nodes.json once at startup and doesn't reread it on
+  # registration attempts, so a key minted after the hub is up would sit
+  # on disk but not in the hub's in-memory registry — the node would then
+  # fail to register with 403 "Invalid API key for new node". Doing this
+  # first guarantees the hub sees the key when it loads nodes.json.
+  key="$(mint_node_key)"
+
   # Background backend (stateless hub, serves built web/dist as SPA).
   NODE_ENV=production \
   VIBR8_HUB_DATA_DIR="$PROD_HUB_DIR" \
@@ -95,8 +103,6 @@ start() {
     sleep 0.2
   done
 
-  # Mint (or reuse) the node's API key and start the node.
-  key="$(mint_node_key)"
   scheme="wss"
   [ -f "$(dirname "$0")/certs/cert.pem" ] || scheme="ws"
   # Screen-capture (x11grab, used by desktop/v1) needs an X display —
