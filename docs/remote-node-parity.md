@@ -1,6 +1,12 @@
 # Remote Node Parity — Architecture & Implementation Plan
 
-**Status**: Approved, in progress
+> **⚠️ SUPERSEDED (historical).** This refactor landed and was then replaced
+> by the node-vended-UI architecture. The qualified-id namespace,
+> `SessionRegistry`, `QualifyingNodeClient`, and hub-side session forwarding
+> described here have been **deleted**. For the current design see
+> `docs/hub-node-contract-v1.md` and `docs/node-vended-ui.md`. Kept for history.
+
+**Status**: Superseded by node-vended-ui (was: Approved, in progress)
 **Author**: discussion 2026-05-20
 **Goal**: Make remote nodes first-class equivalents of the hub-host. All features available on `neo` (the hub-host) must be available on every remote node, scoped appropriately.
 

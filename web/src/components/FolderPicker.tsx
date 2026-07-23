@@ -43,9 +43,9 @@ export function FolderPicker({ initialPath, onSelect, onClose }: FolderPickerPro
   const loadDirs = useCallback(async (path?: string) => {
     setBrowseLoading(true);
     try {
-      // Bare nodeId === "local" maps to the hub's local_node_ops in
-      // the backend; everything else hits the named node via tunnel.
-      const nid = activeNodeId === "local" ? "" : activeNodeId;
+      // Empty nodeId hits the hub directly (computer-use targeting);
+      // anything else hits the named node via tunnel.
+      const nid = activeNodeId;
       const result = await nodeApi(nid).fs.listDirs(path);
       setBrowsePath(result.path);
       setBrowseDirs(result.dirs);

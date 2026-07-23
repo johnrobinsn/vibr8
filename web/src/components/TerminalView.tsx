@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { useStore } from "../store.js";
+import { BASE_PREFIX } from "../nodeMode.js";
 import "@xterm/xterm/css/xterm.css";
 
 interface Props {
@@ -62,7 +63,7 @@ function getOrCreateTerminal(sessionId: string) {
 
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(
-    `${proto}//${location.host}/ws/terminal/${sessionId}`,
+    `${proto}//${location.host}${BASE_PREFIX}/ws/terminal/${sessionId}`,
   );
   ws.binaryType = "arraybuffer";
 

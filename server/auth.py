@@ -26,7 +26,8 @@ from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
-VIBR8_DIR = Path.home() / ".vibr8"
+from server.paths import VIBR8_DIR
+
 USERS_FILE = VIBR8_DIR / "users.json"
 SECRET_FILE = VIBR8_DIR / "secret.key"
 DEVICE_TOKENS_FILE = VIBR8_DIR / "device-tokens.json"
@@ -513,8 +514,16 @@ async def auth_middleware(
             request["auth_user"] = username
         return await handler(request)
 
-    # Non-API, non-WS routes (SPA static files) — always serve so login page works
-    if not path.startswith("/api/") and not path.startswith("/ws/"):
+    # Non-API, non-WS routes (SPA static files) — always serve so login page
+    # works. The /nodes/{id}/{ui,api,ws}/* vended paths (contract ui/v1) are
+    # gated like /api and /ws: the hub authenticates the browser (cookie,
+    # bearer, or ?token= device token) before proxying to the node, which
+    # never sees the credential (node_ui_proxy strips it).
+    if (
+        not path.startswith("/api/")
+        and not path.startswith("/ws/")
+        and not path.startswith("/nodes/")
+    ):
         return await handler(request)
 
     # Check credentials: cookie → Bearer header → ?token= query param

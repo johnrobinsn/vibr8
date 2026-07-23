@@ -2,6 +2,7 @@ import { useStore } from "./store.js";
 import { api } from "./api.js";
 import { disconnectSession } from "./ws.js";
 import { startWebRTC, stopWebRTC, isWebRTCActive, stopDesktopStream, isDesktopStreamActive } from "./webrtc.js";
+import { TASK_PANEL_ENABLED } from "./features.js";
 
 export interface CommandContext {
   param?: string;
@@ -98,15 +99,21 @@ export const commands: Command[] = [
       useStore.getState().toggleNotificationSound();
     },
   },
-  {
-    id: "ui.taskPanel",
-    label: "Toggle Task Panel",
-    icon: "ui",
-    execute: () => {
-      const s = useStore.getState();
-      s.setTaskPanelOpen(!s.taskPanelOpen);
-    },
-  },
+  // Task-panel toggle: gated by TASK_PANEL_ENABLED so the command
+  // palette doesn't offer an action that would flip store state
+  // with no visible surface. Filter runs at module load; flip the
+  // flag in features.ts to bring the command back.
+  ...(TASK_PANEL_ENABLED
+    ? [{
+        id: "ui.taskPanel",
+        label: "Toggle Task Panel",
+        icon: "ui" as const,
+        execute: () => {
+          const s = useStore.getState();
+          s.setTaskPanelOpen(!s.taskPanelOpen);
+        },
+      }]
+    : []),
   {
     id: "secondscreen.pair",
     label: "Pair Device",

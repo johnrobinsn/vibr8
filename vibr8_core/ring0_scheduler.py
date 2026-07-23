@@ -26,9 +26,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-VIBR8_DIR = Path.home() / ".vibr8"
-TASKS_DIR = VIBR8_DIR / "ring0" / "tasks"
-QUEUE_DIR = VIBR8_DIR / "ring0" / "queue"
+from vibr8_core.data_paths import NODE_DATA_DIR
+
+TASKS_DIR = NODE_DATA_DIR / "ring0" / "tasks"
+QUEUE_DIR = NODE_DATA_DIR / "ring0" / "queue"
 
 EXECUTION_TIMEOUT = 600  # 10 minutes max per task execution
 MISSED_RUN_TIMEOUT = 120  # 2 minutes for catch-up tasks on startup
@@ -419,6 +420,8 @@ class TaskScheduler:
                     continue
                 logger.info("[scheduler] Missed run for task %s (%s), executing now (%.1fh overdue)",
                              task.id, task.name, age / 3600)
+                task.next_run_at = compute_next_run(task, after=now)
+                self._save_task(task)
                 self._schedule_task_execution(task, is_missed_run=True)
 
     async def _run_loop(self) -> None:
@@ -505,7 +508,6 @@ class TaskScheduler:
         `delay <= 0` branch, calls _schedule_task_execution, loops, and
         re-selects the same task infinitely. Main event loop pegged at 100%
         CPU, aiohttp's site.start() never gets scheduled, port never binds.
-        See docs/todo/scheduler-busy-loop-2026-07-12.md for the full trace.
         """
         timeout = MISSED_RUN_TIMEOUT if is_missed_run else EXECUTION_TIMEOUT
 

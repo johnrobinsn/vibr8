@@ -436,7 +436,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
                       onClick={() => {
                         const cwd = sessionData.repo_root || sessionData.cwd;
                         if (!cwd) return;
-                        const nid = activeNodeId === "local" ? "" : activeNodeId;
+                        const nid = activeNodeId;
                         nodeApi(nid).git.pull(cwd).then((r) => {
                           useStore.getState().updateSession(sessionId, {
                             git_ahead: r.git_ahead,

@@ -273,7 +273,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
   const activeNodeId = useStore((s) => s.activeNodeId);
   // FS calls in this panel target the tab's active node. nodeApi("")
   // is the hub-local default; anything else hits the named node via tunnel.
-  const fs = nodeApi(activeNodeId === "local" ? "" : activeNodeId).fs;
+  const fs = nodeApi(activeNodeId).fs;
   const session = useStore((s) => s.sessions.get(sessionId));
   const sdkSession = useStore((s) => s.sdkSessions.find((sdk) => sdk.sessionId === sessionId));
   const openFilePath = useStore((s) => s.editorOpenFile.get(sessionId) ?? null);
@@ -822,7 +822,7 @@ export function EditorPanel({ sessionId }: { sessionId: string }) {
           ) : fileName && isImageFile(fileName) ? (
             <div className="h-full flex items-center justify-center p-8 overflow-auto bg-[repeating-conic-gradient(var(--color-cc-border)_0%_25%,transparent_0%_50%)_0_0/20px_20px]">
               <img
-                src={`/api/fs/raw?path=${encodeURIComponent(openFilePath)}${activeNodeId && activeNodeId !== "local" ? `&nodeId=${encodeURIComponent(activeNodeId)}` : ""}`}
+                src={`/api/fs/raw?path=${encodeURIComponent(openFilePath)}${activeNodeId ? `&nodeId=${encodeURIComponent(activeNodeId)}` : ""}`}
                 alt={fileName}
                 className="max-w-full max-h-full object-contain rounded shadow-lg"
                 onError={(e) => {

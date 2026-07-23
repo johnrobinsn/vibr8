@@ -11,6 +11,8 @@ certs/
 .env
 .claude/
 server.log
+server-dev.log
+server-*.log
 vibe-sessions/
 
 # Playwright e2e

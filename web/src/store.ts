@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { SessionState, PermissionRequest, ChatMessage, SdkSessionInfo, TaskItem, NodeInfo, AndroidDeviceInfo, Artifact } from "./types.js";
 import { api } from "./api.js";
+import { NODE_MODE } from "./nodeMode.js";
 
 function getClientId(): string {
   if (typeof window === "undefined") return crypto.randomUUID();
@@ -31,8 +32,11 @@ function getTabId(): string {
 // at a different node simultaneously (Hermes in one tab, neo in another)
 // and survives refresh within the tab.
 function getInitialActiveNodeId(): string {
-  if (typeof window === "undefined") return "local";
-  return sessionStorage.getItem("vibr8_active_node_id") || "local";
+  if (typeof window === "undefined") return "";
+  // In node mode this UI *is* a single node — node switching belongs to
+  // the hub shell hosting the iframe, so the iframe itself reports "".
+  if (NODE_MODE) return "";
+  return sessionStorage.getItem("vibr8_active_node_id") || "";
 }
 
 function persistActiveNodeId(nodeId: string): void {
@@ -127,6 +131,12 @@ interface AppState {
   desktopRemoteStream: MediaStream | null;
   desktopStatus: "idle" | "connecting" | "connected" | "reconnecting" | "offline";
   desktopStats: { fps: number; bitrate: number; rtt: number } | null;
+  // Last connect error surfaced to the user. Populated when the signaling
+  // fetch throws (e.g. server returns 500 with `$DISPLAY not set` because
+  // the node is headless) so the offline / reconnecting overlays can show
+  // the actual reason instead of a generic "Node offline". Cleared on
+  // successful connect and on explicit user stop.
+  desktopError: string | null;
 
   // Focus management
   pendingFocus: "composer" | "terminal" | "home" | null;
@@ -137,6 +147,9 @@ interface AppState {
   // Second screen pushed content (_pushId auto-increments to force remount on each push)
   secondScreenContent: { type: string; content: string; filename?: string; nodeId?: string; _pushId?: number } | null;
   mirroredSessionId: string | null;
+  // Node owning the mirrored session (contract ui/v1 vended path).
+  // Empty/absent → no mirror target.
+  mirroredNodeId: string | null;
   secondScreenScale: number;
   secondScreenTvSafe: number; // 0 = off, >0 = padding percent
   secondScreenClientName: string | null;
@@ -144,6 +157,7 @@ interface AppState {
 
   // Remote nodes
   nodes: NodeInfo[];
+  nodesLoaded: boolean;
   activeNodeId: string;
 
   // Android devices
@@ -172,6 +186,7 @@ interface AppState {
   setClientRole: (role: "primary" | "secondscreen") => void;
   setSecondScreenContent: (content: { type: string; content: string; filename?: string; nodeId?: string; _pushId?: number } | null) => void;
   setMirroredSessionId: (id: string | null) => void;
+  setMirroredNodeId: (id: string | null) => void;
   setSecondScreenScale: (scale: number) => void;
   setSecondScreenTvSafe: (padding: number) => void;
   setSecondScreenClientName: (name: string | null) => void;
@@ -255,6 +270,7 @@ interface AppState {
   setDesktopRemoteStream: (stream: MediaStream | null) => void;
   setDesktopStatus: (status: "idle" | "connecting" | "connected" | "reconnecting" | "offline") => void;
   setDesktopStats: (stats: { fps: number; bitrate: number; rtt: number } | null) => void;
+  setDesktopError: (message: string | null) => void;
 
   // Focus management actions
   setPendingFocus: (target: "composer" | "terminal" | "home" | null) => void;
@@ -270,6 +286,8 @@ interface AppState {
 
   // Node actions
   setNodes: (nodes: NodeInfo[]) => void;
+  setNodesLoaded: (loaded: boolean) => void;
+  setNodeTitle: (nodeId: string, title: string) => void;
   setActiveNode: (nodeId: string) => void;
   setAndroidDevices: (devices: AndroidDeviceInfo[]) => void;
   clearSessionState: () => void;
@@ -359,6 +377,7 @@ export const useStore = create<AppState>((set, get) => ({
   desktopRemoteStream: null,
   desktopStatus: "idle" as const,
   desktopStats: null,
+  desktopError: null,
   guardEnabled: typeof window !== "undefined" ? localStorage.getItem("cc-guard-enabled") !== "false" : true,
   voiceMode: null,
   activeAudioInputLabel: null,
@@ -366,6 +385,7 @@ export const useStore = create<AppState>((set, get) => ({
   commandPaletteOpen: false,
   secondScreenContent: null,
   mirroredSessionId: null,
+  mirroredNodeId: null,
   secondScreenScale: parseFloat(localStorage.getItem("cc-second-screen-scale") || "1.5"),
   secondScreenClientName: null,
   secondScreenTvSafe: (() => {
@@ -377,6 +397,7 @@ export const useStore = create<AppState>((set, get) => ({
   })(),
   secondScreenDarkMode: localStorage.getItem("cc-second-screen-dark-mode") !== "false",
   nodes: [],
+  nodesLoaded: false,
   activeNodeId: getInitialActiveNodeId(),
   androidDevices: [],
   playgroundActive: false,
@@ -408,6 +429,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
   setMirroredSessionId: (id) => set({ mirroredSessionId: id }),
+  setMirroredNodeId: (id) => set({ mirroredNodeId: id }),
   setSecondScreenScale: (scale) => {
     const clamped = Math.max(0.5, Math.min(3.0, scale));
     localStorage.setItem("cc-second-screen-scale", String(clamped));
@@ -919,6 +941,7 @@ export const useStore = create<AppState>((set, get) => ({
   setDesktopRemoteStream: (stream) => set({ desktopRemoteStream: stream }),
   setDesktopStatus: (status) => set({ desktopStatus: status }),
   setDesktopStats: (stats) => set({ desktopStats: stats }),
+  setDesktopError: (message) => set({ desktopError: message }),
   setGuardEnabled: (enabled) => {
     localStorage.setItem("cc-guard-enabled", String(enabled));
     set({ guardEnabled: enabled });
@@ -930,6 +953,10 @@ export const useStore = create<AppState>((set, get) => ({
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   toggleCommandPalette: () => set((s) => ({ commandPaletteOpen: !s.commandPaletteOpen })),
   setNodes: (nodes) => set({ nodes }),
+  setNodesLoaded: (loaded) => set({ nodesLoaded: loaded }),
+  setNodeTitle: (nodeId, title) => set((s) => ({
+    nodes: s.nodes.map((n) => n.id === nodeId ? { ...n, title } : n),
+  })),
   setActiveNode: (nodeId) => {
     persistActiveNodeId(nodeId);
     set({ activeNodeId: nodeId });
@@ -1043,6 +1070,7 @@ export const useStore = create<AppState>((set, get) => ({
       desktopRemoteStream: null,
       desktopStatus: "idle" as const,
       desktopStats: null,
+      desktopError: null,
       guardEnabled: true,
       voiceMode: null,
       activeAudioInputLabel: null,

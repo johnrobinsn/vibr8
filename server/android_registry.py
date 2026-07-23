@@ -19,7 +19,8 @@ from server import adb_utils
 
 logger = logging.getLogger(__name__)
 
-VIBR8_DIR = Path.home() / ".vibr8"
+from server.paths import VIBR8_DIR
+
 ANDROID_NODES_FILE = VIBR8_DIR / "android-nodes.json"
 
 # Reconnect config

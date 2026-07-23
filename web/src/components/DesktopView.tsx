@@ -11,6 +11,7 @@ export function DesktopView({ sessionId: _sessionId, embedded = false }: { sessi
   const desktopRemoteStream = useStore((s) => s.desktopRemoteStream);
   const desktopStatus = useStore((s) => s.desktopStatus);
   const desktopStats = useStore((s) => s.desktopStats);
+  const desktopError = useStore((s) => s.desktopError);
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showToolbar, setShowToolbar] = useState(true);
@@ -389,15 +390,25 @@ export function DesktopView({ sessionId: _sessionId, embedded = false }: { sessi
   // ── Offline / no stream states ─────────────────────────────────────────
 
   if (desktopStatus === "offline") {
+    // Prefer the server's own reason when we have it — e.g. a
+    // headless node returns `$DISPLAY not set` from
+    // NodeOperations.webrtc_offer, and hiding it behind a generic
+    // "Node offline" leaves the operator guessing at what's wrong.
+    // Fall back to the retry-exhaustion phrasing only when we have
+    // no server-supplied error to name.
+    const title = desktopError ? "Desktop unavailable" : "Node offline";
+    const detail = desktopError
+      ? desktopError
+      : `Connection lost after ${DESKTOP_MAX_RECONNECT} retries`;
     return (
       <div className="flex items-center justify-center h-full text-cc-muted text-sm">
-        <div className="text-center space-y-3">
+        <div className="text-center space-y-3 max-w-md px-6">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1" className="w-12 h-12 mx-auto opacity-30">
             <rect x="2" y="3" width="12" height="8" rx="1" />
             <path d="M5 14h6M8 11v3" />
           </svg>
-          <p className="text-cc-fg font-medium">Node offline</p>
-          <p className="text-xs opacity-60">Connection lost after {DESKTOP_MAX_RECONNECT} retries</p>
+          <p className="text-cc-fg font-medium">{title}</p>
+          <p className="text-xs opacity-70 font-mono break-words">{detail}</p>
           <button
             onClick={() => retryDesktopStream()}
             className="px-4 py-1.5 rounded-lg bg-cc-primary text-white text-xs font-medium hover:bg-cc-primary-hover transition-colors cursor-pointer"
@@ -475,11 +486,20 @@ export function DesktopView({ sessionId: _sessionId, embedded = false }: { sessi
       {/* Reconnecting overlay */}
       {(desktopStatus === "reconnecting" || desktopStatus === "connecting") && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/60">
-          <div className="text-center space-y-2">
+          <div className="text-center space-y-2 max-w-md px-6">
             <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin mx-auto" />
             <p className="text-white/70 text-sm">
               {desktopStatus === "reconnecting" ? "Reconnecting..." : "Connecting..."}
             </p>
+            {desktopError && (
+              // Surfaced mid-retry so the operator doesn't wait ~7s
+              // before learning the reason (e.g. `$DISPLAY not set` —
+              // no amount of retrying will fix that from the browser
+              // side; better to know now).
+              <p className="text-white/50 text-xs font-mono break-words">
+                {desktopError}
+              </p>
+            )}
           </div>
         </div>
       )}

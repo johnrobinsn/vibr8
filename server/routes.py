@@ -18,10 +18,10 @@ from aiohttp import web
 from vibr8_core import artifacts, env_manager, session_names
 from vibr8_core import git_utils
 from server import speaker_fingerprints, voice_profiles, voice_logger
+from server.paths import VIBR8_DIR
 from server.usage_limits import get_usage_limits
 from server.rate_limit import check_rate_limit, get_client_rate_limit_key
 from vibr8_core.cli_launcher import CliLauncher, LaunchOptions, WorktreeInfo
-from server.session_registry import LOCAL_NODE_ID
 from vibr8_core.worktree_tracker import WorktreeTracker, WorktreeMapping
 
 if TYPE_CHECKING:
@@ -155,10 +155,9 @@ def create_routes(
     auth_manager: AuthManager | None = None,
     ring0_manager: Ring0Manager | None = None,
     node_registry: Any | None = None,
-    session_registry: Any | None = None,
-    self_node_name: str = "",
     local_node_ops: Any | None = None,
     hub_browser_bridge: Any | None = None,
+    include_artifacts: bool = True,
 ) -> web.RouteTableDef:
     routes = web.RouteTableDef()
     node_register_rate: dict[str, list[float]] = {}
@@ -469,22 +468,13 @@ def create_routes(
             node = node_registry.get_node(target_node) or node_registry.get_node_by_name(target_node)
             if not node:
                 return web.json_response({"error": f"Node '{target_node}' not found"}, status=404)
-            if node.tunnel and node.tunnel.connected:
-                result = await node.tunnel.send_command({
-                    "type": "create_session",
-                    "options": {k: v for k, v in body.items() if k != "nodeId"},
-                })
-                if result.get("error"):
-                    return web.json_response({"error": result["error"]}, status=500)
-                raw_sid = result.get("sessionId")
-                if raw_sid:
-                    from vibr8_core.ws_bridge import WsBridge
-                    result["sessionId"] = WsBridge.qualify_session_id(node.id, raw_sid)
-                return web.json_response(result)
-            elif node.tunnel is None:
-                pass  # Local node — fall through to local session creation
-            else:
-                return web.json_response({"error": f"Node '{node.name}' is offline"}, status=503)
+            # Sessions are owned by the node that runs the CLI — they are
+            # created through that node's vended UI
+            # (/nodes/{id}/api/sessions/create), not the hub.
+            return web.json_response(
+                {"error": f"Create sessions on node '{node.name}' via its own UI"},
+                status=400,
+            )
 
         try:
             if backend not in ("claude", "codex", "opencode", "hermes", "terminal", "computer-use"):
@@ -637,48 +627,20 @@ def create_routes(
             associated.sort(key=lambda s: (0 if s.get("isRing0") else 1, -(s.get("lastPromptedAt") or s.get("createdAt") or 0)))
             return web.json_response(associated)
 
-        # Remote node — fetch sessions via tunnel
-        if requested_node and node_registry:
-            node = node_registry.get_node(requested_node)
-            if node and node.tunnel and node.tunnel.connected:
-                result = await node.tunnel.send_command({"type": "list_sessions"})
-                remote_sessions = result.get("sessions", [])
-                # Qualify session IDs at the hub boundary
-                from vibr8_core.ws_bridge import WsBridge
-                for s in remote_sessions:
-                    raw_id = s.get("sessionId", "")
-                    if raw_id:
-                        s["sessionId"] = WsBridge.qualify_session_id(requested_node, raw_id)
-                # Append local CU sessions targeting this remote node (pulled
-                # through NodeClient so they pick up the same enrichment).
-                local_list = (await local_node_ops.list_sessions()).get("sessions", [])
-                for s_dict in local_list:
-                    if s_dict.get("backendType") == "computer-use" and s_dict.get("nodeId") == requested_node:
-                        # NodeOps.list_sessions already enriches agentState.
-                        remote_sessions.append(s_dict)
-                # Sort: Ring0 pinned first, then MRU
-                remote_sessions.sort(
-                    key=lambda s: (
-                        0 if s.get("isRing0") else 1,
-                        -(s.get("lastPromptedAt") or s.get("createdAt") or 0),
-                    )
-                )
-                return web.json_response(remote_sessions)
-            elif node and node.tunnel is None:
-                pass  # Local node — fall through to local handling
-            else:
-                return web.json_response([])  # Offline remote node
+        # Per-node sessions are reached through that node's vended UI
+        # (/nodes/{id}/api/sessions), not the hub API.
+        if requested_node:
+            return web.json_response([])
 
-        # Local node — pull sessions through NodeClient. NodeOperations
-        # already does name/lastPromptedAt/isRing0/controlledBy/agentState
-        # enrichment, so we only filter out CU sessions targeting other
-        # nodes and graft terminal sessions on top here on the hub.
+        # Hub-owned sessions: just computer-use (the agent + VLM live
+        # hub-side). NodeOperations enrichment runs through NodeClient.
         r0_id = ring0_manager.session_id if ring0_manager else None
         list_result = await local_node_ops.list_sessions()
         enriched = []
         for s_dict in list_result.get("sessions", []):
             cu_node = s_dict.get("nodeId")
-            if s_dict.get("backendType") == "computer-use" and cu_node and cu_node != "local":
+            if s_dict.get("backendType") == "computer-use" and cu_node:
+                # CU session targeting a node belongs to that node's UI.
                 continue
             enriched.append(s_dict)
         # Include terminal sessions (hub-only concept; TerminalManager isn't
@@ -734,13 +696,13 @@ def create_routes(
             return web.json_response({"error": str(e)}, status=503)
         if not is_remote and ring0_manager and ring0_manager.session_id == sid:
             return web.json_response({"error": "Ring0 session cannot be renamed"}, status=403)
+        # `rename_session` on NodeOperations expands the id, sets the
+        # name, and broadcasts to browsers itself — no hub-side rebroadcast
+        # needed, and doing one here with `sid` (possibly a prefix) would
+        # miss the browser store keys anyway.
         result = await client.rename_session(session_id=raw_sid, name=name)
         if "error" in result:
             return web.json_response({"error": result["error"]}, status=_status_for_error(result["error"]))
-        # Broadcast to all browsers so other tabs/devices see the rename
-        # (hub-only side effect — remote nodes broadcast independently)
-        if not is_remote:
-            await hub_browser_bridge.broadcast_name_update(sid, name, user_renamed=True)
         return web.json_response(result)
 
     @routes.post("/api/sessions/{id}/kill")
@@ -1414,12 +1376,32 @@ def create_routes(
 
     @routes.post("/api/webrtc/offer")
     async def webrtc_offer(request: web.Request) -> web.Response:
-        if webrtc_manager is None:
-            return web.json_response({"error": "WebRTC not available"}, status=501)
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        # On a node (no hub-style webrtc_manager) the desktop offer flows
+        # directly into NodeOperations.webrtc_offer, which drives that
+        # node's DesktopWebRTCManager (contract desktop/v1). The hub branch
+        # below is for the hub-resident audio/playground manager.
+        if webrtc_manager is None:
+            if not local_node_ops:
+                return web.json_response({"error": "WebRTC not available"}, status=501)
+            try:
+                answer = await local_node_ops.webrtc_offer(
+                    client_id=body.get("clientId", ""),
+                    sdp=body.get("sdp", ""),
+                    sdp_type=body.get("type", "offer"),
+                    desktop_role=body.get("desktopRole", "controller"),
+                    ice_servers=body.get("iceServers"),
+                )
+                if isinstance(answer, dict) and answer.get("error"):
+                    return web.json_response(answer, status=500)
+                return web.json_response(answer)
+            except Exception as e:
+                logger.exception("[webrtc] node-side desktop offer failed: %s", e)
+                return web.json_response({"error": str(e)}, status=500)
 
         client_id = body.get("clientId", "")
         tab_id = body.get("tabId", "")
@@ -1495,42 +1477,11 @@ def create_routes(
 
     @routes.get("/api/ring0/sessions")
     async def ring0_sessions(request: web.Request) -> web.Response:
-        """List sessions — proxied for Ring0 MCP server (auth-exempt)."""
-        if session_registry:
-            r0_id = ring0_manager.session_id if ring0_manager else None
-            await session_registry.sync_from_launcher(r0_id or "")
-            sessions = []
-            for se in session_registry.list_all():
-                name = session_names.get_name(se.qualified_id) or se.name or "unnamed"
-                bridge_session = ws_bridge._sessions.get(se.qualified_id)
-                model_info = se.model_info
-                if not model_info and se.node_id == "local":
-                    from vibr8_core import backend_models
-                    model_info = backend_models.get_backend_model_info(
-                        se.backend_type,
-                        explicit_model=se.model or "",
-                        work_dir=se.cwd or None,
-                    )
-                entry = {
-                    "sessionId": se.qualified_id,
-                    "name": name,
-                    "state": se.state,
-                    "cwd": se.cwd,
-                    "backendType": se.backend_type,
-                    "model": model_info.get("model") or se.model,
-                    "modelInfo": model_info,
-                    "archived": se.archived,
-                    "nodeId": se.node_id,
-                    "pendingPermissionCount": ws_bridge.get_pending_permission_count(se.qualified_id),
-                    "pendingPermissions": ws_bridge.get_pending_permissions(se.qualified_id),
-                    "controlledBy": bridge_session.controlled_by if bridge_session else "ring0",
-                }
-                if se.is_ring0:
-                    entry["isRing0"] = True
-                sessions.append(entry)
-            return web.json_response(sessions)
-        # Fallback (no session_registry): pull via NodeClient. Local-only
-        # since this code path predates remote-node support.
+        """List sessions — proxied for Ring0 MCP server (auth-exempt).
+
+        Per-node Ring0: this lists only the local node's sessions. Cross-
+        node session visibility was removed with the qualified-id
+        machinery (docs/node-vended-ui.md, Phase 4)."""
         list_result = await local_node_ops.list_sessions()
         sessions = []
         for s in list_result.get("sessions", []):
@@ -1557,15 +1508,15 @@ def create_routes(
 
     @routes.get("/api/ring0/node-environment")
     async def ring0_node_environment(request: web.Request) -> web.Response:
-        """Return environment metadata for the node this Ring0 runs on."""
-        if self_node_name:
-            node_name = self_node_name
-        elif node_registry:
-            node_name = node_registry.hub_name
-        else:
-            node_name = "local"
+        """Return environment metadata for the calling Ring0's node.
+
+        On the stateless hub this path describes the hub host itself —
+        useful when Ring0 MCP probes it through the hub-proxy middleware.
+        For per-node identity the node-vended counterpart at
+        ``/nodes/{id}/api/ring0/node-environment`` is the source of truth.
+        """
         info = {
-            "nodeName": node_name,
+            "nodeName": node_registry.hub_name if node_registry else plat.node(),
             "platform": plat.system().lower(),
             "arch": plat.machine(),
             "hostname": plat.node(),
@@ -1672,17 +1623,6 @@ def create_routes(
         if not session_id or not message:
             return web.json_response({"error": "sessionId and message required"}, status=400)
         on_behalf_of = body.get("onBehalfOfClient", "")
-        if session_registry:
-            entry = session_registry.resolve(session_id)
-            if not entry:
-                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-            router = session_registry.get_router(entry)
-            err = await router.send_message(message, source_client_id=on_behalf_of)
-            if err:
-                return web.json_response({"error": err, "controlledBy": "user"}, status=409)
-            return web.json_response({"ok": True, "sessionId": entry.qualified_id})
-        # Fallback path through NodeClient (used when session_registry is
-        # unavailable, e.g. minimal test harnesses).
         try:
             client, raw_sid, _ = _resolve_client(session_id)
         except Exception as e:
@@ -1698,6 +1638,13 @@ def create_routes(
 
     @routes.post("/api/ring0/switch-ui")
     async def ring0_switch_ui(request: web.Request) -> web.Response:
+        # switch_ui is a node-scoped operation (contract ui/v1). This
+        # handler runs on the node's local server: Ring0 lives on the
+        # node, the target session is on the node, and the vended iframe
+        # UI is served by the node. The node's ws_bridge pushes
+        # ring0_switch_ui down the iframe's session WS — the hub and
+        # shell are not involved. `/api/ring0/switch-ui` is deliberately
+        # NOT in the node's hub-proxy list.
         try:
             body = await request.json()
         except Exception:
@@ -1705,42 +1652,31 @@ def create_routes(
         session_id = body.get("sessionId")
         if not session_id:
             return web.json_response({"error": "sessionId required"}, status=400)
-        # Scope resolution to the calling Ring0's node. Node-issued service
-        # tokens are named "node-{nodeId}"; any other caller (local Ring0,
-        # UI, etc.) is treated as the hub itself.
-        auth_user = request.get("auth_user", "") or ""
-        if auth_user.startswith("node-"):
-            source_node_id = auth_user[len("node-"):]
-        else:
-            source_node_id = LOCAL_NODE_ID
-        if session_registry:
-            entry = session_registry.resolve(session_id, node_id=source_node_id)
-            if not entry:
+        try:
+            client, raw_sid, _ = _resolve_client(session_id)
+            sess = await client.get_session(session_id=raw_sid)
+            if "error" in sess:
                 return web.json_response(
-                    {"error": f"Session not found on this node: {session_id}"},
-                    status=404,
+                    {"error": f"Session not found: {session_id}"}, status=404,
                 )
-            resolved = entry.qualified_id
-        else:
-            # Fallback when session_registry is unavailable (minimal harness).
-            try:
-                _client, raw_sid, _ = _resolve_client(session_id)
-                # Confirm the session exists on the target node before broadcasting.
-                sess = await _client.get_session(session_id=raw_sid)
-                if "error" in sess:
-                    return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-                resolved = session_id if ":" in session_id else raw_sid
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=503)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=503)
+        # Ring0 hands us an 8-char prefix (from list_sessions output);
+        # `get_session` internally expands it. Broadcast the *full* id so
+        # the browser's store keys (sessionNames, sdkSessions) match, or
+        # the title effect / connectSession will silently miss.
+        full_sid = sess.get("sessionId") or raw_sid
         client_id = body.get("clientId", "")
         if not client_id:
             client_id = hub_browser_bridge.get_ring0_prompt_client()
         if not client_id:
-            return web.json_response({"error": "clientId required — specify which client to switch"}, status=400)
-        sent = await hub_browser_bridge.broadcast_ring0_switch_ui(resolved, client_id=client_id)
+            return web.json_response(
+                {"error": "clientId required — specify which client to switch"}, status=400,
+            )
+        sent = await hub_browser_bridge.send_ring0_switch_ui(full_sid, client_id=client_id)
         if not sent:
             return web.json_response({"error": f"Client {client_id} not connected"}, status=400)
-        return web.json_response({"ok": True, "sessionId": resolved})
+        return web.json_response({"ok": True, "sessionId": full_sid})
 
     @routes.get("/api/ring0/prompt-context")
     async def ring0_prompt_context(request: web.Request) -> web.Response:
@@ -1748,7 +1684,12 @@ def create_routes(
         session_id = request.query.get("sessionId", "")
         if not client_id and not session_id:
             client_id = hub_browser_bridge.get_ring0_prompt_client()
-        result = await node_ops.prompt_context(
+        # Prompt context is hub-side state (voice sets the prompt client
+        # on the hub's ws_bridge). Older code called `node_ops.prompt_context`
+        # here — that name was never defined in this scope and would raise
+        # NameError; on the stateless hub `local_node_ops` is NOT_READY
+        # anyway, so we read the hub bridge directly.
+        result = ws_bridge.get_prompt_context(
             client_id=client_id,
             session_id=session_id,
         )
@@ -1804,17 +1745,6 @@ def create_routes(
     @routes.get("/api/ring0/session-output/{id}")
     async def ring0_session_output(request: web.Request) -> web.Response:
         session_id = request.match_info["id"]
-        if session_registry:
-            entry = session_registry.resolve(session_id)
-            if not entry:
-                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-            router = session_registry.get_router(entry)
-            messages = router.get_message_history()
-            pending = router.get_pending_permissions()
-            formatted = _format_session_output(messages, pending)
-            return web.json_response({"messages": messages, "pendingPermissions": pending, "formatted": formatted})
-        # Fallback path through NodeClient (used when session_registry is
-        # unavailable).
         try:
             client, raw_sid, _ = _resolve_client(session_id)
         except Exception as e:
@@ -1844,6 +1774,21 @@ def create_routes(
         params = body.get("params")
         if not client_id or not method:
             return web.json_response({"error": "clientId and method required"}, status=400)
+        # Mirroring a session means displaying a node's live session over the
+        # ui/v1 vended path (/nodes/{id}/ws/browser/{sid}). When the caller
+        # is Ring0 MCP its node service token (auth_user = "node-{nodeId}")
+        # identifies the owning node automatically; any non-node caller
+        # must pass nodeId explicitly because the stateless hub has no
+        # default node to fall back to.
+        if method == "mirror_session" and isinstance(params, dict) and not params.get("nodeId"):
+            auth_user = request.get("auth_user", "") or ""
+            if auth_user.startswith("node-"):
+                params["nodeId"] = auth_user[len("node-"):]
+            else:
+                return web.json_response(
+                    {"error": "mirror_session requires params.nodeId from non-node callers"},
+                    status=400,
+                )
         # Longer timeout for methods that may trigger browser permission prompts
         interactive_methods = {"get_location", "send_notification", "read_clipboard", "write_clipboard", "capture_screenshot"}
         timeout = 30.0 if method in interactive_methods else 5.0
@@ -1872,17 +1817,6 @@ def create_routes(
             return web.json_response(
                 {"error": "sessionId, requestId, and behavior (allow/deny) required"}, status=400
             )
-        if session_registry:
-            entry = session_registry.resolve(session_id)
-            if not entry:
-                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-            router = session_registry.get_router(entry)
-            ok = await router.respond_permission(request_id, behavior, message)
-            if not ok:
-                return web.json_response({"error": f"Permission {request_id} not found"}, status=404)
-            return web.json_response({"ok": True})
-        # Fallback path through NodeClient (used when session_registry is
-        # unavailable, e.g. minimal test harnesses).
         try:
             client, raw_sid, _ = _resolve_client(session_id)
         except Exception as e:
@@ -1904,17 +1838,6 @@ def create_routes(
         session_id = body.get("sessionId", "")
         if not session_id:
             return web.json_response({"error": "sessionId required"}, status=400)
-        if session_registry:
-            entry = session_registry.resolve(session_id)
-            if not entry:
-                return web.json_response({"error": f"Session not found: {session_id}"}, status=404)
-            router = session_registry.get_router(entry)
-            ok = router.interrupt()
-            if not ok:
-                return web.json_response({"error": f"Session {session_id} not interruptible"}, status=404)
-            return web.json_response({"ok": True, "sessionId": entry.qualified_id})
-        # Fallback path through NodeClient (used when session_registry is
-        # unavailable, e.g. minimal test harnesses).
         try:
             client, raw_sid, _ = _resolve_client(session_id)
         except Exception as e:
@@ -1966,21 +1889,16 @@ def create_routes(
         name = body.get("name", "").strip()
         if not sid or not name:
             return web.json_response({"error": "sessionId and name are required"}, status=400)
-        # Migrate via NodeClient; rename_session() updates the session-state
-        # half. The hub still drives the user-facing broadcast since the
-        # browsers connect here, not to the node (this comes apart cleanly
-        # in 4c-3 when the HubBrowserBridge split lands).
         try:
-            client, raw_sid, is_remote = _resolve_client(sid)
+            client, raw_sid, _ = _resolve_client(sid)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=503)
+        # NodeOperations.rename_session expands the id + broadcasts to
+        # browsers with the full id; no hub-side rebroadcast needed.
         result = await client.rename_session(session_id=raw_sid, name=name)
         if "error" in result:
             return web.json_response(result, status=_status_for_error(result["error"]))
-        resolved = sid  # qualified id stays as caller supplied it
-        if not is_remote:
-            await hub_browser_bridge.broadcast_name_update(resolved, name, user_renamed=True)
-        return web.json_response({"ok": True, "sessionId": resolved, "name": name})
+        return web.json_response(result)
 
     _ALLOWED_SESSION_MODES = {"plan", "acceptEdits", "bypassPermissions"}
 
@@ -1998,22 +1916,16 @@ def create_routes(
         if mode not in _ALLOWED_SESSION_MODES:
             return web.json_response({"error": f"mode must be one of: {', '.join(sorted(_ALLOWED_SESSION_MODES))}"}, status=400)
         try:
-            client, raw_sid, is_remote = _resolve_client(session_id)
+            client, raw_sid, _ = _resolve_client(session_id)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=503)
+        # NodeOperations.set_permission_mode expands the id + broadcasts
+        # session_update to browsers with the full id; no hub-side
+        # rebroadcast needed.
         result = await client.set_permission_mode(session_id=raw_sid, mode=mode)
         if "error" in result:
             return web.json_response(result, status=_status_for_error(result["error"]))
-        # Hub-side browser broadcast — for hub-local sessions only; remote
-        # nodes broadcast to their own bridge. (Will move to HubBrowserBridge
-        # in 4c-3.)
-        if not is_remote:
-            session = ws_bridge.get_session(raw_sid)
-            if session:
-                await hub_browser_bridge._broadcast_to_browsers(
-                    session, {"type": "session_update", "session": {"permissionMode": mode}},
-                )
-        return web.json_response({"ok": True, "sessionId": session_id, "mode": mode})
+        return web.json_response(result)
 
     @routes.get("/api/ring0/get-session-mode")
     async def ring0_get_session_mode(request: web.Request) -> web.Response:
@@ -2451,99 +2363,68 @@ def create_routes(
         })
 
     # ── Artifacts ─────────────────────────────────────────────────────────
+    # Artifacts are node-scoped under contract ui/v1 — storage, CRUD, and
+    # content bytes all live on the owning node's local aiohttp server.
+    # The hub does not proxy /api/artifacts (see vibr8_node/node_agent.py
+    # _HUB_ONLY_PREFIXES) and does not register these routes
+    # (server/main.py passes include_artifacts=False). Browsers reach
+    # artifacts through the hub's /nodes/{id}/ vending proxy.
 
-    @routes.get("/api/artifacts")
-    async def artifacts_list(request: web.Request) -> web.Response:
-        node_id = request.query.get("nodeId", "")
-        session_id = request.query.get("sessionId")
-        try:
-            client, _ = _resolve_node_client(node_id)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=503)
-        result = await client.artifacts_list(session_id=session_id)
-        return web.json_response(result.get("artifacts", []))
+    if include_artifacts:
 
-    @routes.post("/api/artifacts")
-    async def artifacts_create(request: web.Request) -> web.Response:
-        username = _get_username(request)
-        body = await request.json()
-        node_id = body.get("nodeId", "")
-        try:
-            client, _ = _resolve_node_client(node_id)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=503)
-        artifact = await client.artifacts_create(username=username, data=body)
-        return web.json_response(artifact)
+        @routes.get("/api/artifacts")
+        async def artifacts_list(request: web.Request) -> web.Response:
+            session_id = request.query.get("sessionId")
+            result = await local_node_ops.artifacts_list(session_id=session_id)
+            return web.json_response(result.get("artifacts", []))
 
-    @routes.delete("/api/artifacts/{id}")
-    async def artifacts_delete(request: web.Request) -> web.Response:
-        artifact_id = request.match_info["id"]
-        node_id = request.query.get("nodeId", "")
-        try:
-            client, _ = _resolve_node_client(node_id)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=503)
-        result = await client.artifacts_delete(artifact_id=artifact_id)
-        if "error" in result:
-            return web.json_response(result, status=404)
-        return web.json_response(result)
+        @routes.post("/api/artifacts")
+        async def artifacts_create(request: web.Request) -> web.Response:
+            username = _get_username(request)
+            body = await request.json()
+            artifact = await local_node_ops.artifacts_create(username=username, data=body)
+            return web.json_response(artifact)
 
-    @routes.get("/api/artifacts/{id}/content")
-    async def artifacts_get_content(request: web.Request) -> web.Response:
-        """Serve an artifact's raw bytes with the correct Content-Type.
-
-        Decouples payload size from the MCP/websocket transport: large
-        artifacts (audio, PDFs, images) ride this endpoint, not the
-        artifact-list response. Artifacts are immutable, so the response is
-        long-cached.
-        """
-        artifact_id = request.match_info["id"]
-        node_id = request.query.get("nodeId", "")
-
-        if node_id:
-            # Remote artifact — fetch bytes via tunnel (base64-encoded).
-            try:
-                client, _ = _resolve_node_client(node_id)
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=503)
-            result = await client.artifacts_read_content(artifact_id=artifact_id)
+        @routes.delete("/api/artifacts/{id}")
+        async def artifacts_delete(request: web.Request) -> web.Response:
+            artifact_id = request.match_info["id"]
+            result = await local_node_ops.artifacts_delete(artifact_id=artifact_id)
             if "error" in result:
+                return web.json_response(result, status=404)
+            return web.json_response(result)
+
+        @routes.get("/api/artifacts/{id}/content")
+        async def artifacts_get_content(request: web.Request) -> web.Response:
+            """Serve an artifact's raw bytes with the correct Content-Type.
+
+            Decouples payload size from the MCP/websocket transport: large
+            artifacts (audio, PDFs, images) ride this endpoint, not the
+            artifact-list response. Artifacts are immutable, so the
+            response is long-cached.
+            """
+            artifact_id = request.match_info["id"]
+            result = artifacts.read_content(artifact_id)
+            if result is None:
                 return web.Response(status=404, text="Not found")
-            import base64
-            body = base64.b64decode(result["contentBase64"])
-            mime = result.get("contentType", "application/octet-stream")
-            filename = result.get("filename")
+            body, mime, filename = result
+
+            # Download-type artifacts get `attachment` so the browser saves them
+            # instead of trying to render inline. The right MIME on top (e.g.
+            # application/vnd.android.package-archive for an .apk) is what makes
+            # mobile Chrome show the install prompt when the user taps.
+            artifact = artifacts.get_artifact(artifact_id)
+            disposition = "attachment" if artifact and artifacts.is_download_type(artifact.get("type", "")) else "inline"
+
             headers = {
                 "Content-Type": mime,
                 "Cache-Control": "public, max-age=31536000, immutable",
-                "Content-Disposition": (
-                    f'inline; filename="{filename}"' if filename else "inline"
-                ),
             }
+            if filename:
+                safe = filename.replace('"', "").replace("\r", "").replace("\n", "")
+                headers["Content-Disposition"] = f'{disposition}; filename="{safe}"'
+            else:
+                headers["Content-Disposition"] = disposition
             return web.Response(body=body, headers=headers)
-
-        result = artifacts.read_content(artifact_id)
-        if result is None:
-            return web.Response(status=404, text="Not found")
-        body, mime, filename = result
-
-        # Download-type artifacts get `attachment` so the browser saves them
-        # instead of trying to render inline. The right MIME on top (e.g.
-        # application/vnd.android.package-archive for an .apk) is what makes
-        # mobile Chrome show the install prompt when the user taps.
-        artifact = artifacts.get_artifact(artifact_id)
-        disposition = "attachment" if artifact and artifacts.is_download_type(artifact.get("type", "")) else "inline"
-
-        headers = {
-            "Content-Type": mime,
-            "Cache-Control": "public, max-age=31536000, immutable",
-        }
-        if filename:
-            safe = filename.replace('"', "").replace("\r", "").replace("\n", "")
-            headers["Content-Disposition"] = f'{disposition}; filename="{safe}"'
-        else:
-            headers["Content-Disposition"] = disposition
-        return web.Response(body=body, headers=headers)
 
     # ── Voice Logs ───────────────────────────────────────────────────────
 
@@ -2611,11 +2492,11 @@ def create_routes(
     _pairing_codes: dict[str, dict[str, Any]] = {}
     # Durable pairings: {secondScreenClientId → {pairedUser, pairedAt, enabled}}
     _second_screen_pairings: dict[str, dict[str, Any]] = {}
-    _PAIRINGS_PATH = Path.home() / ".vibr8" / "second-screens.json"
+    _PAIRINGS_PATH = VIBR8_DIR / "second-screens.json"
 
     def _default_username() -> str:
         """Get the single configured username for migration, or 'default'."""
-        users_path = Path.home() / ".vibr8" / "users.json"
+        users_path = VIBR8_DIR / "users.json"
         if users_path.exists():
             try:
                 data = json.loads(users_path.read_text())
@@ -2755,6 +2636,9 @@ def create_routes(
                 "pairedUser": pairing["pairedUser"],
                 "pairedAt": pairing["pairedAt"],
             }
+            # Second screens no longer have an automatic ambient Ring0 view —
+            # there is no default node on the stateless hub. A primary client
+            # mirroring a session is what populates the second screen's view.
             # Deliver device token (single-use: cleared after first delivery)
             pending_token = pairing.pop("pendingToken", None)
             if pending_token:
@@ -2946,18 +2830,9 @@ def create_routes(
 
     @routes.get("/api/nodes")
     async def list_nodes(request: web.Request) -> web.Response:
-        """List all registered nodes (including the local node)."""
-        # Pull the hub-local session list through NodeClient so we don't
-        # depend on the in-process launcher directly.
-        local_sessions = (await local_node_ops.list_sessions()).get("sessions", []) if local_node_ops else []
-        local_session_ids = [s.get("sessionId", "") for s in local_sessions if s.get("sessionId")]
+        """List all registered nodes."""
         if node_registry is None:
-            import platform as _platform
-            hub_name = _platform.node() or "Local"
-            return web.json_response([{"id": "local", "name": hub_name, "status": "online", "platform": "", "hostname": "", "sessionCount": len(local_session_ids), "ring0Enabled": ring0_manager.is_enabled if ring0_manager else False}])
-        local = node_registry.local_node
-        local.session_ids = local_session_ids
-        local.ring0_enabled = ring0_manager.is_enabled if ring0_manager else False
+            return web.json_response([])
         nodes = [n.to_api_dict() for n in node_registry.get_all_nodes()]
         return web.json_response(nodes)
 
@@ -2978,9 +2853,14 @@ def create_routes(
 
         Resolves the target client (from body `clientId` or the current
         Ring0 prompt context), updates that client's per-client active
-        node, and broadcasts `ring0_switch_node` so the browser's UI
+        node, and sends `ring0_switch_node` to that one client so its UI
         flips to match. Per-client state is the source of truth — see
         `POST /api/clients/{client_id}/active-node` for the direct form.
+
+        If the resolved client is deeplink-pinned (its shell URL is
+        `/@<node>`) to a *different* node, this endpoint returns 409 so
+        Ring0's `switch_node` tool tells the user "can't switch, this
+        tab is pinned" rather than silently no-op'ing.
         """
         if node_registry is None:
             return web.json_response({"error": "Node registry not available"}, status=503)
@@ -2997,9 +2877,29 @@ def create_routes(
         client_id = (body.get("clientId") if isinstance(body, dict) else "") or ""
         if not client_id:
             client_id = hub_browser_bridge.get_ring0_prompt_client()
+
         if client_id:
+            pinned_id = hub_browser_bridge.would_conflict_with_pin(client_id, node_id)
+            if pinned_id:
+                pinned_node = node_registry.get_node(pinned_id)
+                pinned_label = pinned_node.name if pinned_node else pinned_id[:8]
+                logger.info(
+                    "[nodes] activate %s denied — client %s pinned to %r (%s)",
+                    node_id[:8], client_id[:8], pinned_label, pinned_id[:8],
+                )
+                return web.json_response(
+                    {
+                        "error": (
+                            f"Client is pinned to node '{pinned_label}' "
+                            f"(URL uses /@{pinned_label}) — the switch was refused."
+                        ),
+                        "pinnedNodeId": pinned_id,
+                        "pinnedNodeName": pinned_label,
+                    },
+                    status=409,
+                )
             hub_browser_bridge.set_client_active_node(client_id, node_id)
-            await hub_browser_bridge.broadcast_ring0_switch_node(node_id, client_id=client_id)
+            await hub_browser_bridge.send_ring0_switch_node(node_id, client_id=client_id)
             logger.info("[nodes] client %s active node → %r (%s)", client_id[:8], name, node_id[:8])
         else:
             logger.warning("[nodes] activate %s called without a client context — no-op", node_id[:8])
@@ -3013,12 +2913,28 @@ def create_routes(
         Per-client (and eventually per-tab) active node replaces the
         hub-wide `node_registry.active_node_id`. Voice routing and UI
         operations should read from this map.
+
+        Optional body field ``pinnedNodeId`` records the shell's
+        deeplink pin (from `/@<node>`) so the hub can refuse a
+        conflicting Ring0/voice `switch_node`. Pass explicit ``null``
+        or omit to clear any prior pin (tab navigated away from
+        `/@<node>`).
         """
         client_id = request.match_info["client_id"]
         body = await request.json() if request.content_length else {}
-        node_id = (body.get("nodeId") if isinstance(body, dict) else "") or "local"
+        node_id = (body.get("nodeId") if isinstance(body, dict) else "") or ""
+        pinned_node_id = ""
+        if isinstance(body, dict):
+            _p = body.get("pinnedNodeId")
+            pinned_node_id = _p if isinstance(_p, str) else ""
         hub_browser_bridge.set_client_active_node(client_id, node_id)
-        logger.info("[nodes] client %s active node → %s", client_id[:8], node_id[:8] if node_id != "local" else "local")
+        hub_browser_bridge.set_client_pin(client_id, pinned_node_id)
+        logger.info(
+            "[nodes] client %s active node → %s%s",
+            client_id[:8],
+            node_id[:8] or "(none)",
+            f" (pinned {pinned_node_id[:8]})" if pinned_node_id else "",
+        )
         return web.json_response({"ok": True, "clientId": client_id, "nodeId": node_id})
 
     @routes.post("/api/nodes/hub-name")
@@ -3413,19 +3329,9 @@ def create_routes(
         """List all nodes (desktop + Android) with their capabilities."""
         result: list[dict[str, Any]] = []
 
-        # Local node
+        # Desktop-class nodes from the registry
         if node_registry:
-            local = node_registry.local_node
-            local_dict = local.to_api_dict()
-            local_dict["nodeType"] = "desktop"
-            local_dict["canRunSessions"] = True
-            local_dict["hasDisplay"] = True
-            result.append(local_dict)
-
-            # Remote desktop nodes
             for node in node_registry.get_all_nodes():
-                if node.id == "local":
-                    continue
                 d = node.to_api_dict()
                 d["nodeType"] = "desktop"
                 d["canRunSessions"] = True

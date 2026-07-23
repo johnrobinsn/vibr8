@@ -287,9 +287,9 @@ class WebRTCManager:
     def set_local_node_ops(self, ops) -> None:
         """Set a reference to the hub's local NodeClient.
 
-        In Option A self-node mode this is QualifyingNodeClient(
-        RemoteNodeClient(self_id, tunnel)) — voice routing forwards
-        transcripts to the self-node's Ring0 via tunnel.
+        In self-node mode this is RemoteNodeClient(self_id, tunnel) —
+        voice routing forwards transcripts to the self-node's Ring0 via
+        the tunnel.
         """
         self._local_node_ops = ops
 
@@ -298,10 +298,7 @@ class WebRTCManager:
 
         ``status`` is the shape returned by NodeOperations.ring0_status():
         {"enabled": bool, "sessionId": str | None, "model": ..., ...}.
-        For Option A self-node mode, QualifyingNodeClient has already
-        qualified the sessionId (e.g. ``{self_id}:ring0``) — exactly what
-        the hub's broadcast targeting + browser proxy-session keying
-        wants.
+        Session ids are raw (node-internal).
         """
         self._ring0_status_cache = status
 
@@ -331,14 +328,40 @@ class WebRTCManager:
 
         Reads from HubBrowserBridge's per-client map (set by the
         `/api/clients/{id}/active-node` endpoint when the user changes
-        the node selector in the UI). Falls back to "local".
+        the node selector in the UI). Returns "" when no node is
+        selected — there is no implicit default on the stateless hub.
         """
         if self._hub_browser_bridge is not None:
             try:
-                return self._hub_browser_bridge.get_client_active_node(client_id, "local")
+                return self._hub_browser_bridge.get_client_active_node(client_id, "")
             except Exception:
                 pass
-        return "local"
+        return ""
+
+    async def _send_voice_preview(self, client_id: str, transcript: str) -> None:
+        """Fire the live STT preview at the speaking client's active node.
+
+        Not part of the v1 contract table — a fire-and-forget push the
+        node may act on (render a ghost bubble, feed to Ring0 UI, etc.)
+        or silently ignore per contract §Versioning. Empty transcript
+        means 'clear'.
+
+        Audio stays hub-side; this carries only the resulting text."""
+        active_nid = self._client_active_node(client_id)
+        if not active_nid or not self._node_registry:
+            logger.debug("[stt] voice preview: no active node (client=%s)", client_id[:8])
+            return
+        node = self._node_registry.get_node(active_nid)
+        if not node or not node.tunnel or node.status != "online":
+            logger.debug("[stt] voice preview: node %s not routable (tunnel=%s status=%s)",
+                         active_nid[:8], bool(node and node.tunnel),
+                         node.status if node else "?")
+            return
+        logger.info("[stt] voice preview → node %s (%d chars)", active_nid[:8], len(transcript))
+        await node.tunnel.send_fire_and_forget({
+            "type": "broadcast_voice_preview",
+            "transcript": transcript,
+        })
 
     def set_ring0_manager(self, manager) -> None:
         """Set a reference to Ring0Manager for voice routing."""
@@ -830,17 +853,46 @@ class WebRTCManager:
             "type": pc.localDescription.type,
         }
 
+    # Known command words that can follow a guard word. Used by
+    # _find_guard_word to prefer occurrences that actually look like a
+    # command over bare mentions of the product name (which are common
+    # in note-mode dictation — a user talking about "vibrate" in a
+    # voice note used to trap `vibrate done` behind mid-utterance
+    # mentions and never exit note mode).
+    _COMMAND_WORDS: tuple[str, ...] = (
+        "done", "off", "guard", "listen", "quiet", "speak",
+        "ring zero", "ring 0", "note", "node", "vibrate", "app",
+    )
+
     @staticmethod
     def _find_guard_word(text_lower: str) -> tuple[int, int] | None:
-        """Find the first occurrence of a guard word in lowered text.
+        """Find a guard-word occurrence in lowered text.
+
+        Prefers an occurrence followed by a known command word so long
+        dictation containing the product name many times still routes a
+        trailing "vibrate done" as the exit signal. Falls back to the
+        first occurrence when no command follows any of them so
+        guard-mode gating still fires on pass-through speech.
 
         Returns (start_index, end_index) or None.
         """
+        matches: list[tuple[int, int]] = []
         for word in ("vibr8", "vibrate"):
-            idx = text_lower.find(word)
-            if idx != -1:
-                return (idx, idx + len(word))
-        return None
+            i = 0
+            while True:
+                idx = text_lower.find(word, i)
+                if idx == -1:
+                    break
+                matches.append((idx, idx + len(word)))
+                i = idx + 1
+        if not matches:
+            return None
+        matches.sort()
+        for m in matches:
+            after = text_lower[m[1]:].strip().lstrip(".,;:!?- ").strip()
+            if any(after.startswith(cmd) for cmd in WebRTCManager._COMMAND_WORDS):
+                return m
+        return matches[0]
 
     def _make_stt_listener(self, client_id: str, peer_key: str | None = None):
         """Create an STT event listener that submits transcripts to the agent.
@@ -866,23 +918,7 @@ class WebRTCManager:
 
             async def _clear_voice_preview() -> None:
                 """Send empty preview to clear stale interim text from the UI."""
-                if not self._ws_bridge:
-                    return
-                target_sid = None
-                if self.is_ring0_enabled():
-                    active_nid = self._client_active_node(client_id)
-                    if active_nid and active_nid != "local":
-                        from vibr8_core.ws_bridge import WsBridge
-                        target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
-                    if not target_sid:
-                        target_sid = self.ring0_session_id()
-                if not target_sid:
-                    target_sid = _resolve_session()
-                if target_sid:
-                    await self._ws_bridge.send_to_browsers(target_sid, {
-                        "type": "voice_transcript_preview",
-                        "transcript": "",
-                    })
+                await self._send_voice_preview(client_id, "")
 
             if event_type == "segment_confirmed":
                 # Log individual segment audio (moved from final_transcript)
@@ -909,18 +945,29 @@ class WebRTCManager:
                     logger.info("[stt] SUBMIT to model: client=%s text=%r eou=%.4f",
                                 client_id, text, data.get("eouProb", -1))
 
-                    # Check if a remote node is active for this client — route to its Ring0 via its tunnel.
+                    # Route to the active node's Ring0 via its tunnel.
                     if self._node_registry:
                         active_nid = self._client_active_node(client_id)
                         node = self._node_registry.get_node(active_nid) if active_nid else None
-                        if node and node.id != "local":
+                        if node:
                             if node.tunnel and node.status == "online":
                                 logger.info("[stt] Routing to remote node %r (id=%s)", node.name, node.id[:8])
-                                await node.tunnel.send_fire_and_forget({
-                                    "type": "ring0_input",
-                                    "text": text,
-                                    "sourceClientId": client_id,
-                                })
+                                # Contract events/v1 nodes take `transcript`
+                                # (docs/hub-node-contract-v1.md §B); older
+                                # nodes keep the legacy ring0_input command.
+                                contract = node.capabilities.get("contract") or []
+                                if "events/v1" in contract:
+                                    await node.tunnel.send_fire_and_forget({
+                                        "type": "transcript",
+                                        "text": text,
+                                        "clientId": client_id,
+                                    })
+                                else:
+                                    await node.tunnel.send_fire_and_forget({
+                                        "type": "ring0_input",
+                                        "text": text,
+                                        "sourceClientId": client_id,
+                                    })
                                 return
                             else:
                                 logger.warning("[stt] Active node %r not routable: tunnel=%s status=%s — falling through to local",
@@ -969,22 +1016,33 @@ class WebRTCManager:
                             asyncio.ensure_future(self._speak_short(client_id, "Empty note"))
                             return
                         asyncio.ensure_future(self._speak_short(client_id, "Done"))
-                        # Deliver via Ring0 (self-node in Option A) if enabled,
-                        # otherwise to the active session. Voice text goes via
-                        # local_node_ops.ring0_input so it reaches whichever
-                        # node owns Ring0 today.
+                        # Deliver the accumulated voice-mode buffer to this
+                        # client's active node's Ring0 via its tunnel —
+                        # same routing as the regular transcript path.
                         delivered = False
-                        if self._local_node_ops:
-                            try:
-                                r = await self._local_node_ops.ring0_input(
-                                    text=result, source_client_id=client_id,
-                                )
-                                if "error" not in r:
+                        if self._node_registry:
+                            active_nid = self._client_active_node(client_id)
+                            node = self._node_registry.get_node(active_nid) if active_nid else None
+                            if node and node.tunnel and node.status == "online":
+                                contract = node.capabilities.get("contract") or []
+                                try:
+                                    if "events/v1" in contract:
+                                        await node.tunnel.send_fire_and_forget({
+                                            "type": "transcript",
+                                            "text": result,
+                                            "clientId": client_id,
+                                        })
+                                    else:
+                                        await node.tunnel.send_fire_and_forget({
+                                            "type": "ring0_input",
+                                            "text": result,
+                                            "sourceClientId": client_id,
+                                        })
                                     delivered = True
                                     if isinstance(mode, NoteMode):
-                                        # Forwarded through ws_bridge.emit_ring0_event,
-                                        # which routes to this client's active node's
-                                        # Ring0 via the per-client map (Phase 8).
+                                        # The active-node-aware forwarder
+                                        # in server.main routes this back
+                                        # to the same node's Ring0.
                                         from vibr8_core.ring0_events import Ring0Event
                                         await self._ws_bridge.emit_ring0_event(
                                             Ring0Event(
@@ -992,14 +1050,13 @@ class WebRTCManager:
                                                 source_client_id=client_id,
                                             )
                                         )
-                            except Exception:
-                                logger.exception("[stt] ring0_input on done failed")
+                                except Exception:
+                                    logger.exception("[stt] note-mode tunnel send failed")
                         if not delivered:
-                            target_session = _resolve_session()
-                            if target_session and self._ws_bridge:
-                                await self._ws_bridge.submit_user_message(
-                                    target_session, result, source_client_id=client_id,
-                                )
+                            logger.warning(
+                                "[stt] voice-mode result for client %s had no routable active node — dropped",
+                                client_id[:8],
+                            )
                         return
 
                     # In voice mode (e.g. note mode), only "done" is recognized.
@@ -1134,24 +1191,7 @@ class WebRTCManager:
                     text = data.get("transcript", "")
                     if not self._find_guard_word(text):
                         return
-                if not self._ws_bridge:
-                    return
-                target_sid = None
-                if self.is_ring0_enabled():
-                    # Route preview to this client's active node's Ring0
-                    active_nid = self._client_active_node(client_id)
-                    if active_nid and active_nid != "local":
-                        from vibr8_core.ws_bridge import WsBridge
-                        target_sid = WsBridge.qualify_session_id(active_nid, "ring0")
-                    if not target_sid:
-                        target_sid = self.ring0_session_id()
-                if not target_sid:
-                    target_sid = _resolve_session()
-                if target_sid:
-                    await self._ws_bridge.send_to_browsers(target_sid, {
-                        "type": "voice_transcript_preview",
-                        "transcript": data["transcript"],
-                    })
+                await self._send_voice_preview(client_id, data["transcript"])
 
         return _on_stt_event
 
@@ -1364,25 +1404,7 @@ class WebRTCManager:
             asyncio.ensure_future(self._speak_short(client_id, "Which node?"))
             return
 
-        # "local", "hub", or the hub's configured name switches back to hub
-        name_lower = node_name.lower()
-        local_node = self._node_registry.local_node
-        hub_name = local_node.name
-        is_hub = name_lower in ("local", "hub") or name_lower in hub_name.lower()
         current_nid = self._client_active_node(client_id)
-        if is_hub:
-            if current_nid == local_node.id or current_nid == "local":
-                asyncio.ensure_future(self._speak_short(client_id, f"Already on {hub_name}"))
-                return
-            self._hub_browser_bridge.set_client_active_node(client_id, local_node.id)
-            logger.info("[voice] client %s switched to local node (%s) via voice command", client_id[:8], hub_name)
-            asyncio.ensure_future(self._speak_short(client_id, f"Switched to {hub_name}"))
-            if self._ws_bridge:
-                asyncio.ensure_future(
-                    self._hub_browser_bridge.broadcast_ring0_switch_node(local_node.id, client_id=client_id)
-                )
-            return
-
         matches = self._node_registry.find_by_name(node_name)
         if not matches:
             asyncio.ensure_future(self._speak_short(client_id, f"No node named {node_name} found"))
@@ -1399,13 +1421,27 @@ class WebRTCManager:
         if target.status != "online":
             asyncio.ensure_future(self._speak_short(client_id, f"{target.name} is offline"))
             return
+        # Refuse the switch if the client's tab is deeplink-pinned (URL
+        # uses /@<node>) to a different node — otherwise we'd tell the
+        # user "switched to X" while the pinned tab silently snaps back.
+        pinned_id = self._hub_browser_bridge.would_conflict_with_pin(client_id, target.id)
+        if pinned_id:
+            pinned_node = self._node_registry.get_node(pinned_id)
+            pinned_label = pinned_node.name if pinned_node else pinned_id[:8]
+            asyncio.ensure_future(
+                self._speak_short(
+                    client_id,
+                    f"This tab is pinned to {pinned_label}. Open a new tab to switch.",
+                )
+            )
+            return
 
         self._hub_browser_bridge.set_client_active_node(client_id, target.id)
         logger.info("[voice] client %s switched to node %r (id=%s) via voice command", client_id[:8], target.name, target.id[:8])
         asyncio.ensure_future(self._speak_short(client_id, f"Switched to node {target.name}"))
         if self._ws_bridge:
             asyncio.ensure_future(
-                self._hub_browser_bridge.broadcast_ring0_switch_node(target.id, client_id=client_id)
+                self._hub_browser_bridge.send_ring0_switch_node(target.id, client_id=client_id)
             )
 
     async def _consume_audio(
@@ -1485,22 +1521,40 @@ class WebRTCManager:
             result = mode.on_disconnect()
             if result:
                 logger.info("[voice-mode] peer %s: flushing on disconnect", peer_key)
-                # Prefer Ring0 via NodeClient (works in self-node mode); fall
-                # through to the active session if Ring0 is disabled.
+                # Route to the client's active node's Ring0 via the tunnel,
+                # matching the "vibrate done" path. Using self._local_node_ops
+                # here (as we used to) is broken on the stateless hub: the
+                # hub's local_node_ops stays NOT_READY, the fallback to
+                # ws_bridge.submit_user_message writes to a phantom hub-side
+                # "ring0" session with no CLI attached, and the flushed note
+                # never reaches the real Ring0 on the active node.
                 delivered = False
-                if self._local_node_ops:
-                    try:
-                        ring0_result = await self._local_node_ops.ring0_input(
-                            text=result, source_client_id=client_id,
-                        )
-                        if "error" not in ring0_result:
+                if self._node_registry:
+                    active_nid = self._client_active_node(client_id)
+                    node = self._node_registry.get_node(active_nid) if active_nid else None
+                    if node and node.tunnel and node.status == "online":
+                        contract = node.capabilities.get("contract") or []
+                        try:
+                            if "events/v1" in contract:
+                                await node.tunnel.send_fire_and_forget({
+                                    "type": "transcript",
+                                    "text": result,
+                                    "clientId": client_id,
+                                })
+                            else:
+                                await node.tunnel.send_fire_and_forget({
+                                    "type": "ring0_input",
+                                    "text": result,
+                                    "sourceClientId": client_id,
+                                })
                             delivered = True
-                    except Exception:
-                        logger.exception("[voice-mode] ring0_input failed; falling through")
+                        except Exception:
+                            logger.exception("[voice-mode] disconnect flush tunnel send failed")
                 if not delivered:
-                    target_session = self._current_session_for(client_id)
-                    if target_session:
-                        await self._ws_bridge.submit_user_message(target_session, result, source_client_id=client_id)
+                    logger.warning(
+                        "[voice-mode] disconnect flush for client %s had no routable active node — dropped",
+                        client_id[:8],
+                    )
 
         pc = self._connections.pop(peer_key, None)
         self._stats.pop(peer_key, None)

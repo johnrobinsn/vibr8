@@ -62,11 +62,11 @@ def bridge():
 class TestNodeRegistry:
     """Node registration, heartbeat, and API key management."""
 
-    def test_local_node_always_exists(self, registry):
-        """The hub itself is always present as the 'local' node."""
-        local = registry.local_node
-        assert local.id == "local"
-        assert local.status == "online"
+    def test_fresh_registry_has_no_nodes(self, registry):
+        """The stateless hub registers no nodes implicitly — the placeholder
+        'local' entry that earlier hubs seeded at startup is gone."""
+        assert registry.get_all_nodes() == []
+        assert registry.get_node("local") is None
 
     def test_generate_and_validate_api_key(self, registry):
         raw_key, entry = registry.generate_api_key("test-node", username="alice")
@@ -86,7 +86,6 @@ class TestNodeRegistry:
             capabilities={"platform": "linux"},
         )
         assert node.name == "cloud-dev"
-        assert node.id != "local"
         assert node.capabilities["platform"] == "linux"
         assert node.api_key_id == entry.id
         assert entry.node_id == node.id
@@ -126,10 +125,7 @@ class TestNodeRegistry:
         assert [status for status, _ in results].count("error") == 1
         assert any("already bound" in value for status, value in results if status == "error")
 
-        registered = [
-            node for node in registry.get_all_nodes()
-            if node.id != registry.LOCAL_NODE_ID
-        ]
+        registered = list(registry.get_all_nodes())
         assert len(registered) == 1
         assert entry.node_id == registered[0].id
         assert registry.validate_api_key(registered[0].id, raw_key) is True
@@ -202,12 +198,6 @@ class TestNodeRegistry:
         assert node.id in newly_offline
         assert node.status == "offline"
 
-    def test_local_node_never_times_out(self, registry):
-        local = registry.local_node
-        local.last_heartbeat = time.time() - 1000
-        newly_offline = registry.check_heartbeats(timeout=90.0)
-        assert "local" not in newly_offline
-        assert local.status == "online"
 
     def test_unregister_node(self, registry):
         raw_key, _ = registry.generate_api_key("temp-node")
@@ -547,11 +537,7 @@ class TestNodeTunnel:
 
 
 class TestWsBridgeQualifiedIds:
-    """Qualified session ID handling for multi-node."""
-
-    def test_qualify_session_id(self):
-        qid = WsBridge.qualify_session_id("node-abc", "ring0")
-        assert qid == "node-abc:ring0"
+    """Qualified session ID parsing (defensive; ids are raw post-vending)."""
 
     def test_parse_qualified_id_remote(self):
         node_id, raw_id = WsBridge.parse_qualified_id("node-abc:ring0")
@@ -569,55 +555,11 @@ class TestWsBridgeQualifiedIds:
 
     def test_get_session_node_id(self, bridge):
         assert bridge.get_session_node_id("node-abc:session-1") == "node-abc"
-        assert bridge.get_session_node_id("local-session-1") == "local"
+        assert bridge.get_session_node_id("local-session-1") == ""
 
     def test_raw_session_id(self, bridge):
         assert bridge._raw_session_id("node-abc:session-1") == "session-1"
         assert bridge._raw_session_id("local-session") == "local-session"
-
-
-class TestWsBridgeRemoteSessions:
-    """Remote session proxy management."""
-
-    def test_get_or_create_session_creates_proxy(self, bridge):
-        """get_or_create_session creates proxy sessions for remote IDs."""
-        session = bridge.get_or_create_session("node-abc:s1")
-        assert session.id == "node-abc:s1"
-        assert "node-abc:s1" in bridge._sessions
-
-    def test_update_remote_sessions_removes_stale(self, bridge):
-        """Stale proxy sessions are cleaned up when node reports new list."""
-        # Create proxy sessions first
-        bridge.get_or_create_session("node-abc:s1")
-        bridge.get_or_create_session("node-abc:s2")
-        assert "node-abc:s2" in bridge._sessions
-
-        # Node reports only s1 remaining
-        bridge.update_remote_sessions("node-abc", [
-            {"sessionId": "node-abc:s1"},
-        ])
-        assert "node-abc:s1" in bridge._sessions
-        assert "node-abc:s2" not in bridge._sessions
-
-    def test_remove_remote_node_sessions(self, bridge):
-        """All sessions for a node are removed when it disconnects."""
-        bridge.get_or_create_session("node-abc:s1")
-        bridge.get_or_create_session("node-abc:s2")
-        bridge.get_or_create_session("local-session")
-
-        bridge.remove_remote_node_sessions("node-abc")
-        assert "node-abc:s1" not in bridge._sessions
-        assert "node-abc:s2" not in bridge._sessions
-        assert "local-session" in bridge._sessions
-
-    def test_remove_doesnt_affect_other_nodes(self, bridge):
-        """Removing node-abc sessions doesn't touch node-xyz sessions."""
-        bridge.get_or_create_session("node-abc:s1")
-        bridge.get_or_create_session("node-xyz:s1")
-
-        bridge.remove_remote_node_sessions("node-abc")
-        assert "node-abc:s1" not in bridge._sessions
-        assert "node-xyz:s1" in bridge._sessions
 
 
 class TestRing0EventIsolation:
@@ -666,82 +608,6 @@ class TestRing0EventIsolation:
         bridge.emit_ring0_event.assert_not_called()
 
 # ── Remote Session Message Handling ──────────────────────────────────────────
-
-
-class TestRemoteSessionMessages:
-    """Messages from remote nodes routed to browser clients."""
-
-    async def test_handle_remote_creates_proxy(self, bridge):
-        bridge._broadcast_to_browsers = AsyncMock()
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "assistant",
-            "message": "Hello from remote",
-        })
-
-        assert "node-abc:s1" in bridge._sessions
-        proxy = bridge._sessions["node-abc:s1"]
-        assert len(proxy.message_history) == 1
-        assert proxy.message_history[0]["message"] == "Hello from remote"
-
-    async def test_handle_remote_tracks_permissions(self, bridge):
-        bridge._broadcast_to_browsers = AsyncMock()
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "permission_request",
-            "request": {"request_id": "perm-1", "tool_name": "Write"},
-        })
-
-        proxy = bridge._sessions["node-abc:s1"]
-        assert "perm-1" in proxy.pending_permissions
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "permission_response",
-            "request_id": "perm-1",
-        })
-        assert "perm-1" not in proxy.pending_permissions
-
-    async def test_handle_remote_clears_permissions_on_cancelled(self, bridge):
-        bridge._broadcast_to_browsers = AsyncMock()
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "permission_request",
-            "request": {"request_id": "perm-1", "tool_name": "Write"},
-        })
-
-        proxy = bridge._sessions["node-abc:s1"]
-        assert "perm-1" in proxy.pending_permissions
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "permission_cancelled",
-            "request_id": "perm-1",
-        })
-        assert "perm-1" not in proxy.pending_permissions
-
-    async def test_handle_remote_broadcasts(self, bridge):
-        bridge._broadcast_to_browsers = AsyncMock()
-
-        msg = {"type": "assistant", "message": "test"}
-        await bridge.handle_remote_session_message("node-abc:s1", msg)
-
-        bridge._broadcast_to_browsers.assert_called_once()
-        call_args = bridge._broadcast_to_browsers.call_args
-        assert call_args[0][1] == msg
-
-    async def test_handle_remote_updates_session_state(self, bridge):
-        bridge._broadcast_to_browsers = AsyncMock()
-
-        await bridge.handle_remote_session_message("node-abc:s1", {
-            "type": "session_update",
-            "session": {"model": "claude-sonnet-4-6", "cwd": "/remote/code"},
-        })
-
-        proxy = bridge._sessions["node-abc:s1"]
-        assert proxy.state.get("model") == "claude-sonnet-4-6"
-        assert proxy.state.get("cwd") == "/remote/code"
-
-
-# ── API Endpoint Tests ───────────────────────────────────────────────────────
 
 
 class TestSessionListEndpoints:
@@ -1393,14 +1259,10 @@ class TestNodeWebSocketAuth:
     def app(self, bridge, registry):
         from server.main import BRIDGE_KEY, NODE_WS_RATE_KEY, handle_node_ws
 
-        session_registry = MagicMock()
-        session_registry.remove_node_sessions = MagicMock()
-
         app = web.Application()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", NotAppKeyWarning)
             app["node_registry"] = registry
-            app["session_registry"] = session_registry
         app[BRIDGE_KEY] = bridge
         app[NODE_WS_RATE_KEY] = {}
         app.router.add_get("/ws/node/{node_id}", handle_node_ws)

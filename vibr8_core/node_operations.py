@@ -43,6 +43,7 @@ class NodeOperations:
         desktop_webrtc: Any = None,
         default_backend: str = "claude",
         work_dir: str = "",
+        node_id: str = "",
         on_sessions_changed: Optional[SessionsChangedCallback] = None,
         worktree_tracker: Any | None = None,
         task_scheduler: Any | None = None,
@@ -54,6 +55,11 @@ class NodeOperations:
         self._desktop_webrtc = desktop_webrtc
         self._default_backend = default_backend
         self._work_dir = work_dir
+        # This node's hub-assigned id, used to build vending-form URLs
+        # (e.g. artifact contentUrl). Empty on hub-side placeholder ops
+        # (NOT_READY) — anything that actually reads it is a node-side
+        # code path.
+        self._node_id = node_id
         self._on_sessions_changed = on_sessions_changed
         self._worktree_tracker = worktree_tracker
         self._scheduler = task_scheduler
@@ -110,7 +116,29 @@ class NodeOperations:
             sessions.append(s_dict)
         return {"sessions": sessions}
 
+    def _expand_session_id(self, session_id: str) -> str:
+        """Resolve an exact session id, or a unique prefix of one, to the
+        full id. Ring0 references sessions by the 8-char prefixes it sees
+        in list_sessions output; with per-node session resolution (no hub
+        session_registry) the node expands them itself."""
+        if not session_id or len(session_id) < 6:
+            return session_id
+        if self._launcher.get_session(session_id) or session_id in self._bridge._sessions:
+            return session_id
+        matches: set[str] = set()
+        for s in self._launcher.list_sessions():
+            sid = getattr(s, "sessionId", "") or ""
+            if sid.startswith(session_id):
+                matches.add(sid)
+        for sid in self._bridge._sessions:
+            if sid.startswith(session_id):
+                matches.add(sid)
+        if len(matches) == 1:
+            return next(iter(matches))
+        return session_id
+
     async def set_pen(self, session_id: str = "", controlled_by: str = "ring0") -> dict:
+        session_id = self._expand_session_id(session_id)
         if controlled_by not in ("ring0", "user"):
             return {"error": "controlledBy must be 'ring0' or 'user'"}
         session = self._bridge._sessions.get(session_id)
@@ -188,6 +216,7 @@ class NodeOperations:
         return result
 
     async def kill_session(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         killed = await self._launcher.kill(session_id)
         await self._notify_sessions_changed()
         return {"ok": killed}
@@ -259,12 +288,17 @@ class NodeOperations:
         return {"ok": True}
 
     async def rename_session(self, session_id: str = "", name: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         name = (name or "").strip()
         if not name:
             return {"error": "name is required"}
         session_names.set_name(session_id, name, unique=False)
+        # Broadcast with the full id so browser stores (keyed on full ids)
+        # actually pick up the change. Ring0 hands us 8-char prefixes; if
+        # the broadcast used those, browsers would miss the update.
+        await self._bridge.broadcast_name_update(session_id, name, user_renamed=True)
         await self._notify_sessions_changed()
-        return {"ok": True, "name": name}
+        return {"ok": True, "sessionId": session_id, "name": name}
 
     # ── Messaging & permission ────────────────────────────────────────────
 
@@ -274,6 +308,7 @@ class NodeOperations:
         content: str = "",
         source_client_id: str = "",
     ) -> dict:
+        session_id = self._expand_session_id(session_id)
         err = await self._bridge.submit_user_message(
             session_id, content, source_client_id=source_client_id,
         )
@@ -281,16 +316,30 @@ class NodeOperations:
             return {"error": err}
         return {"ok": True}
 
+    async def broadcast_voice_preview(self, transcript: str = "") -> dict:
+        """Broadcast a live voice-transcript preview to this node's Ring0
+        session UI. The hub owns STT (audio is hub-side); it sends the
+        interim text here and the node fans it out over the session WS to
+        its vended UI. The node never touches audio — it only displays
+        hub-provided text (contract: docs/hub-node-contract-v1.md §B)."""
+        if not self._ring0 or not self._ring0.session_id:
+            return {"ok": False}
+        await self._bridge.send_to_browsers(
+            self._ring0.session_id,
+            {"type": "voice_transcript_preview", "transcript": transcript},
+        )
+        return {"ok": True}
+
     async def cli_input(self, session_id: str = "", message: dict | None = None) -> dict:
         """Forward raw CLI input (NDJSON message) to local session."""
         session = self._bridge._sessions.get(session_id)
-        if not session:
-            return {"error": f"Session {session_id} not found"}
+        if not session:            return {"error": f"Session {session_id} not found"}
         ndjson = json.dumps(message or {})
         await self._bridge._send_to_cli(session, ndjson)
         return {"ok": True}
 
     async def interrupt(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         ok = self._bridge.interrupt_session(session_id)
         return {"ok": ok}
 
@@ -309,12 +358,14 @@ class NodeOperations:
         return {"ok": True}
 
     async def get_session_output(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         session = self._bridge._sessions.get(session_id)
         if not session:
             return {"error": f"Session {session_id} not found"}
         return {"messages": session.message_history[-500:]}
 
     async def get_session(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         info = self._launcher.get_session(session_id)
         if not info:
             return {"error": "Session not found"}
@@ -332,15 +383,18 @@ class NodeOperations:
         return d
 
     async def get_message_history(self, session_id: str = "", limit: int = 500) -> dict:
+        session_id = self._expand_session_id(session_id)
         session = self._bridge._sessions.get(session_id)
         if not session:
             return {"error": "Session not found"}
         return {"messages": session.message_history[-limit:]}
 
     async def get_pending_permissions(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         return {"permissions": self._bridge.get_pending_permissions(session_id)}
 
     async def get_pending_permission_count(self, session_id: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         return {"count": self._bridge.get_pending_permission_count(session_id)}
 
     async def respond_to_permission(
@@ -350,6 +404,7 @@ class NodeOperations:
         behavior: str = "",
         message: str = "",
     ) -> dict:
+        session_id = self._expand_session_id(session_id)
         ok = await self._bridge.respond_to_permission(
             session_id, request_id, behavior, message,
         )
@@ -379,11 +434,17 @@ class NodeOperations:
         return {"ok": True}
 
     async def set_permission_mode(self, session_id: str = "", mode: str = "") -> dict:
+        session_id = self._expand_session_id(session_id)
         session = self._bridge._sessions.get(session_id)
         if not session:
             return {"error": f"Session {session_id} not found"}
         self._bridge._handle_set_permission_mode(session, mode)
-        return {"ok": True}
+        # Notify browsers so the mode chip updates immediately. Use the
+        # full id (post-expansion) so the browser store lookup keys match.
+        await self._bridge._broadcast_to_browsers(
+            session, {"type": "session_update", "session": {"permissionMode": mode}},
+        )
+        return {"ok": True, "sessionId": session_id, "mode": mode}
 
     async def respond_permission(
         self,
@@ -860,7 +921,7 @@ class NodeOperations:
 
     async def artifacts_create(self, username: str = "", data: dict | None = None) -> dict:
         from vibr8_core import artifacts
-        artifact = artifacts.create_artifact(username, data or {})
+        artifact = artifacts.create_artifact(username, data or {}, self._node_id)
         await self._bridge.broadcast_to_all_browsers({"type": "artifacts_changed"})
         return artifact
 
@@ -872,19 +933,14 @@ class NodeOperations:
         await self._bridge.broadcast_to_all_browsers({"type": "artifacts_changed"})
         return {"ok": True}
 
-    async def artifacts_read_content(self, artifact_id: str = "") -> dict:
-        """Read artifact bytes; encoded as base64 since the tunnel is JSON."""
-        from vibr8_core import artifacts
-        import base64
-        result = artifacts.read_content(artifact_id)
-        if result is None:
-            return {"error": "Not found"}
-        data, content_type, filename = result
-        return {
-            "contentBase64": base64.b64encode(data).decode("ascii"),
-            "contentType": content_type,
-            "filename": filename,
-        }
+    # Removed: `artifacts_read_content` used to serve the hub's
+    # /api/artifacts/{id}/content route by tunnelling bytes back
+    # base64-encoded. Under contract ui/v1 the artifact routes live
+    # on the owning node (server/routes.py, gated by include_artifacts)
+    # and the content handler reads directly from disk via
+    # artifacts.read_content — no tunnel hop. Kept this stub-comment
+    # rather than a silent deletion so anyone chasing a tunnel command
+    # `artifacts_read_content` in old logs finds a breadcrumb.
 
     # ── Ring0 control ─────────────────────────────────────────────────────
 

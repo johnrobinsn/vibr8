@@ -88,12 +88,10 @@ def _slugify(name: str) -> str:
 def _short_id(sid: str, n: int = 8) -> str:
     """Return first *n* chars of the raw session id.
 
-    Session ids are qualified as ``{node_id}:{raw_id}`` at the hub
-    boundary. Truncating the qualified id directly yields the same
-    prefix (the node id) for every session on a node — useless for
-    distinguishing sessions to a model. Strip the ``{node_id}:`` first
-    so the model sees a unique handle that ``session_registry.resolve``
-    can match via its raw-id prefix branch.
+    The model sees a short unique handle; the node expands it back to
+    the full id via ``NodeOperations._expand_session_id``. (The ``:``
+    split is a leftover guard for any persisted qualified ids from
+    before the cross-node session namespace was removed.)
     """
     if not sid:
         return sid

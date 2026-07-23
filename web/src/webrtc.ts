@@ -284,6 +284,10 @@ async function _connectDesktop(): Promise<void> {
       _desktopReconnectAttempt = 0;
       const store = useStore.getState();
       store.setDesktopStatus("connected");
+      // A successful connect clears any prior signaling error so the
+      // overlay stops naming it (the retry that succeeded is proof
+      // that whatever the server was complaining about is fixed).
+      store.setDesktopError(null);
       // Start stats polling
       _startDesktopStats(pc);
     } else if (state === "failed" || state === "disconnected") {
@@ -291,33 +295,55 @@ async function _connectDesktop(): Promise<void> {
     }
   };
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
+  // Handshake + signaling. If any of these fail (e.g. the node's
+  // screen capture errored — headless node with no $DISPLAY, screen
+  // capture unavailable, hub returning 5xx), close this peer and route
+  // through _handleDesktopDisconnect so the reconnect / "offline"
+  // policy fires. Previously the exception just bubbled out and left
+  // desktopStatus stuck at "connecting", so the UI spun forever
+  // instead of showing the offline card.
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
 
-  if (pc.iceGatheringState !== "complete") {
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 10_000);
-      pc.onicegatheringstatechange = () => {
-        if (pc.iceGatheringState === "complete") {
-          clearTimeout(timer);
-          resolve();
-        }
-      };
-    });
+    if (pc.iceGatheringState !== "complete") {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 10_000);
+        pc.onicegatheringstatechange = () => {
+          if (pc.iceGatheringState === "complete") {
+            clearTimeout(timer);
+            resolve();
+          }
+        };
+      });
+    }
+
+    const answer = await api.webrtcOffer(
+      desktopClientId,
+      { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
+      { tabId: useStore.getState().tabId, desktop: true, nodeId: useStore.getState().activeNodeId },
+    );
+
+    await pc.setRemoteDescription(
+      new RTCSessionDescription({ sdp: answer.sdp, type: answer.type as RTCSdpType }),
+    );
+
+    desktopSession = { pc, remoteVideoStream, inputChannel, statsInterval: null };
+    (_dw.__v8_desktop as unknown) = desktopSession;
+  } catch (err) {
+    // Surface the server's real reason (e.g. "$DISPLAY not set" for a
+    // headless node) so the DesktopView overlay can name it instead
+    // of showing a generic "Node offline". api.ts throws `Error(err.error
+    // || res.statusText)` — err.message here is the server's JSON
+    // `.error` string when the response was well-formed.
+    const msg =
+      err instanceof Error && err.message ? err.message : String(err);
+    console.error("[desktop] connect failed:", msg);
+    useStore.getState().setDesktopError(msg);
+    try { pc.close(); } catch { /* ignore */ }
+    _handleDesktopDisconnect();
+    throw err;
   }
-
-  const answer = await api.webrtcOffer(
-    desktopClientId,
-    { sdp: pc.localDescription!.sdp, type: pc.localDescription!.type },
-    { tabId: useStore.getState().tabId, desktop: true, nodeId: useStore.getState().activeNodeId },
-  );
-
-  await pc.setRemoteDescription(
-    new RTCSessionDescription({ sdp: answer.sdp, type: answer.type as RTCSdpType }),
-  );
-
-  desktopSession = { pc, remoteVideoStream, inputChannel, statsInterval: null };
-  (_dw.__v8_desktop as unknown) = desktopSession;
 }
 
 function _handleDesktopDisconnect(): void {
@@ -419,13 +445,18 @@ export function stopDesktopStream(): void {
   store.setDesktopRemoteStream(null);
   store.setDesktopStatus("idle");
   store.setDesktopStats(null);
+  store.setDesktopError(null);
 }
 
 /** Retry connection once (from "offline" state). */
 export function retryDesktopStream(): void {
   _desktopUserStopped = false;
   _desktopReconnectAttempt = 0;
-  useStore.getState().setDesktopStatus("connecting");
+  const store = useStore.getState();
+  store.setDesktopStatus("connecting");
+  // Drop stale error text — if the retry fails, _connectDesktop
+  // repopulates it with the fresh reason.
+  store.setDesktopError(null);
   _connectDesktop().catch(() => _handleDesktopDisconnect());
 }
 

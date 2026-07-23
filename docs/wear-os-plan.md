@@ -157,10 +157,25 @@ This is the same pipeline Chrome uses on Android. The Pixel Watch 4's Qualcomm S
 
 ## Hub-Side Changes Needed
 
-1. **Extend `/ws/native/` with session event subscriptions**
-   - New command: `subscribe_sessions` with optional node filter
-   - Push `permission_request`, `session_status`, `cli_connected/disconnected` to subscribed native clients
-   - Or: let watch connect via `/ws/browser/` with a `role=watch` parameter
+1. **Native observer channel already exists** — the watch should
+   consume it, not extend it.
+   - `/ws/native/{clientId}` with `{"type": "subscribe", "all": true}`
+     on connect gives the watch the observer stream.
+   - The stream carries **`attention`** (node-agnostic; deduped by
+     `contextKey`; severity → notification priority) and **`busy`**
+     (level-triggered node worker state), both enriched by the hub
+     with `nodeId` + `nodeName`. See `docs/native-client-contract.md`
+     §B2 for the wire shape and client-contract rules.
+   - This spec previously enumerated `permission_request`,
+     `session_status`, `cli_connected/disconnected` as separate
+     pushes; that catalog was reduced to `attention` + `busy` when
+     the observer contract was made node-agnostic (a `hello-node`-shaped
+     node has no sessions or CLIs). Ring0's permission-wait already
+     fires `_attention_hook` with `severity="warning"` and
+     `contextKey="perm:<sid>"` — the watch surfaces the attention as
+     a heads-up notification with tap-to-approve; the underlying
+     permission id is not on the wire (contextKey is opaque to the
+     watch).
 
 2. **WebRTC signaling for non-session-bound audio**
    - Current: `POST /api/webrtc/offer` requires `sessionId`
@@ -168,8 +183,15 @@ This is the same pipeline Chrome uses on Android. The Pixel Watch 4's Qualcomm S
    - Solution: allow `clientId`-based signaling (no session binding)
 
 3. **Permission response from native clients**
-   - Route: watch receives `permission_request` → user taps allow → send `permission_response` back through native WS or REST
-   - Need: `POST /api/sessions/{id}/permissions/{reqId}/respond`
+   - Current wire allows `permission_response` inbound on
+     `/ws/native/*` (see `docs/native-client-contract.md` §C). The
+     watch would need the corresponding `sessionId` + `request_id`
+     that produced the attention — those aren't in the attention
+     envelope today. Two options: extend the attention payload with
+     an opaque token the client echoes back on approval; or POST
+     `/api/ring0/respond-permission` with a lookup step. Neither is
+     wired yet — this is the outstanding piece of wear-side
+     integration.
 
 ## Wire Protocol Versioning
 

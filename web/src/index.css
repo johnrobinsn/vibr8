@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+/* Suppress document-level scrollbars on both the hub shell and any
+   node-vended UI rendered inside its iframe — internal panels handle
+   their own scrolling, and the outer chrome should never grow a bar. */
+html, body {
+  overflow: hidden;
+}
+
 @theme {
   /* Light Mode (default) */
   --color-cc-bg: #F5F5F0;

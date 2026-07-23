@@ -8,7 +8,13 @@ import { AndroidDevices } from "./AndroidDevices.js";
 
 type Tab = "voice-profiles" | "fingerprints" | "voice-logs" | "api-keys" | "devices" | "android";
 
-export function SettingsPage() {
+export function SettingsPage({
+  embedded = false,
+  onClose,
+}: {
+  embedded?: boolean;
+  onClose?: () => void;
+} = {}) {
   // Support deep-linking to a tab via hash fragment: #settings/api-keys
   const initialTab = (): Tab => {
     const hash = window.location.hash;
@@ -22,11 +28,14 @@ export function SettingsPage() {
   const [tab, setTab] = useState<Tab>(initialTab);
 
   return (
-    <div className="h-[100dvh] flex flex-col bg-cc-bg text-cc-fg">
+    <div className={`${embedded ? "h-full" : "h-[100dvh]"} flex flex-col bg-cc-bg text-cc-fg`}>
       {/* Header */}
       <div className="border-b border-cc-border px-6 py-4 flex items-center gap-4">
         <button
-          onClick={() => { window.location.hash = ""; }}
+          onClick={() => {
+            if (onClose) onClose();
+            else window.location.hash = "";
+          }}
           className="p-1.5 rounded-lg hover:bg-cc-hover text-cc-muted hover:text-cc-fg transition-colors cursor-pointer"
           title="Back"
         >

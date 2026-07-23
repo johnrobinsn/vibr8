@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -35,15 +37,6 @@ def main() -> None:
     parser.add_argument("--port", type=int, help="Local port for CLI/Ring0 (default: 3457)")
     parser.add_argument("--work-dir", help="Working directory for sessions")
     parser.add_argument("--default-backend", help="Default backend for new sessions (claude, codex, opencode)")
-    parser.add_argument(
-        "--self-mode",
-        action="store_true",
-        help=(
-            "Run as the hub's self-node: use the hub-host's data dir (~/.vibr8/) "
-            "instead of a per-node isolated dir, and register with the well-known "
-            "id 'self'. Used by the hub to spawn its own loopback node."
-        ),
-    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -66,6 +59,15 @@ def main() -> None:
         name = socket.gethostname()
         logger.info("No --name specified, using hostname: %s", name)
 
+    # Resolve this node's data dir BEFORE importing vibr8_node.node_agent,
+    # which transitively imports vibr8_core modules whose path constants
+    # snapshot the dir at import time via VIBR8_NODE_DATA_DIR.
+    if not os.environ.get("VIBR8_NODE_DATA_DIR", "").strip():
+        safe_name = re.sub(r"[^\w-]", "_", name.lower())
+        node_dir = Path.home() / ".vibr8-node" / safe_name
+        os.environ["VIBR8_NODE_DATA_DIR"] = str(node_dir)
+        logger.info("Resolved VIBR8_NODE_DATA_DIR=%s", node_dir)
+
     from vibr8_node.node_agent import NodeAgent
 
     default_backend = args.default_backend or config.get("default_backend", "claude")
@@ -78,7 +80,6 @@ def main() -> None:
         work_dir=work_dir,
         ring0_config=config.get("ring0", {}),
         default_backend=default_backend,
-        self_mode=args.self_mode,
     )
 
     try:

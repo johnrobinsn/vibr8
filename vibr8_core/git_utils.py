@@ -57,7 +57,9 @@ class WorktreeCreateResult:
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
 
-WORKTREES_BASE = Path.home() / ".vibr8" / "worktrees"
+from vibr8_core.data_paths import NODE_DATA_DIR
+
+WORKTREES_BASE = NODE_DATA_DIR / "worktrees"
 
 
 def sanitize_branch(branch: str) -> str:

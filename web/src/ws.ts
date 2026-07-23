@@ -1,4 +1,5 @@
 import { useStore } from "./store.js";
+import { BASE_PREFIX } from "./nodeMode.js";
 import { stopWebRTC, getRemoteAudio, queryActiveInputDevice } from "./webrtc.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem } from "./types.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
@@ -106,7 +107,7 @@ function nextId(): string {
 export function getWsUrl(sessionId: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const { clientId, clientRole } = useStore.getState();
-  let url = `${proto}//${location.host}/ws/browser/${sessionId}?clientId=${encodeURIComponent(clientId)}`;
+  let url = `${proto}//${location.host}${BASE_PREFIX}/ws/browser/${sessionId}?clientId=${encodeURIComponent(clientId)}`;
   if (clientRole !== "primary") url += `&role=${encodeURIComponent(clientRole)}`;
   return url;
 }
@@ -240,6 +241,13 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
 
     case "result": {
       const r = data.data ?? {};
+      console.log(`[ws] result session=${sessionId.slice(0,8)} is_error=${r.is_error} subtype=${r.subtype}`);
+      // Clear running state up front so any exception below (e.g. an
+      // unexpected modelUsage shape) can't leave the UI stuck on the
+      // "Generating…" bar. Every other side effect is best-effort.
+      store.setStreaming(sessionId, null);
+      store.setStreamingStats(sessionId, null);
+      store.setSessionStatus(sessionId, "idle");
       const sessionUpdates: Partial<{ total_cost_usd: number; num_turns: number; context_used_percent: number; total_lines_added: number; total_lines_removed: number }> = {
         total_cost_usd: r.total_cost_usd,
         num_turns: r.num_turns,
@@ -254,7 +262,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
       // Compute context % from modelUsage if available
       if (r.modelUsage) {
         for (const usage of Object.values(r.modelUsage)) {
-          if (usage.contextWindow > 0) {
+          if (usage && usage.contextWindow > 0) {
             const pct = Math.round(
               ((usage.inputTokens + usage.outputTokens) / usage.contextWindow) * 100
             );
@@ -263,9 +271,6 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         }
       }
       store.updateSession(sessionId, sessionUpdates);
-      store.setStreaming(sessionId, null);
-      store.setStreamingStats(sessionId, null);
-      store.setSessionStatus(sessionId, "idle");
       // Play notification sound if enabled and tab is not focused
       if (!document.hasFocus() && store.notificationSound) {
         playNotificationSound();
@@ -795,6 +800,9 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
         if (store.clientRole === "primary") {
           store.setViewerPaneContent(null);
         } else {
+          // nodeId tells the screen which node vends the session over the
+          // ui/v1 path; the hub injects it from the calling Ring0's node.
+          store.setMirroredNodeId(params?.nodeId ?? null);
           store.setMirroredSessionId(sid);
           store.setSecondScreenContent(null);
         }
@@ -1049,7 +1057,7 @@ export function handleMessage(sessionId: string, event: MessageEvent, sourceWs?:
 
     case "artifacts_changed": {
       import("./api.js").then(({ nodeApi }) => {
-        const nid = store.activeNodeId === "local" ? "" : store.activeNodeId;
+        const nid = store.activeNodeId;
         nodeApi(nid).artifacts.list().then((a) => store.setArtifacts(a as typeof store.artifacts)).catch(() => {});
       });
       break;

@@ -3,7 +3,7 @@ import { useStore } from "./store.js";
 import { api } from "./api.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ChatView } from "./components/ChatView.js";
-import { TopBar } from "./components/TopBar.js";
+import { NodeFloatingControls } from "./components/NodeFloatingControls.js";
 import { HomePage } from "./components/HomePage.js";
 import { TaskPanel } from "./components/TaskPanel.js";
 import { DesktopView } from "./components/DesktopView.js";
@@ -16,8 +16,15 @@ import { CommandPalette } from "./components/CommandPalette.js";
 import { SettingsPage } from "./components/SettingsPage.js";
 import { AgentControls } from "./components/AgentControls.js";
 import { ViewerPane } from "./components/ViewerPane.js";
+import { NodeShellFrame } from "./components/NodeShellFrame.js";
+import { EmptyHubState } from "./components/EmptyHubState.js";
+import { PinnedNodeUnavailable } from "./components/PinnedNodeUnavailable.js";
+import { PINNED_NODE, resolvePinnedNode } from "./pinnedNode.js";
+import { TASK_PANEL_ENABLED } from "./features.js";
 import { connectSession, disconnectSession } from "./ws.js";
+import { dispatchHubShellMessage } from "./hubShellRouter.js";
 import { startWebRTC, setAudioInOnly } from "./webrtc.js";
+import { NODE_MODE, BASE_PREFIX } from "./nodeMode.js";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
 
 function useHash() {
@@ -103,6 +110,70 @@ export default function App() {
   useEffect(() => {
     api.getRing0Status().then((s) => setRing0SessionId(s.sessionId ?? null)).catch(() => {});
   }, []);
+
+  // Shell control WS — receives client-targeted hub pushes
+  // (voice_mode badge, etc.) that don't ride a node-vended session WS.
+  // Re-establishes on hub restart via the natural close → onclose → setTimeout
+  // reconnect loop; backoff capped at 5s.
+  useEffect(() => {
+    if (authState !== "authenticated" || NODE_MODE) return;
+    let alive = true;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    const connect = () => {
+      if (!alive) return;
+      const cid = useStore.getState().clientId;
+      if (!cid) return;
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${proto}//${location.host}/ws/hub-shell/${encodeURIComponent(cid)}`);
+      ws.onmessage = (e) => {
+        // Router table lives in hubShellRouter.ts; unknown types log
+        // a warning so gaps between the server's push types and the
+        // shell's handlers become visible in dev.
+        dispatchHubShellMessage(e.data);
+      };
+      ws.onclose = () => {
+        if (!alive) return;
+        reconnectTimer = setTimeout(connect, 5000);
+      };
+    };
+    connect();
+    return () => {
+      alive = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
+    };
+  }, [authState]);
+
+  // Poll the node registry at the App level so NodeShellFrame /
+  // EmptyHubState (both rendered before Sidebar mounts) see the
+  // current node list. Sidebar still runs its own richer poll for
+  // session enrichment. Also re-POST the per-client active node each
+  // tick so a hub restart (which loses its in-memory client→node map)
+  // self-heals within one poll interval.
+  useEffect(() => {
+    if (authState !== "authenticated" || NODE_MODE) return;
+    let alive = true;
+    const tick = () => {
+      api.listNodes()
+        .then((list) => {
+          if (!alive) return;
+          if (list.length > 0) useStore.getState().setNodes(list);
+          // Mark loaded after the first response (even if empty) so the
+          // shell can distinguish "genuinely no nodes" from "still
+          // fetching" and skip the EmptyHubState flash on reload.
+          useStore.getState().setNodesLoaded(true);
+        })
+        .catch(() => {
+          if (alive) useStore.getState().setNodesLoaded(true);
+        });
+      const { clientId: cid, activeNodeId: nid } = useStore.getState();
+      if (cid && nid) api.setClientActiveNode(cid, nid).catch(() => {});
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { alive = false; clearInterval(id); };
+  }, [authState]);
   const previousSessionRef = useRef<string | null>(null);
   const hash = useHash();
 
@@ -145,21 +216,56 @@ export default function App() {
   const clientId = useStore((s) => s.clientId);
   const nodes = useStore((s) => s.nodes);
   useEffect(() => {
-    const name = activeNodeId === "local"
-      ? null
-      : nodes.find((n) => n.id === activeNodeId)?.name ?? null;
+    const name = activeNodeId
+      ? nodes.find((n) => n.id === activeNodeId)?.name ?? null
+      : null;
     document.title = name ? `vibr8 · ${name}` : "vibr8";
   }, [activeNodeId, nodes]);
 
   // Sync the per-client active node to the backend so voice routing
-  // and node-scoped UI ops follow this tab's selection.
+  // and node-scoped UI ops follow this tab's selection. In node mode the
+  // shell owns the active-node concept, not the embedded UI.
   useEffect(() => {
-    api.setClientActiveNode(clientId, activeNodeId).catch(() => {});
-  }, [clientId, activeNodeId]);
+    if (NODE_MODE) return;
+    // Include the pinned nodeId (if any) so the hub can refuse a
+    // conflicting Ring0/voice switch_node against this client and
+    // return an honest error to Ring0 instead of pretending to
+    // switch. Resolves lazily against the current nodes list — the
+    // pin might not resolve to an id until the node registry has
+    // been fetched, which is fine (unpinned-looking to the hub in
+    // the meantime, corrected on the next poll tick).
+    const pinnedId =
+      PINNED_NODE ? resolvePinnedNode(PINNED_NODE, nodes)?.id ?? null : null;
+    api.setClientActiveNode(clientId, activeNodeId, pinnedId).catch(() => {});
+  }, [clientId, activeNodeId, nodes]);
 
-  // Auto-reconnect audio if it was active before reload
+  // In NODE_MODE (this bundle is running inside a node-vended iframe),
+  // publish whatever the node's TopBar shows as its title so the hub
+  // shell strip can mirror it. Mirrors TopBar's own logic: "Desktop"
+  // for the desktop view, the session's name otherwise. Posts to the
+  // node's local /api/_title, which relays it as a `title` tunnel event.
+  const sessionNames = useStore((s) => s.sessionNames);
+  useEffect(() => {
+    if (!NODE_MODE) return;
+    let title = "";
+    if (activeView === "desktop") {
+      title = "Desktop";
+    } else if (currentSessionId) {
+      const info = useStore.getState().sdkSessions.find((s) => s.sessionId === currentSessionId);
+      title = sessionNames.get(currentSessionId) ?? info?.name ?? "";
+    }
+    fetch(`${BASE_PREFIX}/api/_title`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: title }),
+    }).catch(() => {});
+  }, [currentSessionId, sessionNames, activeView]);
+
+  // Auto-reconnect audio if it was active before reload. Voice lives in
+  // the hub shell — never inside a node-vended iframe (contract §B).
   const audioReconnectedRef = useRef(false);
   useEffect(() => {
+    if (NODE_MODE) return;
     if (audioReconnectedRef.current) return;
     const savedMode = localStorage.getItem("cc-audio-mode");
     if (!savedMode || savedMode === "off") return;
@@ -306,6 +412,10 @@ export default function App() {
   }, [desktopStreamActive, splitViewActive, desktopStatus]);
 
   const sessionsLoaded = useStore((s) => s.sessionsLoaded);
+  // Hold the shell render until the first /api/nodes fetch resolves so
+  // the reload path doesn't flash <EmptyHubState /> before the registry
+  // populates. Subscribed here so a store update triggers a re-render.
+  const nodesLoaded = useStore((s) => s.nodesLoaded);
 
   // Second screen bypasses auth — it uses pairing codes instead
   if (hash === "#/second-screen") {
@@ -323,6 +433,61 @@ export default function App() {
     return <SettingsPage />;
   }
 
+  // Hub shell at the root: iframe whichever ui/v1 node is currently
+  // active for this tab. Falls back to the first online ui/v1 node if
+  // the persisted activeNodeId doesn't match a usable one; falls back
+  // to the empty-state bootstrap when no usable node exists.
+  //
+  // Deeplink: `/@<node-name-or-id>` (or `/n/<name>`, or the legacy
+  // `?pin=<name>` query form) restricts the shell to a single node
+  // and shows a pin-specific unavailable card if that node isn't
+  // registered/online — never silently falls back to a different node.
+  if (!NODE_MODE) {
+    if (!nodesLoaded) return null;
+    const usable = nodes.filter(
+      (n) => n.status === "online" && n.contract?.includes("ui/v1"),
+    );
+
+    if (PINNED_NODE) {
+      const pinSpec = PINNED_NODE;  // local const so TS narrowing survives inside the closure below
+      const pinned = resolvePinnedNode(pinSpec, usable);
+      if (pinned) {
+        if (activeNodeId !== pinned.id) {
+          useStore.getState().setActiveNode(pinned.id);
+        }
+        return <NodeShellFrame nodeId={pinned.id} pinned />;
+      }
+      // Pin doesn't resolve to an online usable node. Distinguish
+      // "known but offline" from "not registered" so the user knows
+      // whether to bring the node online or fix the URL.
+      const pinLower = pinSpec.toLowerCase();
+      const registered = nodes.some(
+        (n) => n.name.toLowerCase() === pinLower || n.id.startsWith(pinSpec),
+      );
+      return (
+        <PinnedNodeUnavailable
+          pin={pinSpec}
+          reason={registered ? "offline" : "unregistered"}
+        />
+      );
+    }
+
+    const frameTarget =
+      usable.find((n) => n.id === activeNodeId) || usable[0];
+    if (frameTarget) {
+      // Promote the auto-pick into the store so the active-node POST
+      // (and voice routing on the hub) actually point at this node
+      // instead of the empty default.
+      if (activeNodeId !== frameTarget.id) {
+        useStore.getState().setActiveNode(frameTarget.id);
+      }
+      return <NodeShellFrame nodeId={frameTarget.id} />;
+    }
+    return <EmptyHubState />;
+  }
+
+  // NODE_MODE: this bundle is loaded by the hub at /nodes/{id}/ui/ —
+  // render the full session UI (chat, sessions, permissions, terminals).
   return (
     <div className="h-[100dvh] flex font-sans-ui bg-cc-bg text-cc-fg antialiased">
       {/* Mobile overlay backdrop */}
@@ -345,10 +510,12 @@ export default function App() {
         <Sidebar />
       </div>
 
-      {/* Main area */}
+      {/* Main area — the old TopBar strip is gone; NodeFloatingControls
+          overlays the status line + hamburger + reconnect + viewer-pane
+          toggle on top of whatever content this area is showing. */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <TopBar />
         <div className="flex-1 overflow-hidden relative">
+          <NodeFloatingControls />
           {/* Terminal sessions — kept mounted but hidden to preserve buffer */}
           {terminalSessionIds.map((id) => (
             <div key={id} className={`absolute inset-0 ${currentSessionId === id ? "" : "hidden"}`}>
@@ -421,8 +588,13 @@ export default function App() {
         </div>
       </div>
 
-      {/* Task panel — overlay on mobile, inline on desktop */}
-      {currentSessionId && (
+      {/* Task panel — gated by TASK_PANEL_ENABLED (see features.ts).
+          Implementation intact; disabled while we decide on a new
+          surface for TodoWrite/usage-limit display. Flip the flag to
+          bring the render + mobile backdrop back at once. Any future
+          consumer of the same data can subscribe to the store's
+          `tasks` map directly. */}
+      {TASK_PANEL_ENABLED && currentSessionId && (
         <>
           {/* Mobile overlay backdrop */}
           {taskPanelOpen && (

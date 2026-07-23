@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import platform
@@ -12,6 +13,7 @@ import ssl
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import aiohttp
 from aiohttp import web
@@ -39,7 +41,6 @@ class NodeAgent:
         work_dir: str = "",
         ring0_config: dict | None = None,
         default_backend: str = "claude",
-        self_mode: bool = False,
     ) -> None:
         self.hub_url = hub_url.rstrip("/")
         self.api_key = api_key
@@ -48,7 +49,6 @@ class NodeAgent:
         self.work_dir = work_dir
         self.ring0_config = ring0_config or {}
         self.default_backend = default_backend
-        self.self_mode = self_mode
         self.node_id: str = ""
         # Service token issued by the hub at registration. Used by Ring0 MCP
         # to authenticate against hub-side client / second-screen / artifact
@@ -72,29 +72,20 @@ class NodeAgent:
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._shutdown_event = asyncio.Event()
+        # ui/v1 proxied browser-WS channels: channelId → local client WS.
+        self._ui_channels: dict[str, aiohttp.ClientWebSocketResponse] = {}
+        self._ui_channel_tasks: dict[str, asyncio.Task] = {}
 
     async def run(self) -> None:
         """Main entry point — register, start local server, connect tunnel."""
-        if self.self_mode:
-            # Self-mode: in Option A this is the hub's loopback child.
-            # The hub passes VIBR8_SELF_NODE_DATA_DIR=~/.vibr8 by default
-            # (so we own the hub-host's existing data dir exclusively;
-            # hub skips its own restore_from_disk). Falls back to
-            # ~/.vibr8-self/ if the env var is unset — used by parallel
-            # test hubs to avoid colliding with a live production dir.
-            import os as _os
-            override = _os.environ.get("VIBR8_SELF_NODE_DATA_DIR", "").strip()
-            node_dir = Path(override).expanduser() if override else (Path.home() / ".vibr8-self")
-            session_dir = str(node_dir / "sessions")
-            ring0_config_path = node_dir / "ring0.json"
-            ring0_work_dir = node_dir / "ring0"
-        else:
-            # Use an isolated session directory per node to avoid sharing state with the hub
-            safe_name = re.sub(r"[^\w-]", "_", self.name.lower())
-            node_dir = Path.home() / ".vibr8-node" / safe_name
-            session_dir = str(node_dir / "sessions")
-            ring0_config_path = node_dir / "ring0.json"
-            ring0_work_dir = node_dir / "ring0"
+        # Per-node data dir. VIBR8_NODE_DATA_DIR is the source of truth
+        # (set by __main__.py before vibr8_core import so the module-
+        # level path constants in vibr8_core/* see the right value).
+        from vibr8_core.data_paths import NODE_DATA_DIR
+        node_dir = NODE_DATA_DIR
+        session_dir = str(node_dir / "sessions")
+        ring0_config_path = node_dir / "ring0.json"
+        ring0_work_dir = node_dir / "ring0"
         self._store = SessionStore(directory=session_dir)
         self._bridge = WsBridge()
         # Node's local server is plain HTTP, so the CLI must use ws:// (not wss://).
@@ -136,29 +127,19 @@ class NodeAgent:
 
         self._launcher.on_codex_adapter_created(on_adapter_created)
 
-        # Set broadcast hook so CLI output goes to the hub tunnel
-        self._bridge._broadcast_hook = self._forward_to_hub
-        # Native-client pushes (permission_cancelled, status_change, etc.)
-        # need to reach hub-side native clients too — they connect to the
-        # hub, not the node.
-        self._bridge._native_push_hook = self._forward_native_push_to_hub
+        # CLI output broadcasts to node-local browser sockets — browsers
+        # reach this node through the hub's ui/v1 WS channel proxy, so no
+        # hub-side forwarding hook is needed (or wanted: the hook replaces
+        # local broadcasting entirely).
+        # Contract events/v1 (docs/hub-node-contract-v1.md §B): Ring0 speech
+        # and status leave this node as explicit events; the hub owns audio.
+        self._bridge._speak_hook = self._emit_speak
+        self._bridge._busy_hook = self._emit_busy
+        self._bridge._attention_hook = self._emit_attention
 
         async def _on_sessions_changed() -> None:
             if self._ws and not self._ws.closed:
                 await self._send_sessions_update(self._ws)
-
-        self._ops = NodeOperations(
-            launcher=self._launcher,
-            bridge=self._bridge,
-            store=self._store,
-            ring0=self._ring0,
-            desktop_webrtc=self._desktop_webrtc,
-            default_backend=self.default_backend,
-            work_dir=self.work_dir,
-            worktree_tracker=self._worktree_tracker,
-            task_scheduler=self._scheduler,
-            on_sessions_changed=_on_sessions_changed,
-        )
 
         # Restore persisted state
         self._launcher.restore_from_disk()
@@ -168,10 +149,28 @@ class NodeAgent:
         # proxy middleware needs at app-construction time, and the hub
         # endpoint on Ring0 so its MCP subprocess (spawned by the auto-launch
         # below) starts with VIBR8_HUB_URL / VIBR8_HUB_TOKEN already in env.
+        # Also sets self.node_id, which NodeOperations captures to build
+        # vending-form URLs (e.g. artifact contentUrl).
         registered = await self._register()
         if not registered:
             logger.error("Failed to register with hub — exiting")
             return
+
+        # NodeOperations depends on self.node_id from registration — this
+        # is why it's constructed here rather than above the register call.
+        self._ops = NodeOperations(
+            launcher=self._launcher,
+            bridge=self._bridge,
+            store=self._store,
+            ring0=self._ring0,
+            desktop_webrtc=self._desktop_webrtc,
+            default_backend=self.default_backend,
+            work_dir=self.work_dir,
+            node_id=self.node_id,
+            worktree_tracker=self._worktree_tracker,
+            task_scheduler=self._scheduler,
+            on_sessions_changed=_on_sessions_changed,
+        )
 
         # Start minimal local aiohttp server for CLI WebSocket + Ring0 MCP
         await self._start_local_server()
@@ -201,6 +200,8 @@ class NodeAgent:
         url = f"{http_url}/api/nodes/register"
 
         capabilities = {
+            "protocolVersion": 1,
+            "contract": ["ui/v1", "events/v1", "desktop/v1"],
             "hostname": platform.node(),
             "platform": platform.system().lower(),
             "arch": platform.machine(),
@@ -270,7 +271,11 @@ class NodeAgent:
 
         conn = aiohttp.TCPConnector(ssl=self._ssl_ctx) if self._ssl_ctx else None
         async with aiohttp.ClientSession(connector=conn) as session:
-            async with session.ws_connect(ws_url, heartbeat=45, ssl=self._ssl_ctx) as ws:
+            # max_msg_size raised for ui/v1 (large proxied request bodies).
+            async with session.ws_connect(
+                ws_url, heartbeat=45, ssl=self._ssl_ctx,
+                max_msg_size=64 * 1024 * 1024,
+            ) as ws:
                 self._ws = ws
                 logger.info("Tunnel connected")
 
@@ -356,8 +361,24 @@ class NodeAgent:
 
     async def _dispatch_command(self, cmd_type: str, msg: dict) -> dict:
         """Generic dispatch: look up the operation by name on NodeOperations."""
+        # Contract plumbing (ui/v1) handled by the agent itself — these are
+        # transport-level, not node operations.
+        if cmd_type == "http_request":
+            return await self._handle_http_request(msg)
+        if cmd_type == "ws_open":
+            return await self._handle_ws_open(msg)
+        if cmd_type == "ws_data":
+            return await self._handle_ws_data(msg)
+        if cmd_type == "ws_close":
+            return await self._handle_ws_close(msg)
         if not self._ops:
             return {"error": "Node not ready"}
+        if cmd_type == "transcript":
+            # Contract §B: voice/typed input for this node's Ring0.
+            return await self._ops.ring0_input(
+                text=msg.get("text", ""),
+                source_client_id=msg.get("clientId", ""),
+            )
         method = getattr(self._ops, cmd_type, None)
         if method is None or not callable(method) or cmd_type.startswith("_"):
             logger.warning("Unknown hub command: %s", cmd_type)
@@ -369,75 +390,199 @@ class NodeAgent:
             logger.exception("Bad payload for %s", cmd_type)
             return {"error": f"Bad payload for {cmd_type}: {e}"}
 
-    # ── Broadcast hook ────────────────────────────────────────────────────
+    # ── Contract events/v1: speak / busy / attention (§B) ────────────────
 
-    async def _forward_to_hub(self, session_id: str, msg: dict) -> None:
-        """Forward CLI output to hub via WS tunnel (broadcast hook)."""
-        if self._ws and not self._ws.closed:
-            await self._ws.send_str(json.dumps({
-                "type": "session_message",
-                "sessionId": session_id,
-                "message": msg,
-            }) + "\n")
+    async def _emit_speak(self, text: str) -> None:
+        await self._send_to_hub({"type": "speak", "text": text})
 
-    async def _forward_native_push_to_hub(
-        self, session_id: str, event: str, payload: dict | None = None,
+    async def _emit_busy(self, busy: bool) -> None:
+        await self._send_to_hub({"type": "busy", "busy": bool(busy)})
+
+    async def _emit_attention(
+        self,
+        reason: str,
+        *,
+        severity: str = "",
+        context_key: str = "",
+        expires_at: str = "",
     ) -> None:
-        """Forward a native-client push (permission_cancelled etc.) to the
-        hub via the tunnel. The hub's on_node_message dispatches it to its
-        own _push_to_native_clients with the session id qualified."""
+        """Emit an events/v1 `attention` tunnel event. Optional structured
+        fields are forwarded verbatim; the hub relays them to subscribed
+        native observers (see docs/native-client-contract.md §B2).
+
+        Additive: single-arg callers keep working — omitted kwargs stay
+        out of the tunnel message so pre-v1 hubs that don't know about
+        them see the same shape as before.
+        """
+        msg: dict[str, Any] = {"type": "attention", "reason": reason}
+        if severity:
+            msg["severity"] = severity
+        if context_key:
+            msg["contextKey"] = context_key
+        if expires_at:
+            msg["expiresAt"] = expires_at
+        await self._send_to_hub(msg)
+
+    async def _emit_title(self, text: str) -> None:
+        """Fire-and-forget: tell the hub what to show in the shell strip.
+        Additive to contract §A2 — hubs that don't understand it drop it."""
+        await self._send_to_hub({"type": "title", "text": text})
+
+    # ── Contract ui/v1: HTTP + WS proxying (docs/hub-node-contract-v1.md §A3)
+
+    async def _send_to_hub(self, payload: dict) -> None:
+        """Send a fire-and-forget NDJSON message up the tunnel."""
         if self._ws and not self._ws.closed:
-            await self._ws.send_str(json.dumps({
-                "type": "native_push",
-                "sessionId": session_id,
-                "event": event,
-                "payload": payload or {},
-            }) + "\n")
+            try:
+                await self._ws.send_str(json.dumps(payload) + "\n")
+            except Exception:
+                logger.warning("Failed to send %s to hub", payload.get("type"))
+
+    async def _handle_http_request(self, msg: dict) -> dict:
+        """Serve a hub-proxied browser HTTP request from the local server."""
+        method = str(msg.get("method", "GET")).upper()
+        path = str(msg.get("path", "/"))
+        if not path.startswith("/") or ".." in path:
+            return {"error": f"Bad path: {path!r}"}
+        url = f"http://127.0.0.1:{self.port}{path}"
+        headers = {
+            k: v for k, v in (msg.get("headers") or {}).items()
+            if k.lower() in ("content-type", "accept", "if-none-match",
+                             "if-modified-since", "range")
+        }
+        body = base64.b64decode(msg["bodyB64"]) if msg.get("bodyB64") else None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.request(
+                    method, url,
+                    params=msg.get("query") or None,
+                    headers=headers,
+                    data=body,
+                    timeout=aiohttp.ClientTimeout(total=55),
+                    allow_redirects=False,
+                ) as resp:
+                    raw = await resp.read()
+                    out_headers = {
+                        k: resp.headers[k]
+                        for k in ("Content-Type", "Cache-Control", "ETag",
+                                  "Last-Modified", "Location")
+                        if k in resp.headers
+                    }
+                    return {
+                        "status": resp.status,
+                        "headers": out_headers,
+                        "bodyB64": base64.b64encode(raw).decode(),
+                    }
+        except Exception as e:
+            logger.warning("http_request %s %s failed: %s", method, path, e)
+            return {"error": str(e)}
+
+    async def _handle_ws_open(self, msg: dict) -> dict:
+        """Open a local WS for a hub-proxied browser WebSocket channel."""
+        channel_id = str(msg.get("channelId", ""))
+        path = str(msg.get("path", "/"))
+        if not channel_id or not path.startswith("/"):
+            return {"error": "Bad ws_open"}
+        qs = urlencode(msg.get("query") or {})
+        url = f"ws://127.0.0.1:{self.port}{path}" + (f"?{qs}" if qs else "")
+        session = aiohttp.ClientSession()
+        try:
+            local_ws = await session.ws_connect(
+                url, max_msg_size=64 * 1024 * 1024,
+            )
+        except Exception as e:
+            await session.close()
+            await self._send_to_hub({"type": "ws_close", "channelId": channel_id})
+            return {"error": f"ws_open failed: {e}"}
+        self._ui_channels[channel_id] = local_ws
+        self._ui_channel_tasks[channel_id] = asyncio.ensure_future(
+            self._pump_ui_channel(channel_id, session, local_ws)
+        )
+        return {"ok": True}
+
+    async def _pump_ui_channel(
+        self,
+        channel_id: str,
+        session: aiohttp.ClientSession,
+        local_ws: aiohttp.ClientWebSocketResponse,
+    ) -> None:
+        """Forward local-server WS messages up to the hub until close."""
+        try:
+            async for m in local_ws:
+                if m.type == aiohttp.WSMsgType.TEXT:
+                    await self._send_to_hub({
+                        "type": "ws_data", "channelId": channel_id, "text": m.data,
+                    })
+                elif m.type == aiohttp.WSMsgType.BINARY:
+                    await self._send_to_hub({
+                        "type": "ws_data", "channelId": channel_id,
+                        "dataB64": base64.b64encode(m.data).decode(),
+                    })
+                elif m.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                    break
+        except Exception:
+            logger.debug("ui channel %s pump error", channel_id, exc_info=True)
+        finally:
+            self._ui_channels.pop(channel_id, None)
+            self._ui_channel_tasks.pop(channel_id, None)
+            try:
+                await local_ws.close()
+            finally:
+                await session.close()
+            await self._send_to_hub({"type": "ws_close", "channelId": channel_id})
+
+    async def _handle_ws_data(self, msg: dict) -> dict:
+        ws = self._ui_channels.get(str(msg.get("channelId", "")))
+        if ws is None or ws.closed:
+            return {"error": "No such channel"}
+        if msg.get("text") is not None:
+            await ws.send_str(msg["text"])
+        elif msg.get("dataB64"):
+            await ws.send_bytes(base64.b64decode(msg["dataB64"]))
+        return {"ok": True}
+
+    async def _handle_ws_close(self, msg: dict) -> dict:
+        channel_id = str(msg.get("channelId", ""))
+        ws = self._ui_channels.pop(channel_id, None)
+        if ws is not None and not ws.closed:
+            # The pump task notices the close and finishes cleanup.
+            await ws.close()
+        return {"ok": True}
 
     # ── Local server ──────────────────────────────────────────────────────
 
     def _make_hub_proxy_middleware(self):
         """Create aiohttp middleware that proxies hub-only routes to the hub.
 
-        Routes like /api/clients, /api/ring0/query-client, /api/ring0/switch-ui,
-        /api/second-screen/*, and /api/artifacts* operate on browser-side state
-        that only exists on the hub. On a node, these are forwarded.
+        Routes like /api/clients, /api/ring0/query-client, /api/second-screen/*,
+        and /api/artifacts* operate on browser-side state that only exists on
+        the hub. On a node, these are forwarded.
         """
         hub_http_url = self._hub_http_url()
         hub_token = self.hub_service_token
         hub_verify_ssl = not (hub_http_url.startswith("https://localhost") or hub_http_url.startswith("https://127.0.0.1"))
 
-        # Routes proxied to the hub. Two categories:
-        # 1. Hub-only state (clients, second-screen pairings, artifacts).
-        # 2. /api/ring0/* routes that need cross-node session resolution
-        #    via the hub's session_registry — the node has no registry of
-        #    its own, so its local fallback can only exact-match against
-        #    its launcher and rejects the 8-char prefixes Ring0 passes
-        #    from list_sessions output. Send-message / interrupt / etc.
-        #    all fall in this bucket.
-        # Routes intentionally left LOCAL:
-        # - /api/ring0/sessions: returns THIS node's session list
-        # - /api/ring0/status, /toggle, /switch-backend, /switch-model,
-        #   /mute-events, /create-session, /node-environment, /tasks*:
-        #   all per-node Ring0 config / scheduler.
-        # - /api/ring0/get-session-mode, /set-session-mode: per-node
-        #   permission-mode state (Ring0 only queries its own node).
+        # Routes proxied to the hub: hub-only state (browser clients,
+        # second-screen pairings, artifacts, node registry, voice/UI
+        # switching). Per-node Ring0 is fully internal — session-resolving
+        # routes (send-message, interrupt, respond-permission, …) run
+        # locally; NodeOperations._expand_session_id handles the 8-char
+        # prefixes Ring0 passes from list_sessions output.
+        # Notable exclusions:
+        #   * /api/ring0/switch-ui: session-scoped, stays node-local. The
+        #     node's ws_bridge pushes ring0_switch_ui down the iframe's
+        #     session WS — the switch never traverses the hub/shell.
+        #   * /api/artifacts: artifact storage is per-node
+        #     (~/.vibr8-node/{name}/artifacts/); the node serves CRUD and
+        #     content bytes locally. Browsers reach them through the
+        #     hub's /nodes/{id}/ vending proxy.
         _HUB_ONLY_PREFIXES = (
             "/api/clients",
             "/api/nodes",
             "/api/ring0/query-client",
-            "/api/ring0/switch-ui",
-            "/api/ring0/switch-audio",
             "/api/ring0/clients",
             "/api/ring0/prompt-context",
-            "/api/ring0/send-message",
-            "/api/ring0/interrupt",
-            "/api/ring0/respond-permission",
-            "/api/ring0/rename-session",
-            "/api/ring0/session-output/",
-            "/api/ring0/set-guard",
             "/api/second-screen/",
-            "/api/artifacts",
         )
 
         node_bridge = self._bridge
@@ -458,8 +603,7 @@ class NodeAgent:
             try:
                 body = await request.read() if request.can_read_body else None
                 _wants_client_id = (
-                    path in ("/api/ring0/switch-ui", "/api/ring0/switch-audio")
-                    or (path.startswith("/api/nodes/") and path.endswith("/activate"))
+                    path.startswith("/api/nodes/") and path.endswith("/activate")
                 )
                 if body and _wants_client_id and node_bridge:
                     import json as _json
@@ -529,6 +673,69 @@ class NodeAgent:
 
         app.router.add_get("/ws/cli/{session_id}", handle_cli_ws)
 
+        # Browser WS — reached via the hub's ui/v1 channel proxy. This
+        # node's WsBridge owns real session state, so the handler mirrors
+        # the hub's handle_browser_ws.
+        async def handle_browser_ws(request: web.Request) -> web.WebSocketResponse:
+            ws = web.WebSocketResponse(heartbeat=45)
+            await ws.prepare(request)
+            # Expand an 8-char session prefix (e.g. one a mirroring second
+            # screen got from Ring0's list_sessions) to the full session id.
+            session_id = self._ops._expand_session_id(request.match_info["session_id"])
+            client_id = request.rel_url.query.get("clientId", "")
+            role = request.rel_url.query.get("role", "primary")
+            mirror = request.rel_url.query.get("mirror", "") == "true"
+            await bridge.handle_browser_open(
+                ws, session_id, client_id, role=role, mirror=mirror,
+            )
+            try:
+                async for msg in ws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        await bridge.handle_browser_message(ws, msg.data)
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        break
+            finally:
+                await bridge.handle_browser_close(ws)
+            return ws
+
+        app.router.add_get("/ws/browser/{session_id}", handle_browser_ws)
+
+        # Node-vended UI (contract ui/v1): serve the built frontend at /ui/.
+        # The build ships with the node, so UI and backend are always the
+        # same commit — version skew with the hub is impossible here.
+        dist_dir = Path(__file__).resolve().parent.parent / "web" / "dist"
+
+        async def handle_ui(request: web.Request) -> web.StreamResponse:
+            if not dist_dir.is_dir():
+                return web.json_response(
+                    {"error": "Node UI not built (web/dist missing)"}, status=503,
+                )
+            rel = request.match_info.get("path", "")
+            if rel:
+                candidate = (dist_dir / rel).resolve()
+                if candidate.is_file() and dist_dir in candidate.parents:
+                    return web.FileResponse(candidate)
+            return web.FileResponse(dist_dir / "index.html")
+
+        app.router.add_get("/ui", handle_ui)
+        app.router.add_get("/ui/{path:.*}", handle_ui)
+
+        # POST /api/_title — the node's own UI publishes the currently
+        # displayed title (session name, etc.) here; the node relays it
+        # to the hub as a fire-and-forget `title` tunnel event so the
+        # shell can render it in the strip. Registered before
+        # create_routes so it wins any name collision.
+        async def set_title(request: web.Request) -> web.Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return web.json_response({"error": "Invalid JSON"}, status=400)
+            text = str((body or {}).get("text", "")).strip()
+            await self._emit_title(text)
+            return web.json_response({"ok": True})
+
+        app.router.add_post("/api/_title", set_title)
+
         # Ring0 MCP routes (reuse from server.routes)
         from server.routes import create_routes
         ring0 = self._ring0
@@ -536,7 +743,6 @@ class NodeAgent:
             launcher, bridge, self._store,
             worktree_tracker=self._worktree_tracker,
             ring0_manager=ring0,
-            self_node_name=self.name,
             local_node_ops=self._ops,
         )
         app.router.add_routes(api_routes)
@@ -556,6 +762,10 @@ class NodeAgent:
 
     async def _shutdown(self) -> None:
         """Clean shutdown."""
+        for task in list(self._ui_channel_tasks.values()):
+            task.cancel()
+        self._ui_channel_tasks.clear()
+        self._ui_channels.clear()
         if self._desktop_webrtc:
             await self._desktop_webrtc.close_all()
         if self._scheduler:

@@ -36,8 +36,9 @@ class Vibr8Env:
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
 
-VIBR8_DIR = Path.home() / ".vibr8"
-ENVS_DIR = VIBR8_DIR / "envs"
+from vibr8_core.data_paths import NODE_DATA_DIR
+
+ENVS_DIR = NODE_DATA_DIR / "envs"
 
 
 def _ensure_dir() -> None:

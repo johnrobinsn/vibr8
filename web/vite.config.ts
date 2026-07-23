@@ -21,6 +21,9 @@ const httpScheme = useHttps ? "https" : "http";
 const wsScheme = useHttps ? "wss" : "ws";
 
 export default defineConfig({
+  // Relative asset paths so the same build works at the hub root AND when
+  // vended by a node under /nodes/{id}/ui/ (contract ui/v1).
+  base: "./",
   plugins: [react(), tailwindcss()],
   test: {
     globals: true,
@@ -48,6 +51,26 @@ export default defineConfig({
         secure: false,
         configure: (proxy) => {
           // Suppress TLS socket errors when backend closes WS connections
+          proxy.on("error", () => {});
+          proxy.on("proxyReqWs", (_proxyReq, _req, socket) => {
+            socket.on("error", () => {});
+          });
+        },
+      },
+      // Node-vended UI proxy: forward every /nodes/{id}/{ui,api,ws}/
+      // to the hub backend, which tunnels it through to the node's own
+      // loopback server. Without the /ui/ line here, Vite's SPA
+      // catch-all would answer with the shell's own bundle, hiding
+      // whatever HTML the node actually vends.
+      "^/nodes/[^/]+/(ui|api)/": {
+        target: `${httpScheme}://${backendHost}:${backendPort}`,
+        secure: false,
+      },
+      "^/nodes/[^/]+/ws/": {
+        target: `${wsScheme}://${backendHost}:${backendPort}`,
+        ws: true,
+        secure: false,
+        configure: (proxy) => {
           proxy.on("error", () => {});
           proxy.on("proxyReqWs", (_proxyReq, _req, socket) => {
             socket.on("error", () => {});

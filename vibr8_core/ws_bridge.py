@@ -22,6 +22,42 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ── Native-client (Android foreground service) contract ─────────────────────
+# Documented shape in docs/native-client-contract.md. These constants pin
+# the wire surface so a test (server/tests/test_native_client_contract.py)
+# fails loudly when someone adds or removes a message type on either
+# direction without updating the contract.
+
+# Server → native client, correlated RPC commands. Message shape:
+# ``{"command": <name>, "id": <rpc_id>, "params"?: {...}}``. The native
+# client replies with ``{"id": <rpc_id>, "result"|"error": ...}``.
+NATIVE_RPC_COMMANDS: frozenset[str] = frozenset({
+    "bring_to_foreground",
+    "launch_app",
+})
+
+# Native client → server, spontaneous message ``type`` values (the
+# separate RPC-response shape ``{"id", "result"/"error"}`` is correlated
+# by id rather than by ``type`` and is not in this set).
+NATIVE_INBOUND_TYPES: frozenset[str] = frozenset({
+    "subscribe",
+    "unsubscribe",
+    "permission_response",
+})
+
+# Server → native client, fire-and-forget push events (only reach a
+# client that has subscribed via ``{"type": "subscribe"}``). Message
+# shape: ``{"type": "push", "event": <name>, ...envelope..., ...payload...}``.
+# Under the node-agnostic observer contract (see
+# docs/native-client-contract.md §B2) the wire surface reduces to
+# ``attention`` and ``busy`` — both are relays of events/v1 hooks the
+# hub already receives from nodes, enriched by the hub with
+# ``nodeId`` + ``nodeName`` so notifications can name the source node.
+NATIVE_PUSH_EVENTS: frozenset[str] = frozenset({
+    "attention",
+    "busy",
+})
+
 # ── Session state ────────────────────────────────────────────────────────────
 
 BackendType = str  # "claude" | "codex"
@@ -103,13 +139,21 @@ class WsBridge:
         # Format: "{node_id}:{raw_session_id}" for remote, raw id for local
         # Hook for vibr8-node: intercepts _broadcast_to_browsers for remote forwarding
         self._broadcast_hook: Callable[..., Awaitable[None]] | None = None
-        # Hook for vibr8-node: intercepts _push_to_native_clients so native
-        # client notifications (e.g. permission_cancelled) reach hub-side
-        # native clients (watch, second screen) when the session lives on
-        # a remote node. Native clients connect to the hub, not the node,
-        # so the node-local push_to_native_clients call would otherwise
-        # find an empty subscriber list and drop the message.
-        self._native_push_hook: Callable[..., Awaitable[None]] | None = None
+        # Contract events/v1 hooks (docs/hub-node-contract-v1.md §B), set by
+        # NodeAgent. speak(text): this node's Ring0 wants TTS; busy(bool):
+        # Ring0 working/idle; attention(reason): node wants the user. All
+        # None on the hub's own bridge.
+        # Events/v1 hooks. NodeAgent wires them at startup so the node
+        # can emit these into the tunnel; on the hub they stay None
+        # (there's no "up-stream" to relay to). `_attention_hook` grew
+        # additive kwargs (severity/context_key/expires_at) for the
+        # observer channel that carries these events to native clients —
+        # implementers pass whatever context is available and the hub
+        # forwards it verbatim to subscribed native observers. All kwargs
+        # are optional so existing single-arg call sites keep working.
+        self._speak_hook: Callable[[str], Awaitable[None]] | None = None
+        self._busy_hook: Callable[[bool], Awaitable[None]] | None = None
+        self._attention_hook: Callable[..., Awaitable[None]] | None = None
         self._computer_use_agents: dict[str, Any] = {}  # session_id → ComputerUseAgent
         self._active_tts: dict[str, Any] = {}  # session_id → TTSEngine instance
         # Hard-cancel handles for the `_speak_text` coroutines. `_active_tts`
@@ -145,14 +189,17 @@ class WsBridge:
         self._native_rpc_pending: dict[str, asyncio.Future] = {}  # id → Future for native responses
         self._native_subscriptions: dict[str, set[str]] = {}  # clientId → set of sessionIds
         self._native_subscribe_all: set[str] = set()  # clientIds subscribed to all sessions
-        # Client metadata (persisted to ~/.vibr8/clients.json)
+        # Client metadata (persisted to ~/.vibr8/clients.json on the hub;
+        # override via VIBR8_HUB_DATA_DIR for a parallel dev hub).
         self._client_metadata: dict[str, dict[str, Any]] = {}
-        self._CLIENTS_PATH = Path.home() / ".vibr8" / "clients.json"
+        import os as _os
+        _hub_dir_override = _os.environ.get("VIBR8_HUB_DATA_DIR", "").strip()
+        _hub_dir = Path(_hub_dir_override).expanduser() if _hub_dir_override else (Path.home() / ".vibr8")
+        self._CLIENTS_PATH = _hub_dir / "clients.json"
         self._load_client_metadata()
         # User re-engagement tracking for scheduled tasks
         self._last_user_interaction: float = 0.0  # time.time() of last user-originated message to Ring0
         self._task_scheduler: Any = None  # TaskScheduler (set via setter)
-        self._session_registry: Any = None  # SessionRegistry (set via setter)
         self._prompt_context_by_session: dict[str, dict[str, Any]] = {}
         self._prompt_context_by_client: dict[str, dict[str, Any]] = {}
         self._latest_prompt_context: dict[str, Any] = {}
@@ -200,6 +247,33 @@ class WsBridge:
         self._native_subscriptions.pop(client_id, None)
         self._native_subscribe_all.discard(client_id)
         logger.debug("[ws-bridge] Native WS unregistered for client %s", client_id[:8])
+
+    # ── Hub-shell control WebSocket ─────────────────────────────────────
+    # The shell (NodeShellFrame) has no session WS of its own — session
+    # traffic rides the iframe through the ui/v1 proxy to a node. Hub-side
+    # pushes like `voice_mode` need to reach the shell directly, so the
+    # shell opens a tiny control WS here that only populates _ws_by_client
+    # for that client. send-to-client lookups (broadcast_voice_mode,
+    # broadcast_audio_mode, etc.) then find it.
+
+    def register_shell_ws(self, client_id: str, ws: web.WebSocketResponse) -> None:
+        self._ws_by_client[client_id] = ws
+        logger.debug("[ws-bridge] Shell WS registered for client %s", client_id[:8])
+
+    def unregister_shell_ws(self, client_id: str, ws: web.WebSocketResponse) -> None:
+        if self._ws_by_client.get(client_id) is ws:
+            self._ws_by_client.pop(client_id, None)
+        logger.debug("[ws-bridge] Shell WS unregistered for client %s", client_id[:8])
+
+    async def broadcast_node_title(self, node_id: str, text: str) -> None:
+        """Push a node's newly-updated title to every open hub-shell WS.
+        The shell picks the ones that match its currently-active node."""
+        msg = json.dumps({"type": "node_title", "nodeId": node_id, "text": text})
+        for cid, ws in list(self._ws_by_client.items()):
+            try:
+                await ws.send_str(msg)
+            except Exception:
+                self._ws_by_client.pop(cid, None)
 
     async def handle_native_message(self, client_id: str, data: dict) -> None:
         """Handle an incoming message from a native WebSocket.
@@ -417,9 +491,6 @@ class WsBridge:
     def set_task_scheduler(self, scheduler: Any) -> None:
         self._task_scheduler = scheduler
 
-    def set_session_registry(self, registry: Any) -> None:
-        self._session_registry = registry
-
     def get_ring0_prompt_client(self) -> str:
         """Return the client ID from the current Ring0 prompt context."""
         ring0 = self._ring0_manager
@@ -519,11 +590,6 @@ class WsBridge:
     # Node identity is embedded in the session ID: "{node_id}:{raw_id}" for remote.
 
     @staticmethod
-    def qualify_session_id(node_id: str, raw_id: str) -> str:
-        """Prefix a raw session ID with the node identity."""
-        return f"{node_id}:{raw_id}"
-
-    @staticmethod
     def parse_qualified_id(qid: str) -> tuple[str, str]:
         """(node_id, raw_id) — for local sessions, node_id is ''."""
         return tuple(qid.split(":", 1)) if ":" in qid else ("", qid)  # type: ignore[return-value]
@@ -533,83 +599,13 @@ class WsBridge:
         return ":" in session_id
 
     def get_session_node_id(self, session_id: str) -> str:
-        """Return the node_id for a session ('local' for hub sessions)."""
+        """Return the node_id for a session ('' for hub-owned sessions)."""
         node_id, _ = self.parse_qualified_id(session_id)
-        return node_id or "local"
+        return node_id or ""
 
     def _raw_session_id(self, qid: str) -> str:
         """Strip node prefix to get the raw ID the node uses internally."""
         return qid.split(":", 1)[-1]
-
-    def update_remote_sessions(
-        self, node_id: str, sessions: list[dict[str, Any]]
-    ) -> None:
-        """Clean up stale proxy sessions when a node reports its session list.
-        Session IDs in the list are already qualified by the caller (main.py)."""
-        prefix = f"{node_id}:"
-        current_ids = {
-            s.get("sessionId", s.get("id", ""))
-            for s in sessions
-        }
-        # Remove proxy sessions that no longer exist on the node
-        stale = [sid for sid in self._sessions if sid.startswith(prefix) and sid not in current_ids]
-        for sid in stale:
-            self._sessions.pop(sid, None)
-
-    async def handle_remote_session_message(
-        self, session_id: str, message: dict[str, Any]
-    ) -> None:
-        """Forward a message from a remote node's CLI to connected browsers.
-
-        Also triggers TTS for assistant messages from remote Ring0 sessions,
-        since audio is always processed centrally on the hub.
-        """
-        session = self._sessions.get(session_id)
-        if not session:
-            # Create a lightweight proxy session so messages are buffered
-            session = self.get_or_create_session(session_id)
-
-        # Buffer messages so reconnecting browsers get history
-        msg_type = message.get("type", "")
-        if msg_type in ("cli_connected", "cli_disconnected"):
-            logger.info(f"[ws-bridge] Remote {msg_type} for session {session_id[:8]} → {len(session.browser_sockets)} browser(s)")
-        if msg_type in ("assistant", "result", "user_message"):
-            session.message_history.append(message)
-
-        # Track permission requests so browsers connecting later get them
-        if msg_type == "permission_request":
-            req = message.get("request", {})
-            req_id = req.get("request_id", "")
-            if req_id:
-                session.pending_permissions[req_id] = req
-        elif msg_type in ("permission_response", "permission_cancelled"):
-            req_id = message.get("request_id", "")
-            session.pending_permissions.pop(req_id, None)
-
-        # Track session state updates from remote node
-        if msg_type == "session_update":
-            remote_state = message.get("session", {})
-            if remote_state:
-                session.state.update(remote_state)
-
-        # TTS for remote Ring0 assistant responses
-        if msg_type == "assistant" and self._webrtc_manager:
-            text = message.get("message")
-            if text:
-                track = self._webrtc_manager.get_any_outgoing_track()
-                if track:
-                    audio_client_id, audio_track = track
-                    if not self._webrtc_manager.is_tts_muted(audio_client_id):
-                        self._enqueue_speak(session_id, text, audio_track, audio_client_id)
-
-        await self._broadcast_to_browsers(session, message)
-
-    def remove_remote_node_sessions(self, node_id: str) -> None:
-        """Clean up all proxy sessions when a node goes offline."""
-        prefix = f"{node_id}:"
-        to_remove = [sid for sid in self._sessions if sid.startswith(prefix)]
-        for sid in to_remove:
-            self._sessions.pop(sid, None)
 
     def cancel_tts(self, session_id: str) -> None:
         """Cancel any in-progress TTS for *session_id* (called on barge-in).
@@ -847,12 +843,10 @@ class WsBridge:
         msg = {"type": "guard_state", "enabled": enabled}
         if client_id:
             await self._send_to_client(client_id, msg)
-            await self._push_to_all_native_clients("guard_state", {"enabled": enabled})
         else:
             session = self._sessions.get(session_id)
             if session:
                 await self._broadcast_to_browsers(session, msg)
-                await self._push_to_native_clients(session_id, "guard_state", {"enabled": enabled})
 
     async def broadcast_audio_off(self, session_id: str) -> None:
         """Tell browser to disconnect WebRTC audio."""
@@ -867,24 +861,20 @@ class WsBridge:
         msg = {"type": "tts_muted", "muted": muted}
         if client_id:
             await self._send_to_client(client_id, msg)
-            await self._push_to_all_native_clients("tts_muted", {"muted": muted})
         else:
             session = self._sessions.get(session_id)
             if session:
                 await self._broadcast_to_browsers(session, msg)
-                await self._push_to_native_clients(session_id, "tts_muted", {"muted": muted})
 
     async def broadcast_voice_mode(self, session_id: str, mode: str | None, *, client_id: str | None = None) -> None:
         """Broadcast voice mode change to browser and native clients."""
         msg = {"type": "voice_mode", "mode": mode}
         if client_id:
             await self._send_to_client(client_id, msg)
-            await self._push_to_all_native_clients("voice_mode", {"mode": mode})
         else:
             session = self._sessions.get(session_id)
             if session:
                 await self._broadcast_to_browsers(session, msg)
-                await self._push_to_native_clients(session_id, "voice_mode", {"mode": mode})
 
     async def broadcast_node_switch(self, node_id: str, node_name: str | None = None) -> None:
         """Broadcast node_switch to all connected browsers (e.g. from voice command)."""
@@ -972,15 +962,10 @@ class WsBridge:
                 if not session.state.get("is_running"):
                     session.state["is_running"] = True
                     asyncio.ensure_future(self._notify_ring0_state_change(session, "idle→running"))
-                    asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
-                        "agentStatus": "running",
-                        "isRunning": True, "isWaitingForPermission": False,
-                    }))
                 # Auto-clear pending permissions (agent continued without waiting)
                 if session.pending_permissions:
                     for req_id in list(session.pending_permissions):
                         await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
-                        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
                     session.pending_permissions.clear()
                     session.state["is_waiting_for_permission"] = False
                 self._persist_session(session)
@@ -991,10 +976,6 @@ class WsBridge:
                 if session.state.get("is_running"):
                     session.state["is_running"] = False
                     asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
-                    asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
-                        "agentStatus": "idle",
-                        "isRunning": False, "isWaitingForPermission": False,
-                    }))
                     if session.controlled_by == "user":
                         self._schedule_pen_release(session)
                 session.state["is_waiting_for_permission"] = False
@@ -1016,7 +997,6 @@ class WsBridge:
                 if session.pending_permissions:
                     for req_id in list(session.pending_permissions):
                         await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
-                        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
                     session.pending_permissions.clear()
                 self._persist_session(session)
                 # Cap active history
@@ -1042,7 +1022,6 @@ class WsBridge:
                 else:
                     asyncio.ensure_future(self._notify_ring0_state_change(
                         session, "waiting_for_permission", detail=detail))
-                asyncio.ensure_future(self._push_to_native_clients(session.id, "permission_request", {"request": req}))
                 self._persist_session(session)
 
             await self._broadcast_to_browsers(session, msg)
@@ -1077,7 +1056,6 @@ class WsBridge:
         async def on_disconnect() -> None:
             for req_id in list(session.pending_permissions):
                 await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
-                await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
             session.pending_permissions.clear()
             # Clear running/permission state and notify Ring0
             was_waiting = session.state.get("is_waiting_for_permission")
@@ -1092,7 +1070,6 @@ class WsBridge:
             self._persist_session(session)
             logger.info(f"[ws-bridge] Adapter disconnected for session {session_id}")
             await self._broadcast_to_browsers(session, {"type": "cli_disconnected"})
-            await self._push_to_native_clients(session.id, "cli_disconnected")
 
         adapter.on_disconnect(on_disconnect)
 
@@ -1110,7 +1087,6 @@ class WsBridge:
 
         # Notify browsers and native clients
         self._schedule_background(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
-        self._schedule_background(self._push_to_native_clients(session.id, "cli_connected"))
         logger.info(f"[ws-bridge] Codex adapter attached for session {session_id}")
 
     # ── Computer-use agent attachment ──────────────────────────────────────────
@@ -1164,7 +1140,6 @@ class WsBridge:
         self._persist_session(session)
         self._schedule_background(self._broadcast_to_browsers(session, init_msg))
         self._schedule_background(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
-        self._schedule_background(self._push_to_native_clients(session.id, "cli_connected"))
 
         # Replay any messages queued while the agent was initializing
         if session.pending_messages:
@@ -1198,8 +1173,6 @@ class WsBridge:
         session._replay_archived = False
         logger.info(f"[ws-bridge] CLI connected for session {session_id} (awaiting replay)")
         self._schedule_background(self._broadcast_to_browsers(session, {"type": "cli_connected"}))
-        self._schedule_background(self._push_to_native_clients(session.id, "cli_connected"))
-        self._schedule_background(self._push_to_all_native_clients("sessions_changed"))
 
         # Flush queued messages. Snapshot + clear before awaiting so that if a
         # write fails and _send_to_cli re-queues into pending_messages, the
@@ -1253,11 +1226,9 @@ class WsBridge:
         is_waiting = session.state.get("is_waiting_for_permission")
         logger.info(f"[ws-bridge] CLI disconnected for session {session_id} is_running={is_running} is_waiting={is_waiting} pending_perms={len(pending_perms)}")
         await self._broadcast_to_browsers(session, {"type": "cli_disconnected"})
-        await self._push_to_native_clients(session.id, "cli_disconnected")
 
         for req_id in list(session.pending_permissions):
             await self._broadcast_to_browsers(session, {"type": "permission_cancelled", "request_id": req_id})
-            await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": req_id})
         session.pending_permissions.clear()
         # Clear running/permission state and notify Ring0
         was_waiting = session.state.get("is_waiting_for_permission")
@@ -1269,7 +1240,6 @@ class WsBridge:
         elif was_running:
             asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
 
-        asyncio.ensure_future(self._push_to_all_native_clients("sessions_changed"))
 
     # ── Browser WebSocket handlers ───────────────────────────────────────
 
@@ -1598,11 +1568,6 @@ class WsBridge:
             session.state["is_running"] = True
             import asyncio
             asyncio.ensure_future(self._notify_ring0_state_change(session, "idle→running"))
-            asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
-                "agentStatus": "running",
-                "isRunning": True, "isWaitingForPermission": False,
-            }))
-
         text = msg.get("message")
 
         # TTS: speak assistant response if audio is active and TTS not muted.
@@ -1624,7 +1589,19 @@ class WsBridge:
                 session.id, audio_client_id, type(text).__name__, text_preview, track is not None, tts_muted, tts_allowed,
             )
             if track and not tts_muted and tts_allowed:
+                # Hub side: polite-assistant queueing (queue-before-start
+                # + cancel-on-barge-in). See _enqueue_speak below.
                 self._enqueue_speak(session.id, text, track, audio_client_id)
+        elif text and self._speak_hook:
+            # Node side (contract events/v1): no audio here — Ring0 speech
+            # is an explicit `speak` tunnel event the hub synthesizes (§B).
+            # `track` is None on node bridges because the hub owns audio.
+            ring0 = self._ring0_manager
+            if ring0 and ring0.is_enabled and session.id == ring0.session_id:
+                spoken = self._flatten_message_text(text)
+                if spoken.strip():
+                    import asyncio
+                    asyncio.ensure_future(self._speak_hook(spoken))
 
         browser_msg: dict[str, Any] = {
             "type": "assistant",
@@ -1660,6 +1637,33 @@ class WsBridge:
         logger.info("[ws-bridge] Broadcasting assistant to %d browsers for session %s", len(session.browser_sockets), session.id[:8])
         await self._broadcast_to_browsers(session, browser_msg)
         self._persist_session(session)
+
+    @staticmethod
+    def _flatten_message_text(text) -> str:
+        """Flatten an assistant message (str, content-block list, or dict)
+        into plain text suitable for TTS. Empty string when nothing
+        speakable. Used by the node-side `_speak_hook` branch (events/v1);
+        the hub-side `_speak_text` below has its own equivalent inline
+        normalization (D1/D2 additions from main)."""
+        if isinstance(text, dict):
+            # e.g. {"role": "assistant", "content": "..."} or {"content": [...]}
+            content = text.get("content", "")
+            if isinstance(content, list):
+                text = " ".join(
+                    block.get("text", "") for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+            elif isinstance(content, str):
+                text = content
+            else:
+                text = ""
+        elif isinstance(text, list):
+            text = " ".join(
+                block.get("text", "") for block in text
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        return text if isinstance(text, str) else ""
+
 
     # ── D1: polite-assistant TTS queueing ────────────────────────────────
     #
@@ -1968,10 +1972,6 @@ class WsBridge:
             session.state["is_running"] = False
             import asyncio
             asyncio.ensure_future(self._notify_ring0_state_change(session, "running→idle"))
-            asyncio.ensure_future(self._push_to_native_clients(session.id, "status_change", {
-                "agentStatus": "idle",
-                "isRunning": False, "isWaitingForPermission": False,
-            }))
             # Restart pen timeout when session goes idle
             if session.controlled_by == "user":
                 self._schedule_pen_release(session)
@@ -2080,7 +2080,6 @@ class WsBridge:
             # still recover on its own.
             self._record_perm_retry(session, perm)
             await self._broadcast_to_browsers(session, {"type": "permission_request", "request": perm})
-            await self._push_to_native_clients(session.id, "permission_request", {"request": perm})
             self._persist_session(session)
             # Notify Ring0 of every permission request — not just the first.
             tool_name = perm.get("tool_name", "?")
@@ -2415,7 +2414,6 @@ class WsBridge:
             "type": "permission_cancelled",
             "request_id": request_id,
         })
-        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": request_id})
 
     def _handle_interrupt(self, session: Session) -> None:
         self.interrupt_session(session.id)
@@ -2707,6 +2705,11 @@ class WsBridge:
 
     async def _notify_ring0_state_change(self, session: Session, transition: str, *, detail: str = "") -> None:
         """Notify Ring0 of a session state transition (e.g. idle->running)."""
+        # Contract events/v1 (node side): busy mirrors the Ring0 session's
+        # own activity; attention fires when any session blocks on a
+        # permission. Must run before the early returns below — the Ring0
+        # session itself is excluded from its own notifications.
+        self._emit_contract_status(session, transition)
         ring0 = self._ring0_manager
         if not ring0:
             return
@@ -2741,6 +2744,35 @@ class WsBridge:
         if detail:
             fields["detail"] = detail
         await self.emit_ring0_event(Ring0Event(fields=fields))
+
+    def _emit_contract_status(self, session: Session, transition: str) -> None:
+        """Fire events/v1 busy/attention hooks for a state transition.
+        No-op unless a NodeAgent wired the hooks."""
+        ring0 = self._ring0_manager
+        if (
+            self._busy_hook
+            and ring0
+            and ring0.is_enabled
+            and session.id == ring0.session_id
+        ):
+            if transition.endswith("→running"):
+                asyncio.ensure_future(self._busy_hook(True))
+            elif transition.endswith("→idle"):
+                asyncio.ensure_future(self._busy_hook(False))
+        if self._attention_hook and transition.endswith("waiting_for_permission"):
+            from vibr8_core import session_names
+            name = session_names.get_name(session.id) or session.id[:8]
+            # Reuse the session id as the contextKey: subsequent attentions
+            # about the same session collapse into one notification on the
+            # native side rather than stacking. Severity "warning" — the
+            # user is blocked, but nothing is on fire.
+            asyncio.ensure_future(
+                self._attention_hook(
+                    f"session {name} is waiting for permission",
+                    severity="warning",
+                    context_key=f"perm:{session.id}",
+                )
+            )
 
     # ── "Take the Pen" helpers ───────────────────────────────────────────
 
@@ -2813,9 +2845,10 @@ class WsBridge:
 
     async def rpc_call(self, client_id: str, method: str, params: dict | None = None, timeout: float = 5.0) -> dict:
         """Send an RPC request to a specific browser client and await the response."""
-        # Native-only commands: prefer native socket (works when WebView is paused)
-        _native_methods = {"bring_to_foreground", "launch_app"}
-        if method in _native_methods:
+        # Native-only commands: prefer native socket (works when WebView
+        # is paused). Set pinned at module level as NATIVE_RPC_COMMANDS —
+        # see docs/native-client-contract.md.
+        if method in NATIVE_RPC_COMMANDS:
             native_ws = self._native_ws_by_client.get(client_id)
             if not native_ws:
                 for cid in self._native_ws_by_client:
@@ -3023,93 +3056,66 @@ class WsBridge:
             msg["userRenamed"] = True
         await self._broadcast_to_browsers(session, msg)
         self._persist_session(session)
-        asyncio.ensure_future(self._push_to_all_native_clients("sessions_changed"))
 
-    async def broadcast_ring0_switch_ui(self, target_session_id: str, *, client_id: str = "") -> bool:
-        """Send ring0_switch_ui to a specific client or broadcast to all browsers.
+    async def send_ring0_switch_ui(
+        self, target_session_id: str, *, client_id: str,
+    ) -> bool:
+        """Send ring0_switch_ui to a single browser client.
 
-        The browser extracts the node ID from the qualified session ID
-        (nodeId:rawId) and switches node automatically.
+        switch_ui is a node-scoped operation under contract ui/v1: Ring0
+        lives on the node, the target session is on the node, and the
+        iframe UI is served by the node. This helper runs on the node's
+        own ws_bridge and pushes the message down the iframe's session
+        WS — the hub/shell are not involved. `client_id` is required.
 
-        Returns True if the message was sent successfully, False if the target client was not found.
+        Returns True if the message was sent successfully, False if the
+        target client was not connected.
         """
-        node_id, _ = self.parse_qualified_id(target_session_id)
-        msg_data: dict[str, Any] = {"type": "ring0_switch_ui", "sessionId": target_session_id}
-        if node_id:
-            msg_data["nodeId"] = node_id
-        messages = [json.dumps(msg_data)]
+        if not client_id:
+            raise ValueError("send_ring0_switch_ui requires client_id")
+        msg = json.dumps({"type": "ring0_switch_ui", "sessionId": target_session_id})
 
-        # Target a specific client if provided
-        if client_id:
-            ws = self._ws_by_client.get(client_id)
-            if not ws:
-                # Prefix match fallback
-                for cid, w in self._ws_by_client.items():
-                    if cid.startswith(client_id):
-                        ws = w
-                        break
-            if ws and not ws.closed:
-                try:
-                    for m in messages:
-                        await ws.send_str(m)
-                    return True
-                except Exception:
-                    pass
-            return False
+        ws = self._ws_by_client.get(client_id)
+        if not ws:
+            for cid, w in self._ws_by_client.items():
+                if cid.startswith(client_id):
+                    ws = w
+                    break
+        if ws and not ws.closed:
+            try:
+                await ws.send_str(msg)
+                return True
+            except Exception:
+                pass
+        return False
 
-        # Broadcast to all browsers
-        for session in self._sessions.values():
-            dead: list[web.WebSocketResponse] = []
-            for ws in session.browser_sockets:
-                try:
-                    for m in messages:
-                        await ws.send_str(m)
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                cid = session.browser_sockets.pop(ws, "")
-                if cid:
-                    self._cleanup_client_tracking_for_ws(cid, ws)
-        return True
+    async def send_ring0_switch_node(self, node_id: str, *, client_id: str) -> bool:
+        """Send ring0_switch_node to a single browser client.
 
-    async def broadcast_ring0_switch_node(self, node_id: str, *, client_id: str = "") -> bool:
-        """Send ring0_switch_node to a specific client or broadcast to all browsers.
+        Node switches originate from one speaker's request (voice command,
+        MCP call from Ring0), so we target that one client — never fan
+        out to every tab. `client_id` is required.
 
-        The browser updates its active-node selection in response. Mirrors
-        broadcast_ring0_switch_ui for the standalone node-switch case.
-
-        Returns True if sent successfully, False if the target client was not found.
+        Returns True if sent successfully, False if the target client was
+        not connected.
         """
+        if not client_id:
+            raise ValueError("send_ring0_switch_node requires client_id")
         msg = json.dumps({"type": "ring0_switch_node", "nodeId": node_id})
 
-        if client_id:
-            ws = self._ws_by_client.get(client_id)
-            if not ws:
-                for cid, w in self._ws_by_client.items():
-                    if cid.startswith(client_id):
-                        ws = w
-                        break
-            if ws and not ws.closed:
-                try:
-                    await ws.send_str(msg)
-                    return True
-                except Exception:
-                    pass
-            return False
-
-        # Broadcast to all browsers
-        for session in self._sessions.values():
-            dead: list[web.WebSocketResponse] = []
-            for ws in session.browser_sockets:
-                try:
-                    await ws.send_str(msg)
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                cid = session.browser_sockets.pop(ws, "")
-                if cid:
-                    self._cleanup_client_tracking_for_ws(cid, ws)
-        return True
+        ws = self._ws_by_client.get(client_id)
+        if not ws:
+            for cid, w in self._ws_by_client.items():
+                if cid.startswith(client_id):
+                    ws = w
+                    break
+        if ws and not ws.closed:
+            try:
+                await ws.send_str(msg)
+                return True
+            except Exception:
+                pass
+        return False
 
     def get_message_history(self, session_id: str) -> list[dict[str, Any]]:
         """Get message history for a session (used by Ring0 MCP)."""
@@ -3205,7 +3211,6 @@ class WsBridge:
             "type": "permission_cancelled",
             "request_id": request_id,
         })
-        await self._push_to_native_clients(session.id, "permission_cancelled", {"request_id": request_id})
         return True
 
     async def send_to_browsers(self, session_id: str, msg: dict[str, Any]) -> None:
@@ -3293,11 +3298,6 @@ class WsBridge:
 
     async def _push_to_native_clients(self, session_id: str, event: str, payload: dict[str, Any] | None = None) -> None:
         """Push a notification to native clients subscribed to *session_id*."""
-        # On vibr8-node: forward to hub instead of pushing locally (the
-        # node has no native clients of its own — they live on the hub).
-        if self._native_push_hook:
-            await self._native_push_hook(session_id, event, payload)
-            return
         if not self._native_ws_by_client:
             return
         msg: dict[str, Any] = {"type": "push", "event": event, "sessionId": session_id}

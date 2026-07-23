@@ -72,6 +72,12 @@ export interface NodeInfo {
   hostname: string;
   sessionCount: number;
   ring0Enabled: boolean;
+  // Optional live title published by the node (e.g. currently-viewed
+  // session name). Pushed via /ws/hub-shell on change.
+  title?: string;
+  // Contract capability flags (docs/hub-node-contract-v1.md), e.g.
+  // "ui/v1", "desktop/v1". Absent on pre-contract nodes.
+  contract?: string[];
 }
 
 export interface AndroidDeviceInfo {

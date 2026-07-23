@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
+import { NODE_MODE } from "../nodeMode.js";
 import { connectSession, disconnectSession, applyLocalNodeSwitch } from "../ws.js";
 import { startWebRTC, stopWebRTC, stopDesktopStream } from "../webrtc.js";
 import { destroyTerminal } from "./TerminalView.js";
@@ -11,7 +12,6 @@ export function Sidebar() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [showEnvManager, setShowEnvManager] = useState(false);
-  const [authEnabled, setAuthEnabled] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [ring0SessionId, setRing0SessionId] = useState<string | null>(null);
   const [ring0EventsMuted, setRing0EventsMuted] = useState(false);
@@ -70,13 +70,6 @@ export function Sidebar() {
       newSessionRef.current?.focus();
     });
   }, [sidebarOpen]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Check if auth is enabled
-  useEffect(() => {
-    fetch("/api/auth/me").then((r) => r.json()).then((data) => {
-      if (data.authEnabled) setAuthEnabled(true);
-    }).catch(() => {});
-  }, []);
 
   // Poll for SDK sessions on mount and when active node changes
   useEffect(() => {
@@ -375,8 +368,6 @@ export function Sidebar() {
 
   const activeSessions = allSessionList.filter((s) => !s.archived);
   const archivedSessions = allSessionList.filter((s) => s.archived);
-  const currentSession = currentSessionId ? allSessionList.find((s) => s.id === currentSessionId) : null;
-  const logoSrc = currentSession?.backendType === "codex" ? "/logo-codex.svg" : "/logo.svg";
 
   function startRename(id: string, currentLabel: string) {
     const session = allSessionList.find((s) => s.id === id);
@@ -646,13 +637,11 @@ export function Sidebar() {
 
   return (
     <aside aria-label="Sessions" className="w-[260px] h-full flex flex-col bg-cc-sidebar border-r border-cc-border">
-      {/* Header */}
-      <div className="p-4 pb-3">
-        <div className="flex items-center gap-2">
-          <img src={logoSrc} alt="" className="h-[2.2em] w-auto" />
-          <span className="text-2xl font-semibold text-cc-fg tracking-tight">vibr8</span>
-        </div>
-      </div>
+      {/* Header — the vibr8 logo/wordmark belongs to the hub shell strip,
+          not the node-vended UI. When a non-terminal session is active,
+          the Chat/Editor view toggle lives here (moved out of the old
+          TopBar). */}
+      <ChatEditorToggle />
 
       {/* Worktree archive confirmation */}
       {confirmArchiveId && (
@@ -687,8 +676,9 @@ export function Sidebar() {
       {/* Session list */}
       <div className="flex-1 overflow-hidden relative">
         <div ref={sidebarListRef} className="h-full overflow-y-auto px-2 pb-14" data-session-list>
-          {/* Node switcher — only shown when remote nodes or android devices exist */}
-          {(nodes.length > 1 || androidDevices.length > 0) && (
+          {/* Node switcher — only shown when remote nodes or android devices
+              exist, and never in node mode (the shell owns node switching) */}
+          {!NODE_MODE && (nodes.length > 1 || androidDevices.length > 0) && (
             <div className="px-3 pt-2 pb-1">
               <select
                 value={activeNodeId}
@@ -833,15 +823,6 @@ export function Sidebar() {
         <SpeakerGateSelector />
         <div className="p-3 space-y-0.5">
         <button
-          onClick={() => { window.location.hash = "#/settings"; }}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-[10px] text-sm text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
-        >
-          <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-            <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
-          </svg>
-          <span>Settings</span>
-        </button>
-        <button
           onClick={() => setShowEnvManager(true)}
           className="w-full flex items-center gap-2.5 px-3 py-2 rounded-[10px] text-sm text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer"
         >
@@ -918,21 +899,6 @@ export function Sidebar() {
             <span>Restart Server</span>
           </button>
         )}
-        {authEnabled && (
-          <button
-            onClick={() => {
-              fetch("/api/auth/logout", { method: "POST" }).finally(() => {
-                window.location.reload();
-              });
-            }}
-            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-[10px] text-sm text-cc-muted hover:text-red-400 hover:bg-cc-hover transition-colors cursor-pointer"
-          >
-            <svg viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-              <path fillRule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 001 1h5a1 1 0 100-2H4V5h4a1 1 0 100-2H3zm11.293 3.293a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 01-1.414-1.414L15.586 11H8a1 1 0 110-2h7.586l-1.293-1.293a1 1 0 010-1.414z" clipRule="evenodd" />
-            </svg>
-            <span>Sign out</span>
-          </button>
-        )}
         </div>
       </div>
 
@@ -941,6 +907,53 @@ export function Sidebar() {
         <EnvManager onClose={() => setShowEnvManager(false)} />
       )}
     </aside>
+  );
+}
+
+// ── Chat / Editor view toggle ────────────────────────────────────────────────
+// Sits at the top of the sidebar as the header. Hidden when no
+// non-terminal session is active — same visibility rule the old
+// TopBar used.
+
+function ChatEditorToggle() {
+  const currentSessionId = useStore((s) => s.currentSessionId);
+  const sdkSessions = useStore((s) => s.sdkSessions);
+  const activeTab = useStore((s) => s.activeTab);
+  const setActiveTab = useStore((s) => s.setActiveTab);
+
+  const isTerminalSession = currentSessionId
+    ? sdkSessions.find((x) => x.sessionId === currentSessionId)?.backendType === "terminal"
+    : false;
+
+  if (!currentSessionId || isTerminalSession) {
+    return <div className="p-4 pb-3" />;
+  }
+
+  return (
+    <div className="px-3 pt-3 pb-2">
+      <div className="flex items-center bg-cc-hover rounded-lg p-0.5">
+        <button
+          onClick={() => setActiveTab("chat")}
+          className={`flex-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
+            activeTab === "chat"
+              ? "bg-cc-card text-cc-fg shadow-sm"
+              : "text-cc-muted hover:text-cc-fg"
+          }`}
+        >
+          Chat
+        </button>
+        <button
+          onClick={() => setActiveTab("editor")}
+          className={`flex-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
+            activeTab === "editor"
+              ? "bg-cc-card text-cc-fg shadow-sm"
+              : "text-cc-muted hover:text-cc-fg"
+          }`}
+        >
+          Editor
+        </button>
+      </div>
+    </div>
   );
 }
 
