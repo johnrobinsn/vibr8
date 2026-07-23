@@ -853,17 +853,46 @@ class WebRTCManager:
             "type": pc.localDescription.type,
         }
 
+    # Known command words that can follow a guard word. Used by
+    # _find_guard_word to prefer occurrences that actually look like a
+    # command over bare mentions of the product name (which are common
+    # in note-mode dictation — a user talking about "vibrate" in a
+    # voice note used to trap `vibrate done` behind mid-utterance
+    # mentions and never exit note mode).
+    _COMMAND_WORDS: tuple[str, ...] = (
+        "done", "off", "guard", "listen", "quiet", "speak",
+        "ring zero", "ring 0", "note", "node", "vibrate", "app",
+    )
+
     @staticmethod
     def _find_guard_word(text_lower: str) -> tuple[int, int] | None:
-        """Find the first occurrence of a guard word in lowered text.
+        """Find a guard-word occurrence in lowered text.
+
+        Prefers an occurrence followed by a known command word so long
+        dictation containing the product name many times still routes a
+        trailing "vibrate done" as the exit signal. Falls back to the
+        first occurrence when no command follows any of them so
+        guard-mode gating still fires on pass-through speech.
 
         Returns (start_index, end_index) or None.
         """
+        matches: list[tuple[int, int]] = []
         for word in ("vibr8", "vibrate"):
-            idx = text_lower.find(word)
-            if idx != -1:
-                return (idx, idx + len(word))
-        return None
+            i = 0
+            while True:
+                idx = text_lower.find(word, i)
+                if idx == -1:
+                    break
+                matches.append((idx, idx + len(word)))
+                i = idx + 1
+        if not matches:
+            return None
+        matches.sort()
+        for m in matches:
+            after = text_lower[m[1]:].strip().lstrip(".,;:!?- ").strip()
+            if any(after.startswith(cmd) for cmd in WebRTCManager._COMMAND_WORDS):
+                return m
+        return matches[0]
 
     def _make_stt_listener(self, client_id: str, peer_key: str | None = None):
         """Create an STT event listener that submits transcripts to the agent.
@@ -1492,22 +1521,40 @@ class WebRTCManager:
             result = mode.on_disconnect()
             if result:
                 logger.info("[voice-mode] peer %s: flushing on disconnect", peer_key)
-                # Prefer Ring0 via NodeClient (works in self-node mode); fall
-                # through to the active session if Ring0 is disabled.
+                # Route to the client's active node's Ring0 via the tunnel,
+                # matching the "vibrate done" path. Using self._local_node_ops
+                # here (as we used to) is broken on the stateless hub: the
+                # hub's local_node_ops stays NOT_READY, the fallback to
+                # ws_bridge.submit_user_message writes to a phantom hub-side
+                # "ring0" session with no CLI attached, and the flushed note
+                # never reaches the real Ring0 on the active node.
                 delivered = False
-                if self._local_node_ops:
-                    try:
-                        ring0_result = await self._local_node_ops.ring0_input(
-                            text=result, source_client_id=client_id,
-                        )
-                        if "error" not in ring0_result:
+                if self._node_registry:
+                    active_nid = self._client_active_node(client_id)
+                    node = self._node_registry.get_node(active_nid) if active_nid else None
+                    if node and node.tunnel and node.status == "online":
+                        contract = node.capabilities.get("contract") or []
+                        try:
+                            if "events/v1" in contract:
+                                await node.tunnel.send_fire_and_forget({
+                                    "type": "transcript",
+                                    "text": result,
+                                    "clientId": client_id,
+                                })
+                            else:
+                                await node.tunnel.send_fire_and_forget({
+                                    "type": "ring0_input",
+                                    "text": result,
+                                    "sourceClientId": client_id,
+                                })
                             delivered = True
-                    except Exception:
-                        logger.exception("[voice-mode] ring0_input failed; falling through")
+                        except Exception:
+                            logger.exception("[voice-mode] disconnect flush tunnel send failed")
                 if not delivered:
-                    target_session = self._current_session_for(client_id)
-                    if target_session:
-                        await self._ws_bridge.submit_user_message(target_session, result, source_client_id=client_id)
+                    logger.warning(
+                        "[voice-mode] disconnect flush for client %s had no routable active node — dropped",
+                        client_id[:8],
+                    )
 
         pc = self._connections.pop(peer_key, None)
         self._stats.pop(peer_key, None)
