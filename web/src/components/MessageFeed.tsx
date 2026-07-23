@@ -433,6 +433,15 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
     if (isNearBottom.current) {
       const el = containerRef.current;
       if (!el) return;
+      // Suppress the auto-scroll when the user is actively selecting
+      // text in the feed — Chrome collapses or mutates a live selection
+      // when the scroll container's scrollTop changes underneath it, so
+      // a smooth-scroll firing on a state tick (e.g. Generating…
+      // elapsed) yanks the selection out from under the drag.
+      const sel = typeof window !== "undefined" ? window.getSelection() : null;
+      if (sel && sel.toString().length > 0 && el.contains(sel.anchorNode)) {
+        return;
+      }
       const instant = justSwitchedRef.current;
       // Only clear the flag once we've actually scrolled with messages present
       if (justSwitchedRef.current && messages.length > 0) {
@@ -446,11 +455,15 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
         el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
       }
     }
-    // sessionStatus + elapsed are in the deps so the "Generating…" bar
-    // (which appears only when sessionStatus === "running" && elapsed > 0)
-    // scrolls into view as soon as it lands in the DOM, instead of being
-    // left below the viewport until the first streaming delta arrives.
-  }, [messages.length, streamingText, voicePreview, sessionStatus, elapsed]);
+    // sessionStatus is in the deps so the "Generating…" bar (visible
+    // only while sessionStatus === "running") scrolls into view when
+    // it first appears. `elapsed` is intentionally NOT in the deps —
+    // it ticks every second and re-firing the smooth-scroll on every
+    // tick fights user text selection (Chrome cancels/mutates a live
+    // selection when the container's scrollTop changes). The bar's
+    // DOM position is stable after it appears, so re-scrolling per
+    // tick has no visual benefit anyway.
+  }, [messages.length, streamingText, voicePreview, sessionStatus]);
 
   if (messages.length === 0 && !streamingText && !voicePreview) {
     return (
