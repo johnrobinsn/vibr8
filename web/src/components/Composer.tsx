@@ -175,11 +175,31 @@ export function Composer({ sessionId }: { sessionId: string }) {
     let content = msg;
     if (files.length > 0) {
       const paths: string[] = [];
-      for (const file of files) {
-        const blob = await fetch(`data:${file.mediaType};base64,${file.base64}`).then((r) => r.blob());
-        const f = new File([blob], file.name, { type: file.mediaType });
-        const { path } = await api.uploadToSession(sessionId, f);
-        paths.push(path);
+      try {
+        for (const file of files) {
+          // Decode base64 → File directly. Do NOT roundtrip via
+          // `fetch("data:...")` — Chrome silently fails on data URLs
+          // above ~2MB, which is where a multi-MB PDF attachment used
+          // to disappear on submit with no visible error.
+          const binary = atob(file.base64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          const f = new File([bytes], file.name, { type: file.mediaType });
+          const { path } = await api.uploadToSession(sessionId, f);
+          paths.push(path);
+        }
+      } catch (err) {
+        // Surface the failure — without this, any throw in the upload
+        // path leaves the send button looking broken (no visible
+        // feedback, the message never leaves the composer).
+        const detail = err instanceof Error ? err.message : String(err);
+        useStore.getState().appendMessage(sessionId, {
+          id: `sys-${Date.now()}-${++idCounter}`,
+          role: "system",
+          content: `Attachment upload failed: ${detail}`,
+          timestamp: Date.now(),
+        });
+        return;
       }
       const fileList = paths.map((p) => `[attached file: ${p}]`).join("\n");
       content = msg ? `${fileList}\n${msg}` : fileList;
