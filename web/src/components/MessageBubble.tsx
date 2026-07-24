@@ -1,4 +1,4 @@
-import { useState, useMemo, type ComponentProps } from "react";
+import { memo, useState, useMemo, type ComponentProps } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock, EventMeta } from "../types.js";
@@ -40,7 +40,15 @@ function MessageTooltip({ message, align }: { message: ChatMessage; align: "left
   );
 }
 
-export function MessageBubble({ message }: { message: ChatMessage }) {
+// `MessageBubble` is exported as a `memo`'d wrapper (see the export below)
+// so unrelated parent re-renders — the App-level nodes poll every 5s,
+// the MessageFeed elapsed tick every 1s while generating — don't cascade
+// into every message's reconciliation. Without this, React reconciles
+// each bubble on every parent re-render and Chrome interprets the
+// resulting text-node writes as mutations, collapsing any active text
+// selection inside the feed (both idle-clear-after-a-few-seconds and
+// bounce-during-generation symptoms).
+function MessageBubbleImpl({ message }: { message: ChatMessage }) {
   if (message.role === "system") {
     return (
       <div className="flex items-center gap-3 py-1">
@@ -91,6 +99,15 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
     </div>
   );
 }
+
+// Skip reconciliation when the message reference is unchanged. Message
+// references in the store are stable — `appendMessage` and
+// `replaceMessage` are the only mutation paths and both produce a fresh
+// object for the affected message only. So identity equality is both
+// safe and precise: only the specific bubble whose message actually
+// changed re-renders, everything else keeps its DOM (and any live text
+// selection anchored inside it).
+export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => prev.message === next.message);
 
 interface ToolGroupItem {
   id: string;
