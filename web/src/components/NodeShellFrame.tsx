@@ -91,7 +91,6 @@ export function NodeShellFrame({
           </span>
           <span className="text-sm font-semibold text-cc-fg tracking-tight">vibr8</span>
         </div>
-        <span className="text-xs text-cc-muted">node</span>
         {pinned ? (
           // Pinned deeplink (?pin=…) — hide the switcher, render just
           // the current node's name. Node switching (voice command
